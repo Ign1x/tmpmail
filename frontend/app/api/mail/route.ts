@@ -134,6 +134,8 @@ function buildResponseHeaders(response: Response): Headers {
   headers.delete("content-length");
   headers.delete("transfer-encoding");
   headers.delete("connection");
+  headers.set("Cache-Control", "no-store, private");
+  headers.set("Pragma", "no-cache");
   return headers;
 }
 
@@ -232,10 +234,25 @@ function createAuthHeaders(
   contentType?: string,
 ): HeadersInit {
   const authHeader = request.headers.get("Authorization");
+  const forwardedProto =
+    request.headers.get("X-Forwarded-Proto")?.trim() ||
+    request.nextUrl.protocol.replace(":", "");
+  const forwardedHost =
+    request.headers.get("X-Forwarded-Host")?.trim() ||
+    request.headers.get("Host")?.trim() ||
+    request.nextUrl.host;
   const headers: Record<string, string> = {};
 
   if (authHeader) {
     headers.Authorization = authHeader;
+  }
+
+  if (forwardedProto) {
+    headers["X-Forwarded-Proto"] = forwardedProto;
+  }
+
+  if (forwardedHost) {
+    headers["X-Forwarded-Host"] = forwardedHost;
   }
 
   if (contentType) {

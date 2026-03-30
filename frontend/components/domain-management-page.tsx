@@ -23,7 +23,6 @@ import {
   type AdminMetricsResponse,
   createManagedDomain,
   fetchManagedDomains,
-  getAdminAccessKey,
   getAdminAuditLogs,
   getAdminMetrics,
   getAdminStatus,
@@ -40,9 +39,28 @@ import type { Domain, DomainDnsRecord } from "@/types"
 import { DEFAULT_PROVIDER_ID, DEFAULT_PROVIDER_NAME } from "@/lib/provider-config"
 
 const ADMIN_SESSION_STORAGE_KEY = "tmpmail-admin-session"
+const ADMIN_KEY_VISIBLE_MS = 60_000
 
 interface DomainManagementPageProps {
   entryPath: string
+}
+
+function isTrustedAdminContext(): boolean {
+  if (typeof window === "undefined") {
+    return true
+  }
+
+  if (window.isSecureContext || window.location.protocol === "https:") {
+    return true
+  }
+
+  const hostname = window.location.hostname.toLowerCase()
+  return (
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname.endsWith(".localhost")
+  )
 }
 
 function sortManagedDomains(domains: Domain[]): Domain[] {
@@ -104,9 +122,11 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   const [isLoadingOps, setIsLoadingOps] = useState(false)
   const [isRunningCleanup, setIsRunningCleanup] = useState(false)
   const [copiedKey, setCopiedKey] = useState(false)
+  const [isSecureAdminContext, setIsSecureAdminContext] = useState(true)
 
   const hasAdminSession = sessionToken.trim().length > 0
   const needsSetup = !status?.isPasswordConfigured
+  const hasVisibleAdminKey = adminApiKey.trim().length > 0
 
   const resetManagedDomainState = () => {
     setManagedDomains([])
@@ -234,14 +254,8 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     }
 
     try {
-      const access = await getAdminAccessKey(trimmedToken, DEFAULT_PROVIDER_ID)
       setSessionToken(trimmedToken)
-      setAdminApiKey(access.apiKey)
-      setStatus((currentStatus) =>
-        currentStatus
-          ? { ...currentStatus, hasGeneratedApiKey: true }
-          : currentStatus,
-      )
+      setAdminApiKey("")
       try {
         sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, trimmedToken)
       } catch {}
@@ -276,6 +290,10 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }
 
   useEffect(() => {
+    setIsSecureAdminContext(isTrustedAdminContext())
+  }, [])
+
+  useEffect(() => {
     const bootstrap = async () => {
       setIsBootstrapping(true)
 
@@ -285,8 +303,10 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
 
         if (typeof window !== "undefined" && nextStatus.isPasswordConfigured) {
           const storedToken = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY)?.trim() || ""
-          if (storedToken) {
+          if (storedToken && isTrustedAdminContext()) {
             await restoreAdminSession(storedToken, true)
+          } else if (storedToken) {
+            clearAdminSession()
           }
         }
       } catch (error) {
@@ -304,7 +324,30 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     void bootstrap()
   }, [])
 
+  useEffect(() => {
+    if (!hasVisibleAdminKey) {
+      return
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setAdminApiKey("")
+      setCopiedKey(false)
+    }, ADMIN_KEY_VISIBLE_MS)
+
+    return () => window.clearTimeout(timeoutId)
+  }, [hasVisibleAdminKey])
+
   const handleSetupAdmin = async () => {
+    if (!isSecureAdminContext) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
     if (setupPassword.trim().length < 8) {
       toast({
         title: ta("passwordTooShort"),
@@ -363,6 +406,16 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }
 
   const handleLoginAdmin = async () => {
+    if (!isSecureAdminContext) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
     if (!loginPassword.trim()) {
       toast({
         title: ta("loginPasswordRequired"),
@@ -391,7 +444,17 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }
 
   const handleCopyAdminKey = async () => {
-    if (!adminApiKey.trim()) {
+    if (!hasVisibleAdminKey) {
+      return
+    }
+
+    if (!isSecureAdminContext) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
       return
     }
 
@@ -416,6 +479,16 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
 
   const handleRegenerateKey = async () => {
     if (!hasAdminSession) {
+      return
+    }
+
+    if (!isSecureAdminContext) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
       return
     }
 
@@ -819,6 +892,13 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                 </p>
               </div>
 
+              {!isSecureAdminContext && (
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-200">
+                  <div className="font-semibold">{ta("insecureContextTitle")}</div>
+                  <div className="mt-1 leading-6">{ta("insecureContextDescription")}</div>
+                </div>
+              )}
+
               {isBootstrapping ? (
                 <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
                   {ta("loadingStatus")}
@@ -848,6 +928,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                     className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
                     onPress={handleSetupAdmin}
                     isLoading={isSubmittingSetup}
+                    isDisabled={!isSecureAdminContext}
                   >
                     {ta("setupSubmit")}
                   </Button>
@@ -873,31 +954,54 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                     <div className="mb-3 flex items-center justify-between gap-3">
                       <div>
                         <div className="text-sm font-semibold">{ta("generatedKeyTitle")}</div>
-                        <div className="text-xs text-slate-400">{ta("generatedKeyDescription")}</div>
+                        <div className="text-xs text-slate-400">
+                          {hasVisibleAdminKey
+                            ? ta("generatedKeyDescription")
+                            : ta("keyHiddenDescription")}
+                        </div>
                       </div>
                       <KeyRound size={16} className="text-sky-300" />
                     </div>
-                    <code className="block break-all font-mono text-[13px] leading-6 text-slate-100">
-                      {adminApiKey || ta("keyLoading")}
-                    </code>
+                    {hasVisibleAdminKey ? (
+                      <>
+                        <code className="block break-all font-mono text-[13px] leading-6 text-slate-100">
+                          {adminApiKey}
+                        </code>
+                        <div className="mt-3 text-xs text-amber-300">
+                          {ta("keyAutoHideHint")}
+                        </div>
+                      </>
+                    ) : (
+                      <div className="space-y-2 text-sm text-slate-300">
+                        <div>{ta("keyHiddenTitle")}</div>
+                        <div className="text-xs leading-6 text-slate-400">
+                          {status?.hasGeneratedApiKey
+                            ? ta("keyStoredSecurelyDescription")
+                            : ta("keyLoading")}
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap gap-3">
-                    <Button
-                      color="primary"
-                      className="rounded-full bg-sky-600 text-white hover:bg-sky-700"
-                      startContent={copiedKey ? <Check size={16} /> : <Copy size={16} />}
-                      onPress={handleCopyAdminKey}
-                      isDisabled={!adminApiKey}
-                    >
-                      {copiedKey ? ta("keyCopiedAction") : ta("copyKey")}
-                    </Button>
+                    {hasVisibleAdminKey && (
+                      <Button
+                        color="primary"
+                        className="rounded-full bg-sky-600 text-white hover:bg-sky-700"
+                        startContent={copiedKey ? <Check size={16} /> : <Copy size={16} />}
+                        onPress={handleCopyAdminKey}
+                        isDisabled={!isSecureAdminContext}
+                      >
+                        {copiedKey ? ta("keyCopiedAction") : ta("copyKey")}
+                      </Button>
+                    )}
                     <Button
                       variant="bordered"
                       className="rounded-full"
                       startContent={<RotateCw size={16} />}
                       onPress={handleRegenerateKey}
                       isLoading={isRefreshingKey}
+                      isDisabled={!isSecureAdminContext}
                     >
                       {ta("regenerateKey")}
                     </Button>
@@ -919,6 +1023,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                     className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
                     onPress={handleLoginAdmin}
                     isLoading={isSubmittingLogin}
+                    isDisabled={!isSecureAdminContext}
                   >
                     {ta("loginSubmit")}
                   </Button>

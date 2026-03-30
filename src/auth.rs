@@ -2,7 +2,10 @@ use argon2::{
     Argon2,
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString},
 };
-use axum::http::{HeaderMap, header::AUTHORIZATION};
+use axum::http::{
+    HeaderMap,
+    header::{AUTHORIZATION, FORWARDED, HOST},
+};
 use chrono::{Duration, Utc};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand_core::OsRng;
@@ -107,6 +110,7 @@ pub fn is_valid_admin_session_token(token: &str, config: &Config) -> bool {
 }
 
 pub fn require_admin_session(headers: &HeaderMap, config: &Config) -> AppResult<()> {
+    require_secure_admin_transport(headers)?;
     let token = bearer_token(headers)?;
 
     if !is_valid_admin_session_token(&token, config) {
@@ -137,4 +141,65 @@ pub fn optional_bearer_token(headers: &HeaderMap) -> Option<String> {
 pub fn bearer_token(headers: &HeaderMap) -> AppResult<String> {
     optional_bearer_token(headers)
         .ok_or_else(|| ApiError::unauthorized("missing Authorization header"))
+}
+
+pub fn require_secure_admin_transport(headers: &HeaderMap) -> AppResult<()> {
+    if is_local_request(headers) || is_secure_forwarded_request(headers) {
+        return Ok(());
+    }
+
+    Err(ApiError::forbidden(
+        "admin credentials require HTTPS or a trusted local connection",
+    ))
+}
+
+fn is_secure_forwarded_request(headers: &HeaderMap) -> bool {
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').next().unwrap_or(value).trim().to_ascii_lowercase());
+    if forwarded_proto.as_deref() == Some("https") {
+        return true;
+    }
+
+    headers
+        .get(FORWARDED)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("proto=https"))
+        .unwrap_or(false)
+}
+
+fn is_local_request(headers: &HeaderMap) -> bool {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(HOST))
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_host)
+        .unwrap_or_default();
+
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
+        || host.ends_with(".localhost")
+}
+
+fn normalize_host(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Some(stripped) = trimmed.strip_prefix('[') {
+        return stripped
+            .split(']')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+    }
+
+    trimmed
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
 }

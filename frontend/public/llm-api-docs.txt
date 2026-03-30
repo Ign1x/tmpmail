@@ -9,6 +9,8 @@ Authentication
 
 2. Admin API key
 - Domain-management endpoints use the administrator API key generated inside the admin console after the admin password is configured.
+- The key is shown only when it is first created or rotated. The server stores only a hash and cannot reveal the previous plaintext value again.
+- Use HTTPS on any public network before transmitting the administrator password, session token, or admin API key.
 - Send it as: Authorization: Bearer <admin-api-key>
 
 Core Endpoints
@@ -78,7 +80,7 @@ Typical Admin Flow
 
 1. Open the configured admin entry in the frontend. The default entry is /admin.
 2. Set the admin password on first access, then log in.
-3. Copy the generated administrator API key if you need to manage the system outside the web UI.
+3. Copy the generated administrator API key once if you need to manage the system outside the web UI, and store it in your own secret manager.
 4. Create a domain with POST /domains.
 5. Read DNS records from GET /domains/:id/records.
 6. Verify with POST /domains/:id/verify.

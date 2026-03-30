@@ -1,7 +1,11 @@
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
+        header::{CACHE_CONTROL, PRAGMA},
+    },
+    response::IntoResponse,
 };
 
 use crate::{
@@ -25,8 +29,10 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatus
 
 pub async fn setup(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<AdminPasswordRequest>,
-) -> AppResult<(StatusCode, Json<AdminSetupResponse>)> {
+) -> AppResult<impl IntoResponse> {
+    auth::require_secure_admin_transport(&headers)?;
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.setup_password(&payload.password)?;
     let session_token = auth::issue_admin_session_token(&state.config)?;
@@ -43,6 +49,7 @@ pub async fn setup(
 
     Ok((
         StatusCode::CREATED,
+        sensitive_headers(),
         Json(AdminSetupResponse {
             session_token,
             api_key,
@@ -52,8 +59,10 @@ pub async fn setup(
 
 pub async fn login(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(payload): Json<AdminPasswordRequest>,
-) -> AppResult<Json<AdminSessionResponse>> {
+) -> AppResult<impl IntoResponse> {
+    auth::require_secure_admin_transport(&headers)?;
     let admin_state = state.admin_state.read().await;
     if !admin_state.is_password_configured() {
         return Err(ApiError::forbidden("admin password is not configured"));
@@ -74,26 +83,29 @@ pub async fn login(
         );
     }
 
-    Ok(Json(AdminSessionResponse {
-        session_token: auth::issue_admin_session_token(&state.config)?,
-    }))
+    Ok((
+        sensitive_headers(),
+        Json(AdminSessionResponse {
+            session_token: auth::issue_admin_session_token(&state.config)?,
+        }),
+    ))
 }
 
 pub async fn access_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> AppResult<Json<AdminAccessKeyResponse>> {
+) -> AppResult<impl IntoResponse> {
     auth::require_admin_session(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.get_or_create_api_key()?;
 
-    Ok(Json(AdminAccessKeyResponse { api_key }))
+    Ok((sensitive_headers(), Json(AdminAccessKeyResponse { api_key })))
 }
 
 pub async fn regenerate_access_key(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> AppResult<Json<AdminAccessKeyResponse>> {
+) -> AppResult<impl IntoResponse> {
     auth::require_admin_session(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.regenerate_api_key()?;
@@ -108,14 +120,14 @@ pub async fn regenerate_access_key(
         );
     }
 
-    Ok(Json(AdminAccessKeyResponse { api_key }))
+    Ok((sensitive_headers(), Json(AdminAccessKeyResponse { api_key })))
 }
 
 pub async fn change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(payload): Json<AdminPasswordChangeRequest>,
-) -> AppResult<StatusCode> {
+) -> AppResult<impl IntoResponse> {
     auth::require_admin_session(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     admin_state.change_password(&payload.current_password, &payload.new_password)?;
@@ -130,5 +142,12 @@ pub async fn change_password(
         );
     }
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok((StatusCode::NO_CONTENT, sensitive_headers()))
+}
+
+fn sensitive_headers() -> [(HeaderName, HeaderValue); 2] {
+    [
+        (CACHE_CONTROL, HeaderValue::from_static("no-store, private")),
+        (PRAGMA, HeaderValue::from_static("no-cache")),
+    ]
 }

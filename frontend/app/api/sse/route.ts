@@ -105,6 +105,13 @@ export async function GET(request: NextRequest) {
   try {
     const upstreamBaseUrl = getApiBaseUrl(request).replace(/\/+$/, "")
     const upstreamUrl = `${upstreamBaseUrl}/events?accountId=${encodeURIComponent(accountId)}`
+    const forwardedProto =
+      request.headers.get("X-Forwarded-Proto")?.trim() ||
+      request.nextUrl.protocol.replace(":", "")
+    const forwardedHost =
+      request.headers.get("X-Forwarded-Host")?.trim() ||
+      request.headers.get("Host")?.trim() ||
+      request.nextUrl.host
 
     const upstream = await fetch(upstreamUrl, {
       method: "GET",
@@ -112,6 +119,8 @@ export async function GET(request: NextRequest) {
         Authorization: authHeader,
         Accept: "text/event-stream",
         "Cache-Control": "no-cache",
+        ...(forwardedProto ? { "X-Forwarded-Proto": forwardedProto } : {}),
+        ...(forwardedHost ? { "X-Forwarded-Host": forwardedHost } : {}),
       },
       signal: controller.signal,
       cache: "no-store",

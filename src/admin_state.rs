@@ -20,6 +20,8 @@ const MIN_ADMIN_PASSWORD_LENGTH: usize = 8;
 struct PersistedAdminState {
     password_hash: Option<String>,
     api_key: Option<String>,
+    api_key_hash: Option<String>,
+    api_key_hint: Option<String>,
     created_at: Option<DateTime<Utc>>,
     updated_at: Option<DateTime<Utc>>,
     password_updated_at: Option<DateTime<Utc>>,
@@ -36,8 +38,10 @@ impl AdminStateStore {
     pub fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
         let path = path.into();
         let persisted = read_persisted_state(&path)?;
+        let mut store = Self { path, persisted };
+        store.migrate_legacy_api_key_if_needed()?;
 
-        Ok(Self { path, persisted })
+        Ok(store)
     }
 
     pub fn is_password_configured(&self) -> bool {
@@ -49,11 +53,18 @@ impl AdminStateStore {
     }
 
     pub fn has_generated_api_key(&self) -> bool {
-        self.persisted
-            .api_key
+        self
+            .persisted
+            .api_key_hash
             .as_deref()
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
+            || self
+                .persisted
+                .api_key
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false)
     }
 
     pub fn verify_password(&self, password: &str) -> AppResult<bool> {
@@ -74,19 +85,18 @@ impl AdminStateStore {
         validate_password(password)?;
 
         let now = Utc::now();
+        let api_key = generate_admin_api_key();
         self.persisted.password_hash = Some(auth::hash_password(password)?);
-        self.persisted.api_key = Some(generate_admin_api_key());
+        self.persisted.api_key = None;
+        self.persisted.api_key_hash = Some(auth::hash_password(&api_key)?);
+        self.persisted.api_key_hint = Some(mask_api_key(&api_key));
         self.persisted.created_at = Some(now);
         self.persisted.updated_at = Some(now);
         self.persisted.password_updated_at = Some(now);
         self.persisted.api_key_updated_at = Some(now);
         self.save()?;
 
-        Ok(self
-            .persisted
-            .api_key
-            .clone()
-            .expect("admin api key should exist after setup"))
+        Ok(api_key)
     }
 
     pub fn change_password(&mut self, current_password: &str, new_password: &str) -> AppResult<()> {
@@ -104,18 +114,17 @@ impl AdminStateStore {
     }
 
     pub fn get_or_create_api_key(&mut self) -> AppResult<String> {
-        if let Some(api_key) = self
-            .persisted
-            .api_key
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-        {
-            return Ok(api_key.to_owned());
+        if self.has_generated_api_key() {
+            return Err(ApiError::forbidden(
+                "admin api key is write-only; rotate it to issue a new key",
+            ));
         }
 
         let now = Utc::now();
         let api_key = generate_admin_api_key();
-        self.persisted.api_key = Some(api_key.clone());
+        self.persisted.api_key = None;
+        self.persisted.api_key_hash = Some(auth::hash_password(&api_key)?);
+        self.persisted.api_key_hint = Some(mask_api_key(&api_key));
         self.persisted.updated_at = Some(now);
         self.persisted.api_key_updated_at = Some(now);
         self.save()?;
@@ -126,7 +135,9 @@ impl AdminStateStore {
     pub fn regenerate_api_key(&mut self) -> AppResult<String> {
         let now = Utc::now();
         let api_key = generate_admin_api_key();
-        self.persisted.api_key = Some(api_key.clone());
+        self.persisted.api_key = None;
+        self.persisted.api_key_hash = Some(auth::hash_password(&api_key)?);
+        self.persisted.api_key_hint = Some(mask_api_key(&api_key));
         self.persisted.updated_at = Some(now);
         self.persisted.api_key_updated_at = Some(now);
         self.save()?;
@@ -135,8 +146,16 @@ impl AdminStateStore {
     }
 
     pub fn matches_api_key(&self, token: &str) -> bool {
-        self
+        if let Some(api_key_hash) = self
             .persisted
+            .api_key_hash
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            return auth::verify_password(token, api_key_hash).unwrap_or(false);
+        }
+
+        self.persisted
             .api_key
             .as_deref()
             .map(|value| value == token)
@@ -161,9 +180,46 @@ impl AdminStateStore {
 
         Ok(())
     }
+
+    fn migrate_legacy_api_key_if_needed(&mut self) -> AppResult<()> {
+        let Some(legacy_api_key) = self
+            .persisted
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+        else {
+            return Ok(());
+        };
+
+        if self
+            .persisted
+            .api_key_hash
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false)
+        {
+            self.persisted.api_key = None;
+            self.save()?;
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        self.persisted.api_key_hash = Some(auth::hash_password(&legacy_api_key)?);
+        self.persisted.api_key_hint = Some(mask_api_key(&legacy_api_key));
+        self.persisted.api_key = None;
+        self.persisted.updated_at = Some(now);
+        self.persisted.api_key_updated_at = Some(now);
+        self.save()
+    }
 }
 
 pub async fn is_admin_access(headers: &axum::http::HeaderMap, state: &AppState) -> bool {
+    if auth::require_secure_admin_transport(headers).is_err() {
+        return false;
+    }
+
     let Some(token) = auth::optional_bearer_token(headers) else {
         return false;
     };
@@ -180,6 +236,7 @@ pub async fn require_admin_access(
     headers: &axum::http::HeaderMap,
     state: &AppState,
 ) -> AppResult<()> {
+    auth::require_secure_admin_transport(headers)?;
     let token = auth::bearer_token(headers)?;
 
     if auth::is_valid_admin_session_token(&token, &state.config) {
@@ -230,4 +287,68 @@ fn hex_encode(bytes: &[u8]) -> String {
         output.push_str(&format!("{byte:02x}"));
     }
     output
+}
+
+fn mask_api_key(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= 8 {
+        return "hidden".to_owned();
+    }
+
+    format!("{}...{}", &trimmed[..6], &trimmed[trimmed.len().saturating_sub(4)..])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{env, fs, path::PathBuf};
+
+    use uuid::Uuid;
+
+    use super::{AdminStateStore, PersistedAdminState};
+
+    fn temp_state_path(name: &str) -> PathBuf {
+        env::temp_dir().join(format!("tmpmail-{name}-{}.json", Uuid::new_v4()))
+    }
+
+    #[test]
+    fn stores_generated_admin_key_hashed_only() {
+        let path = temp_state_path("admin-state");
+        let mut store = AdminStateStore::load(&path).expect("load state");
+
+        let api_key = store.setup_password("AdminPass123!").expect("setup password");
+        let raw = fs::read_to_string(&path).expect("read state file");
+
+        assert!(!raw.contains(&api_key));
+        assert!(store.matches_api_key(&api_key));
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn migrates_legacy_plaintext_admin_key() {
+        let path = temp_state_path("legacy-admin-state");
+        let persisted = PersistedAdminState {
+            password_hash: Some("hash".to_owned()),
+            api_key: Some("tmpmail_admin_plaintext".to_owned()),
+            api_key_hash: None,
+            api_key_hint: None,
+            created_at: None,
+            updated_at: None,
+            password_updated_at: None,
+            api_key_updated_at: None,
+        };
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&persisted).expect("serialize"),
+        )
+        .expect("write legacy state");
+
+        let store = AdminStateStore::load(&path).expect("load migrated state");
+        let raw = fs::read_to_string(&path).expect("read migrated state");
+
+        assert!(store.matches_api_key("tmpmail_admin_plaintext"));
+        assert!(!raw.contains("tmpmail_admin_plaintext"));
+
+        let _ = fs::remove_file(path);
+    }
 }
