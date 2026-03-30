@@ -1,0 +1,11 @@
+DuckMail
+.sisyphus
+target
+.env
+frontend/node_modules
+frontend/.next
+output/playwright
+deploy/inbucket/
+inbucket.env
+inbucket.compose.yml
+inbucket-data/

@@ -1,0 +1,97 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
+body {
+  --tmpmail-font-sans: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --tmpmail-font-sans-zh: var(--font-noto-sans-sc), "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", var(--font-inter), system-ui, sans-serif;
+  --tmpmail-font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
+  font-family: var(--tmpmail-font-sans);
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+html[lang^="zh"] body {
+  font-family: var(--tmpmail-font-sans-zh);
+}
+
+code,
+pre,
+kbd,
+samp {
+  font-family: var(--tmpmail-font-mono);
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+.api-docs-page {
+  font-family: var(--tmpmail-font-sans);
+}
+
+html[lang^="zh"] .api-docs-page {
+  font-family: var(--tmpmail-font-sans-zh);
+}
+
+.api-docs-page code,
+.api-docs-page pre,
+.api-docs-page .api-docs-mono {
+  font-family: var(--tmpmail-font-mono) !important;
+  font-feature-settings: "liga" 0, "calt" 0;
+}
+
+img,
+svg,
+video,
+canvas {
+  max-width: 100%;
+  height: auto;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* 移动端优化 */
+@media (max-width: 768px) {
+  /* 防止移动端缩放 */
+  html {
+    -webkit-text-size-adjust: 100%;
+    -ms-text-size-adjust: 100%;
+  }
+
+  /* 优化触摸体验 */
+  button, [role="button"] {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 优化滚动 */
+  * {
+    -webkit-overflow-scrolling: touch;
+  }
+
+  /* 优化输入框 */
+  input, textarea {
+    font-size: 16px; /* 防止iOS缩放 */
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    color-scheme: dark;
+  }
+}

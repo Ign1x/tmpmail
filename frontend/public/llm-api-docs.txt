@@ -1,0 +1,92 @@
+# TmpMail API Reference
+# Base URL: http://127.0.0.1:18081
+
+Authentication
+
+1. Account token
+- POST /token returns a bearer token for mailbox operations.
+- Use this token for /me, /messages, /messages/:id, and DELETE /accounts/:id.
+
+2. Admin API key
+- Domain-management endpoints use the administrator API key generated inside the admin console after the admin password is configured.
+- Send it as: Authorization: Bearer <admin-api-key>
+
+Core Endpoints
+
+GET /healthz
+- Health probe.
+
+GET /domains
+- Without admin API key: returns active public domains.
+- With admin API key: also returns pending managed domains.
+
+POST /domains
+- Admin only.
+- Body:
+{
+  "domain": "mail.example.com"
+}
+
+GET /domains/:id/records
+- Admin only.
+- Returns TXT, MX, and CNAME records for verification.
+
+POST /domains/:id/verify
+- Admin only.
+- Triggers an immediate DNS verification pass.
+
+POST /accounts
+- Create a mailbox account on any active domain.
+- Body:
+{
+  "address": "user@tmpmail.local",
+  "password": "your_password",
+  "expiresIn": 0
+}
+
+POST /token
+- Body:
+{
+  "address": "user@tmpmail.local",
+  "password": "your_password"
+}
+
+GET /me
+- Bearer token required.
+
+DELETE /accounts/:id
+- Bearer token required.
+- Can only delete the currently authenticated account.
+
+GET /messages
+- Bearer token required.
+
+GET /messages/:id
+- Bearer token required.
+
+PATCH /messages/:id
+- Bearer token required.
+- Body:
+{
+  "seen": true
+}
+
+DELETE /messages/:id
+- Bearer token required.
+
+Typical Admin Flow
+
+1. Open the configured admin entry in the frontend. The default entry is /admin.
+2. Set the admin password on first access, then log in.
+3. Copy the generated administrator API key if you need to manage the system outside the web UI.
+4. Create a domain with POST /domains.
+5. Read DNS records from GET /domains/:id/records.
+6. Verify with POST /domains/:id/verify.
+7. Once status becomes active, all users can create accounts on that domain.
+
+Typical User Flow
+
+1. Read active domains from GET /domains.
+2. Create an account with POST /accounts.
+3. Log in with POST /token.
+4. Read mailbox data with /me and /messages.
