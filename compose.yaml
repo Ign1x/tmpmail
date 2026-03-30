@@ -10,6 +10,7 @@ services:
       - .env
     environment:
       TMPMAIL_ADMIN_STATE_PATH: "${TMPMAIL_ADMIN_STATE_PATH:-data/config/admin-state.json}"
+      TMPMAIL_STORE_STATE_PATH: "${TMPMAIL_STORE_STATE_PATH:-data/storage/store-state.json}"
     volumes:
       - ./data:/app/data
     ports:

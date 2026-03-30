@@ -20,9 +20,18 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config) -> anyhow::Result<Self> {
-        let store = MemoryStore::new(&config);
-        let admin_state = AdminStateStore::load(&config.admin_state_path)
-            .with_context(|| format!("failed to initialize admin state from {}", config.admin_state_path))?;
+        let store = MemoryStore::new(&config).with_context(|| {
+            format!(
+                "failed to initialize store from {}",
+                config.store_state_path
+            )
+        })?;
+        let admin_state = AdminStateStore::load(&config.admin_state_path).with_context(|| {
+            format!(
+                "failed to initialize admin state from {}",
+                config.admin_state_path
+            )
+        })?;
         let inbucket_client = if config.ingest_mode == "remote-inbucket" {
             config
                 .inbucket_base_url

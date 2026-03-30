@@ -1,6 +1,11 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
@@ -17,8 +22,9 @@ use crate::{
 const PAGE_SIZE: usize = 30;
 const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_AUDIT_LOGS: usize = 500;
+const STORE_SNAPSHOT_VERSION: u32 = 1;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredDomain {
     id: Uuid,
     domain: String,
@@ -30,7 +36,7 @@ struct StoredDomain {
     updated_at: DateTime<Utc>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredAccount {
     id: Uuid,
     address: String,
@@ -43,7 +49,7 @@ struct StoredAccount {
     expires_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct StoredMessage {
     id: Uuid,
     source_key: Option<String>,
@@ -97,6 +103,16 @@ pub struct StoreStats {
     pub audit_logs_total: usize,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct StoreSnapshot {
+    version: u32,
+    domains: Vec<StoredDomain>,
+    audit_logs: VecDeque<String>,
+    accounts: HashMap<Uuid, StoredAccount>,
+    imported_source_keys: HashSet<String>,
+    messages: HashMap<Uuid, Vec<StoredMessage>>,
+}
+
 #[derive(Debug)]
 pub struct MemoryStore {
     domains: Vec<StoredDomain>,
@@ -106,10 +122,27 @@ pub struct MemoryStore {
     imported_source_keys: HashSet<String>,
     messages: HashMap<Uuid, Vec<StoredMessage>>,
     default_account_ttl_seconds: i64,
+    snapshot_path: Option<PathBuf>,
 }
 
 impl MemoryStore {
-    pub fn new(config: &Config) -> Self {
+    pub fn new(config: &Config) -> AppResult<Self> {
+        let snapshot_path = normalize_snapshot_path(&config.store_state_path);
+        let mut store = if let Some(path) = snapshot_path.clone() {
+            Self::load_from_snapshot(&path, config.default_account_ttl_seconds)?
+        } else {
+            Self::bootstrap(config, None)
+        };
+        let changed = store.ensure_configured_public_domains(config);
+
+        if changed {
+            store.persist()?;
+        }
+
+        Ok(store)
+    }
+
+    fn bootstrap(config: &Config, snapshot_path: Option<PathBuf>) -> Self {
         let now = Utc::now();
         let domains = config
             .public_domains
@@ -133,7 +166,157 @@ impl MemoryStore {
             imported_source_keys: HashSet::new(),
             messages: HashMap::new(),
             default_account_ttl_seconds: config.default_account_ttl_seconds,
+            snapshot_path,
         }
+    }
+
+    fn load_from_snapshot(path: &Path, default_account_ttl_seconds: i64) -> AppResult<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                domains: Vec::new(),
+                audit_logs: VecDeque::new(),
+                accounts: HashMap::new(),
+                accounts_by_address: HashMap::new(),
+                imported_source_keys: HashSet::new(),
+                messages: HashMap::new(),
+                default_account_ttl_seconds,
+                snapshot_path: Some(path.to_path_buf()),
+            });
+        }
+
+        let raw = fs::read_to_string(path).map_err(|error| {
+            ApiError::internal(format!(
+                "failed to read store snapshot {}: {error}",
+                path.display()
+            ))
+        })?;
+        let snapshot: StoreSnapshot = serde_json::from_str(&raw).map_err(|error| {
+            ApiError::internal(format!(
+                "failed to parse store snapshot {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        if snapshot.version != STORE_SNAPSHOT_VERSION {
+            return Err(ApiError::internal(format!(
+                "unsupported store snapshot version {} in {}",
+                snapshot.version,
+                path.display()
+            )));
+        }
+
+        let mut store = Self {
+            domains: snapshot.domains,
+            audit_logs: snapshot.audit_logs,
+            accounts: snapshot.accounts,
+            accounts_by_address: HashMap::new(),
+            imported_source_keys: snapshot.imported_source_keys,
+            messages: snapshot.messages,
+            default_account_ttl_seconds,
+            snapshot_path: Some(path.to_path_buf()),
+        };
+        store.rebuild_indexes();
+
+        Ok(store)
+    }
+
+    fn ensure_configured_public_domains(&mut self, config: &Config) -> bool {
+        let now = Utc::now();
+        let mut changed = false;
+
+        for public_domain in &config.public_domains {
+            if let Some(existing) = self
+                .domains
+                .iter_mut()
+                .find(|domain| domain.domain == *public_domain)
+            {
+                let needs_update = !existing.is_verified
+                    || existing.status != "active"
+                    || existing.verification_token.is_some()
+                    || existing.verification_error.is_some();
+                if needs_update {
+                    existing.is_verified = true;
+                    existing.status = "active".to_owned();
+                    existing.verification_token = None;
+                    existing.verification_error = None;
+                    existing.updated_at = now;
+                    changed = true;
+                }
+                continue;
+            }
+
+            self.domains.push(StoredDomain {
+                id: Uuid::new_v4(),
+                domain: public_domain.clone(),
+                is_verified: true,
+                status: "active".to_owned(),
+                verification_token: None,
+                verification_error: None,
+                created_at: now,
+                updated_at: now,
+            });
+            changed = true;
+        }
+
+        changed
+    }
+
+    fn rebuild_indexes(&mut self) {
+        self.accounts_by_address.clear();
+        for account in self.accounts.values() {
+            if !account.is_deleted {
+                self.accounts_by_address
+                    .insert(account.address.clone(), account.id);
+            }
+        }
+    }
+
+    fn persist(&self) -> AppResult<()> {
+        let Some(path) = self.snapshot_path.as_deref() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                ApiError::internal(format!(
+                    "failed to prepare store snapshot directory {}: {error}",
+                    parent.display()
+                ))
+            })?;
+        }
+
+        let snapshot = StoreSnapshot {
+            version: STORE_SNAPSHOT_VERSION,
+            domains: self.domains.clone(),
+            audit_logs: self.audit_logs.clone(),
+            accounts: self.accounts.clone(),
+            imported_source_keys: self.imported_source_keys.clone(),
+            messages: self.messages.clone(),
+        };
+        let serialized = serde_json::to_string_pretty(&snapshot).map_err(|error| {
+            ApiError::internal(format!(
+                "failed to serialize store snapshot {}: {error}",
+                path.display()
+            ))
+        })?;
+        let temp_path = path.with_extension("tmp");
+        fs::write(&temp_path, serialized).map_err(|error| {
+            ApiError::internal(format!(
+                "failed to write store snapshot {}: {error}",
+                temp_path.display()
+            ))
+        })?;
+        fs::rename(&temp_path, path).map_err(|error| {
+            ApiError::internal(format!(
+                "failed to finalize store snapshot {}: {error}",
+                path.display()
+            ))
+        })?;
+
+        Ok(())
     }
 
     pub fn list_domains(&self) -> Vec<Domain> {
@@ -190,6 +373,7 @@ impl MemoryStore {
             None,
             format!("domain={} status={}", public.domain, public.status),
         );
+        self.persist()?;
 
         Ok(public)
     }
@@ -260,6 +444,7 @@ impl MemoryStore {
             None,
             detail,
         );
+        self.persist()?;
 
         Ok(public_domain)
     }
@@ -346,6 +531,7 @@ impl MemoryStore {
             None,
             format!("address={}", account.address),
         );
+        self.persist()?;
 
         Ok(self.to_account(&account))
     }
@@ -412,6 +598,7 @@ impl MemoryStore {
             None,
             format!("address={address}"),
         );
+        self.persist()?;
 
         Ok(())
     }
@@ -459,7 +646,10 @@ impl MemoryStore {
                 "message",
                 message_id.to_string(),
                 Some(account_id.to_string()),
-                format!("source_key={} subject={}", imported.source_key, imported.subject),
+                format!(
+                    "source_key={} subject={}",
+                    imported.source_key, imported.subject
+                ),
             );
             receipts.push(ImportedMessageReceipt {
                 account_id,
@@ -469,6 +659,7 @@ impl MemoryStore {
 
         if !receipts.is_empty() {
             self.imported_source_keys.insert(imported.source_key);
+            self.persist()?;
         }
 
         Ok(receipts)
@@ -556,6 +747,7 @@ impl MemoryStore {
             Some(account_id.to_string()),
             format!("seen={seen}"),
         );
+        self.persist()?;
 
         Ok(response)
     }
@@ -588,6 +780,7 @@ impl MemoryStore {
             Some(account_id.to_string()),
             "soft deleted from mailbox".to_owned(),
         );
+        self.persist()?;
 
         Ok(())
     }
@@ -596,7 +789,7 @@ impl MemoryStore {
         &mut self,
         mailbox: &str,
         active_source_keys: &HashSet<String>,
-    ) -> usize {
+    ) -> AppResult<usize> {
         let mut deleted_count = 0_usize;
         let mailbox_prefix = format!("{mailbox}:");
 
@@ -634,10 +827,14 @@ impl MemoryStore {
             }
         }
 
-        deleted_count
+        if deleted_count > 0 {
+            self.persist()?;
+        }
+
+        Ok(deleted_count)
     }
 
-    pub fn cleanup_expired_accounts(&mut self) -> CleanupReport {
+    pub fn cleanup_expired_accounts(&mut self) -> AppResult<CleanupReport> {
         let now = Utc::now();
         let mut report = CleanupReport::default();
         let mut expired_accounts = Vec::new();
@@ -681,10 +878,14 @@ impl MemoryStore {
             );
         }
 
-        report
+        if report.deleted_accounts > 0 || report.deleted_messages > 0 {
+            self.persist()?;
+        }
+
+        Ok(report)
     }
 
-    pub fn cleanup_stale_pending_domains(&mut self, max_age: Duration) -> usize {
+    pub fn cleanup_stale_pending_domains(&mut self, max_age: Duration) -> AppResult<usize> {
         let now = Utc::now();
         let mut removed = 0_usize;
         let mut removed_domains = Vec::new();
@@ -713,7 +914,11 @@ impl MemoryStore {
             );
         }
 
-        removed
+        if removed > 0 {
+            self.persist()?;
+        }
+
+        Ok(removed)
     }
 
     pub fn stats(&self) -> StoreStats {
@@ -756,12 +961,7 @@ impl MemoryStore {
     }
 
     pub fn audit_logs(&self, limit: usize) -> Vec<String> {
-        self.audit_logs
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect()
+        self.audit_logs.iter().rev().take(limit).cloned().collect()
     }
 
     pub fn append_audit_log(
@@ -771,8 +971,9 @@ impl MemoryStore {
         entity_id: String,
         actor_id: Option<String>,
         detail: String,
-    ) {
+    ) -> AppResult<()> {
         self.record_audit(action, entity_type, entity_id, actor_id, detail);
+        self.persist()
     }
 
     fn to_account(&self, account: &StoredAccount) -> Account {
@@ -956,6 +1157,15 @@ fn validate_domain_name(domain: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_snapshot_path(path: &str) -> Option<PathBuf> {
+    let normalized = path.trim();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(PathBuf::from(normalized))
+}
+
 fn resolve_expires_at(
     now: DateTime<Utc>,
     expires_in: Option<i64>,
@@ -1053,13 +1263,35 @@ fn build_imported_message(imported: &ImportedMessage) -> StoredMessage {
 
 #[cfg(test)]
 mod tests {
+    use std::{env, fs};
+
+    use chrono::Utc;
+    use uuid::Uuid;
+
     use super::{MemoryStore, normalize_domain, split_address};
-    use crate::config::Config;
+    use crate::{
+        config::Config,
+        models::{ImportedMessage, MessageAddress},
+    };
+
+    fn test_config() -> Config {
+        Config {
+            store_state_path: String::new(),
+            ..Config::default()
+        }
+    }
+
+    fn temp_snapshot_path(name: &str) -> String {
+        env::temp_dir()
+            .join(format!("tmpmail-store-{name}-{}.json", Uuid::new_v4()))
+            .to_string_lossy()
+            .into_owned()
+    }
 
     #[test]
     fn account_flow_bootstraps_with_seed_message() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
         let account = store
             .create_account("demo@tmpmail.local", "secret", None)
             .expect("create account");
@@ -1075,8 +1307,8 @@ mod tests {
 
     #[test]
     fn admin_managed_domain_becomes_available_to_all_accounts_after_activation() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
         let domain = store
             .create_domain("public.example.com")
             .expect("create domain");
@@ -1093,8 +1325,8 @@ mod tests {
 
     #[test]
     fn admin_list_includes_pending_domains_while_public_list_only_shows_active_domains() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
         store
             .create_domain("team.example.com")
             .expect("create domain");
@@ -1127,8 +1359,8 @@ mod tests {
 
     #[test]
     fn create_account_rejects_short_password() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
 
         let error = store
             .create_account("demo@tmpmail.local", "short", None)
@@ -1139,8 +1371,8 @@ mod tests {
 
     #[test]
     fn create_account_rejects_short_username() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
 
         let error = store
             .create_account("ab@tmpmail.local", "secret123", None)
@@ -1154,8 +1386,8 @@ mod tests {
 
     #[test]
     fn public_domains_are_available_without_extra_credentials() {
-        let config = Config::default();
-        let store = MemoryStore::new(&config);
+        let config = test_config();
+        let store = MemoryStore::new(&config).expect("load store");
 
         let public_domains = store.list_domains();
 
@@ -1198,8 +1430,8 @@ mod tests {
 
     #[test]
     fn create_account_preserves_password_whitespace() {
-        let config = Config::default();
-        let mut store = MemoryStore::new(&config);
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
 
         store
             .create_account("demo@tmpmail.local", "  secret123  ", None)
@@ -1215,5 +1447,104 @@ mod tests {
                 .authenticate("demo@tmpmail.local", "secret123")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn store_restores_snapshot_after_restart() {
+        let snapshot_path = temp_snapshot_path("restart");
+        let config = Config {
+            store_state_path: snapshot_path.clone(),
+            ..Config::default()
+        };
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let domain = store
+            .create_domain("persisted.example.com")
+            .expect("create domain");
+        let domain_id = Uuid::parse_str(&domain.id).expect("uuid");
+        store
+            .update_domain_verification_status(domain_id, true, None)
+            .expect("verify domain");
+        let account = store
+            .create_account("demo@persisted.example.com", "secret123", None)
+            .expect("create account");
+        let account_id = Uuid::parse_str(&account.id).expect("uuid");
+        store
+            .import_message_for_recipients(
+                std::slice::from_ref(&account.address),
+                ImportedMessage {
+                    source_key: "persisted.example.com:msg-1".to_owned(),
+                    msgid: "<msg-1@example.com>".to_owned(),
+                    from: MessageAddress {
+                        name: "Sender".to_owned(),
+                        address: "sender@example.com".to_owned(),
+                    },
+                    to: vec![MessageAddress {
+                        name: account.address.clone(),
+                        address: account.address.clone(),
+                    }],
+                    subject: "Persisted message".to_owned(),
+                    intro: "snapshot check".to_owned(),
+                    size: 42,
+                    download_url: "/messages/raw".to_owned(),
+                    created_at: Utc::now(),
+                    text: "snapshot check".to_owned(),
+                    html: vec!["<p>snapshot check</p>".to_owned()],
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("import message");
+        drop(store);
+
+        let restored = MemoryStore::new(&config).expect("reload store");
+        let (messages, total) = restored
+            .list_messages(account_id, 1)
+            .expect("list restored messages");
+
+        assert_eq!(total, 2);
+        assert_eq!(messages[0].subject, "Persisted message");
+        assert!(restored.has_imported_source("persisted.example.com:msg-1"));
+        assert!(
+            restored
+                .list_domains()
+                .iter()
+                .any(|item| item.domain == "persisted.example.com" && item.status == "active")
+        );
+        assert!(
+            restored
+                .authenticate("demo@persisted.example.com", "secret123")
+                .is_ok()
+        );
+
+        let _ = fs::remove_file(snapshot_path);
+    }
+
+    #[test]
+    fn store_rehydrates_missing_public_domains_from_config() {
+        let snapshot_path = temp_snapshot_path("public-domains");
+        let initial_config = Config {
+            store_state_path: snapshot_path.clone(),
+            public_domains: vec!["tmpmail.local".to_owned()],
+            ..Config::default()
+        };
+        let _ = MemoryStore::new(&initial_config).expect("create initial snapshot");
+
+        let updated_config = Config {
+            store_state_path: snapshot_path.clone(),
+            public_domains: vec![
+                "tmpmail.local".to_owned(),
+                "new-public.example.com".to_owned(),
+            ],
+            ..Config::default()
+        };
+        let restored = MemoryStore::new(&updated_config).expect("reload store");
+
+        assert!(
+            restored
+                .list_domains()
+                .iter()
+                .any(|item| item.domain == "new-public.example.com" && item.status == "active")
+        );
+
+        let _ = fs::remove_file(snapshot_path);
     }
 }

@@ -19,8 +19,9 @@
 
    - `TMPMAIL_PUBLIC_DOMAINS`
    - `TMPMAIL_JWT_SECRET`
-    - `TMPMAIL_INBUCKET_BASE_URL`
-    - `TMPMAIL_INGEST_MODE=remote-inbucket`
+   - `TMPMAIL_INBUCKET_BASE_URL`
+   - `TMPMAIL_INGEST_MODE=remote-inbucket`
+   - `TMPMAIL_STORE_STATE_PATH`
    - 如果你希望系统自动生成公网 DNS 方案，保持 `TMPMAIL_MAIL_EXCHANGE_HOST` 和 `TMPMAIL_MAIL_CNAME_TARGET` 为空即可
    - 如果你已经有独立公网收件主机，也可以显式覆盖 `TMPMAIL_MAIL_EXCHANGE_HOST` / `TMPMAIL_MAIL_CNAME_TARGET`
 
@@ -51,6 +52,7 @@
 - 管理后台默认入口是 `/admin`，也可通过 `TMPMAIL_ADMIN_ENTRY_PATH` 改成自定义入口。
 - 管理台是独立页面，不在主导航里直接暴露。
 - 管理台密码保存在 `data/config/admin-state.json`，Compose 默认已挂载 `./data -> /app/data`。
+- 业务数据快照默认保存在 `data/storage/store-state.json`，容器重启后会自动恢复域名、账户、邮件和审计数据。
 - 管理员 API Key 现在由服务端生成，专门用于系统管理；不再要求前端手动输入。
 - `/domains` 旧入口仍然保留，但会重定向到当前配置的管理员入口。
 - 后端会按 `TMPMAIL_DOMAIN_VERIFICATION_POLL_INTERVAL_SECONDS` 自动轮询未验证域名。
@@ -80,7 +82,7 @@
 
 ## Notes
 
-- 这一版 API 存储仍然是内存仓储，重启容器后数据会丢失。
-- 远端 Inbucket 参数已纳入配置层，基础轮询导入已接上，但持久化仍未切到 PostgreSQL。
-- 当前最适合做前端主流程联调和接口契约验证，不适合长期保存测试数据。
+- 当前默认采用“内存仓储 + JSON 快照”模式，服务写操作会自动把状态同步到 `TMPMAIL_STORE_STATE_PATH`。
+- 远端 Inbucket 参数已纳入配置层，基础轮询导入已接上；当前仍未切到 PostgreSQL/sqlx，但重启不再丢失业务状态。
+- 这一版已经适合做前端主流程联调和容器化测试；如果要多实例共享或做更强一致性，再切 PostgreSQL。
 - 前端默认只走本地 `tmpmail` provider；如需对接其他兼容后端，可在设置页手动添加自定义 provider。

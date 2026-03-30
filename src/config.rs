@@ -8,6 +8,7 @@ pub struct Config {
     pub port: u16,
     pub jwt_secret: String,
     pub admin_state_path: String,
+    pub store_state_path: String,
     pub admin_session_ttl_seconds: i64,
     pub public_domains: Vec<String>,
     pub token_ttl_seconds: i64,
@@ -33,6 +34,7 @@ impl Default for Config {
             port: 8080,
             jwt_secret: "tmpmail-dev-secret-change-me".to_owned(),
             admin_state_path: "data/config/admin-state.json".to_owned(),
+            store_state_path: "data/storage/store-state.json".to_owned(),
             admin_session_ttl_seconds: 12 * 60 * 60,
             public_domains: vec!["tmpmail.local".to_owned(), "inbox.tmpmail.local".to_owned()],
             token_ttl_seconds: 24 * 60 * 60,
@@ -65,6 +67,8 @@ impl Config {
         let jwt_secret = env::var("TMPMAIL_JWT_SECRET").unwrap_or(defaults.jwt_secret);
         let admin_state_path =
             env::var("TMPMAIL_ADMIN_STATE_PATH").unwrap_or(defaults.admin_state_path);
+        let store_state_path =
+            env::var("TMPMAIL_STORE_STATE_PATH").unwrap_or(defaults.store_state_path);
         let admin_session_ttl_seconds = env::var("TMPMAIL_ADMIN_SESSION_TTL_SECONDS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -134,6 +138,7 @@ impl Config {
             port,
             jwt_secret,
             admin_state_path,
+            store_state_path,
             admin_session_ttl_seconds,
             public_domains,
             token_ttl_seconds,

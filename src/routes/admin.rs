@@ -44,7 +44,7 @@ pub async fn setup(
             "system".to_owned(),
             Some("admin".to_owned()),
             "initialized administrator password and generated key".to_owned(),
-        );
+        )?;
     }
 
     Ok((
@@ -80,7 +80,7 @@ pub async fn login(
             "system".to_owned(),
             Some("admin".to_owned()),
             "admin session issued".to_owned(),
-        );
+        )?;
     }
 
     Ok((
@@ -99,7 +99,10 @@ pub async fn access_key(
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.get_or_create_api_key()?;
 
-    Ok((sensitive_headers(), Json(AdminAccessKeyResponse { api_key })))
+    Ok((
+        sensitive_headers(),
+        Json(AdminAccessKeyResponse { api_key }),
+    ))
 }
 
 pub async fn regenerate_access_key(
@@ -117,10 +120,13 @@ pub async fn regenerate_access_key(
             "system".to_owned(),
             Some("admin".to_owned()),
             "administrator API key rotated".to_owned(),
-        );
+        )?;
     }
 
-    Ok((sensitive_headers(), Json(AdminAccessKeyResponse { api_key })))
+    Ok((
+        sensitive_headers(),
+        Json(AdminAccessKeyResponse { api_key }),
+    ))
 }
 
 pub async fn change_password(
@@ -139,7 +145,7 @@ pub async fn change_password(
             "system".to_owned(),
             Some("admin".to_owned()),
             "administrator password updated".to_owned(),
-        );
+        )?;
     }
 
     Ok((StatusCode::NO_CONTENT, sensitive_headers()))

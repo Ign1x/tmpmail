@@ -51,7 +51,7 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
 
         let deleted_count = {
             let mut store = state.store.write().await;
-            store.reconcile_mailbox_sources(&mailbox, &active_source_keys)
+            store.reconcile_mailbox_sources(&mailbox, &active_source_keys)?
         };
         deleted_total += deleted_count;
 
