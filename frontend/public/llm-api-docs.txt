@@ -31,7 +31,7 @@ POST /domains
 
 GET /domains/:id/records
 - Admin only.
-- Returns TXT, MX, and CNAME records for verification.
+- Returns TXT, MX, and public routing records (A / AAAA / CNAME) for verification.
 
 POST /domains/:id/verify
 - Admin only.

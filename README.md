@@ -19,9 +19,10 @@
 
    - `TMPMAIL_PUBLIC_DOMAINS`
    - `TMPMAIL_JWT_SECRET`
-   - `TMPMAIL_MAIL_EXCHANGE_HOST`
-   - `TMPMAIL_INBUCKET_BASE_URL`
-   - `TMPMAIL_INGEST_MODE=remote-inbucket`
+    - `TMPMAIL_INBUCKET_BASE_URL`
+    - `TMPMAIL_INGEST_MODE=remote-inbucket`
+   - 如果你希望系统自动生成公网 DNS 方案，保持 `TMPMAIL_MAIL_EXCHANGE_HOST` 和 `TMPMAIL_MAIL_CNAME_TARGET` 为空即可
+   - 如果你已经有独立公网收件主机，也可以显式覆盖 `TMPMAIL_MAIL_EXCHANGE_HOST` / `TMPMAIL_MAIL_CNAME_TARGET`
 
 3. 启动服务：
 
@@ -54,6 +55,10 @@
 - `/domains` 旧入口仍然保留，但会重定向到当前配置的管理员入口。
 - 后端会按 `TMPMAIL_DOMAIN_VERIFICATION_POLL_INTERVAL_SECONDS` 自动轮询未验证域名。
 - 托管域名只有在状态变为 `active` 后才允许所有用户创建邮箱账户。
+- 默认 DNS 方案会生成：
+  - `TXT _tmpmail-verify.<domain>`
+  - `MX <domain> -> mail.<domain>`
+  - `mail.<domain>` 的公网路由记录，目标会根据 `TMPMAIL_INBUCKET_BASE_URL` 自动变成 `A`、`AAAA` 或 `CNAME`
 
 如果本机 `8080` 端口已被占用，可以把 API 改到 `18080` 再联调前端，例如：
 

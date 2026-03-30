@@ -1,4 +1,6 @@
-use std::env;
+use std::{env, net::IpAddr};
+
+use reqwest::Url;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -122,11 +124,10 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(defaults.cleanup_interval_seconds);
-        let pending_domain_retention_seconds =
-            env::var("TMPMAIL_PENDING_DOMAIN_RETENTION_SECONDS")
-                .ok()
-                .and_then(|value| value.parse::<i64>().ok())
-                .unwrap_or(defaults.pending_domain_retention_seconds);
+        let pending_domain_retention_seconds = env::var("TMPMAIL_PENDING_DOMAIN_RETENTION_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(defaults.pending_domain_retention_seconds);
 
         Self {
             host,
@@ -155,6 +156,46 @@ impl Config {
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
+
+    pub fn effective_mail_exchange_host(&self, domain: &str) -> String {
+        self.explicit_mail_exchange_host()
+            .unwrap_or_else(|| format!("mail.{domain}"))
+    }
+
+    pub fn effective_mail_route_target(&self) -> Option<String> {
+        self.explicit_mail_route_target()
+            .or_else(|| self.derived_mail_route_target_from_inbucket())
+    }
+
+    fn explicit_mail_exchange_host(&self) -> Option<String> {
+        normalize_optional_hostname(&self.mail_exchange_host)
+            .filter(|value| !is_legacy_mail_placeholder(value))
+    }
+
+    fn explicit_mail_route_target(&self) -> Option<String> {
+        normalize_optional_hostname_or_ip(&self.mail_cname_target)
+            .filter(|value| !is_legacy_mail_placeholder(value))
+    }
+
+    fn derived_mail_route_target_from_inbucket(&self) -> Option<String> {
+        let base_url = self.inbucket_base_url.as_deref()?.trim();
+        if base_url.is_empty() {
+            return None;
+        }
+
+        let parsed = Url::parse(base_url).ok()?;
+        let host = parsed
+            .host_str()?
+            .trim()
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .trim_end_matches('.');
+        if host.is_empty() {
+            return None;
+        }
+
+        Some(host.to_owned())
+    }
 }
 
 fn parse_csv(value: &str) -> Vec<String> {
@@ -164,4 +205,111 @@ fn parse_csv(value: &str) -> Vec<String> {
         .filter(|item| !item.is_empty())
         .map(str::to_owned)
         .collect()
+}
+
+fn normalize_optional_hostname(value: &str) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('.').to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    if normalized.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn normalize_optional_hostname_or_ip(value: &str) -> Option<String> {
+    let normalized = value.trim().trim_end_matches('.').to_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+
+    Some(normalized)
+}
+
+fn is_legacy_mail_placeholder(value: &str) -> bool {
+    value.eq_ignore_ascii_case("mail.tmpmail.local")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Config;
+
+    #[test]
+    fn derives_public_mail_route_from_remote_inbucket_hostname() {
+        let config = Config {
+            mail_exchange_host: "mail.tmpmail.local".to_owned(),
+            mail_cname_target: "mail.tmpmail.local".to_owned(),
+            inbucket_base_url: Some("http://mx.example.net:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.effective_mail_exchange_host("fuckcyh.de"),
+            "mail.fuckcyh.de"
+        );
+        assert_eq!(
+            config.effective_mail_route_target().as_deref(),
+            Some("mx.example.net")
+        );
+    }
+
+    #[test]
+    fn derives_public_mail_route_from_remote_inbucket_ip() {
+        let config = Config {
+            mail_exchange_host: "mail.tmpmail.local".to_owned(),
+            mail_cname_target: "mail.tmpmail.local".to_owned(),
+            inbucket_base_url: Some("http://185.13.148.129:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.effective_mail_exchange_host("fuckcyh.de"),
+            "mail.fuckcyh.de"
+        );
+        assert_eq!(
+            config.effective_mail_route_target().as_deref(),
+            Some("185.13.148.129")
+        );
+    }
+
+    #[test]
+    fn explicit_public_mail_hosts_override_inbucket_derivation() {
+        let config = Config {
+            mail_exchange_host: "mx.public-mail.example".to_owned(),
+            mail_cname_target: "edge.public-mail.example".to_owned(),
+            inbucket_base_url: Some("http://185.13.148.129:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.effective_mail_exchange_host("fuckcyh.de"),
+            "mx.public-mail.example"
+        );
+        assert_eq!(
+            config.effective_mail_route_target().as_deref(),
+            Some("edge.public-mail.example")
+        );
+    }
+
+    #[test]
+    fn explicit_ip_cannot_be_used_as_mx_host() {
+        let config = Config {
+            mail_exchange_host: "185.13.148.129".to_owned(),
+            mail_cname_target: "185.13.148.129".to_owned(),
+            inbucket_base_url: Some("http://185.13.148.129:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(
+            config.effective_mail_exchange_host("fuckcyh.de"),
+            "mail.fuckcyh.de"
+        );
+        assert_eq!(
+            config.effective_mail_route_target().as_deref(),
+            Some("185.13.148.129")
+        );
+    }
 }
