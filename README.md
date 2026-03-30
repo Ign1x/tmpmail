@@ -22,6 +22,7 @@
    - `TMPMAIL_INBUCKET_BASE_URL`
    - `TMPMAIL_INGEST_MODE=remote-inbucket`
    - `TMPMAIL_STORE_STATE_PATH`
+   - 如果要切到 PostgreSQL，把 `TMPMAIL_DATABASE_URL` 指向你的数据库；为空时继续使用本地 JSON 快照仓储
    - 本地 HTTP 联调可设 `TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT=false`
    - 如果你希望系统自动生成公网 DNS 方案，保持 `TMPMAIL_MAIL_EXCHANGE_HOST` 和 `TMPMAIL_MAIL_CNAME_TARGET` 为空即可
    - 如果你已经有独立公网收件主机，也可以显式覆盖 `TMPMAIL_MAIL_EXCHANGE_HOST` / `TMPMAIL_MAIL_CNAME_TARGET`
@@ -39,6 +40,19 @@
 5. 跑最小 smoke：
 
    `./scripts/smoke.sh`
+
+## PostgreSQL
+
+- 现在已经支持可选的 PostgreSQL + `sqlx` 仓储。
+- 不设置 `TMPMAIL_DATABASE_URL` 时，服务继续使用当前的 `MemoryStore + JSON 快照` 模式。
+- 设置 `TMPMAIL_DATABASE_URL` 后，服务启动时会自动执行 `migrations/` 下的建表迁移，并把域名、账户、消息、导入去重键和审计日志落到 PostgreSQL。
+- 仓库自带了一个可选 Compose profile：
+
+  `docker compose --profile postgres up -d postgres`
+
+- 对应本地默认连接串可以直接写成：
+
+  `TMPMAIL_DATABASE_URL=postgres://tmpmail:tmpmail@127.0.0.1:5432/tmpmail`
 
 ## Admin Domains
 
@@ -86,6 +100,7 @@
 ## Notes
 
 - 当前默认采用“内存仓储 + JSON 快照”模式，服务写操作会自动把状态同步到 `TMPMAIL_STORE_STATE_PATH`。
-- 远端 Inbucket 参数已纳入配置层，基础轮询导入已接上；当前仍未切到 PostgreSQL/sqlx，但重启不再丢失业务状态。
-- 这一版已经适合做前端主流程联调和容器化测试；如果要多实例共享或做更强一致性，再切 PostgreSQL。
+- 如果配置了 `TMPMAIL_DATABASE_URL`，业务数据会改为存入 PostgreSQL，JSON 快照路径仅继续用于未切库环境。
+- 远端 Inbucket 参数已纳入配置层，基础轮询导入已接上；无论使用 JSON 快照还是 PostgreSQL，重启后都能恢复业务状态。
+- 这一版已经适合做前端主流程联调、容器化测试和单库部署；如果要继续往多实例共享或更强一致性推进，可以在当前 PostgreSQL 基础上再细化锁与并发策略。
 - 前端默认只走本地 `tmpmail` provider；如需对接其他兼容后端，可在设置页手动添加自定义 provider。

@@ -32,8 +32,8 @@ pub fn spawn_inbucket_poller(state: AppState, client: Arc<InbucketClient>) {
 
 pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<()> {
     let mailboxes = {
-        let store = state.store.read().await;
-        active_mailboxes(&store.active_account_addresses())
+        let mut store = state.store.lock().await;
+        active_mailboxes(&store.active_account_addresses().await?)
     };
 
     let mut imported_total = 0_usize;
@@ -50,16 +50,18 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
             .collect::<HashSet<_>>();
 
         let deleted_count = {
-            let mut store = state.store.write().await;
-            store.reconcile_mailbox_sources(&mailbox, &active_source_keys)?
+            let mut store = state.store.lock().await;
+            store
+                .reconcile_mailbox_sources(&mailbox, &active_source_keys)
+                .await?
         };
         deleted_total += deleted_count;
 
         for summary in messages {
             let source_key = format!("{mailbox}:{}", summary.id);
             let already_imported = {
-                let store = state.store.read().await;
-                store.has_imported_source(&source_key)
+                let mut store = state.store.lock().await;
+                store.has_imported_source(&source_key).await?
             };
 
             if already_imported {
@@ -77,8 +79,10 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
             }
 
             let imported_receipts = {
-                let mut store = state.store.write().await;
-                store.import_message_for_recipients(&recipients, imported.clone())?
+                let mut store = state.store.lock().await;
+                store
+                    .import_message_for_recipients(&recipients, imported.clone())
+                    .await?
             };
 
             if !imported_receipts.is_empty() {

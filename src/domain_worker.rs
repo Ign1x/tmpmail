@@ -27,8 +27,8 @@ pub fn spawn_domain_verifier(state: AppState) {
 
 async fn verify_pending_domains(state: &AppState) -> crate::error::AppResult<()> {
     let pending = {
-        let store = state.store.read().await;
-        store.pending_domain_checks()
+        let mut store = state.store.lock().await;
+        store.pending_domain_checks().await?
     };
 
     let mut failures = 0_usize;
@@ -38,8 +38,10 @@ async fn verify_pending_domains(state: &AppState) -> crate::error::AppResult<()>
         if result.is_err() {
             failures += 1;
         }
-        let mut store = state.store.write().await;
-        let _ = store.update_domain_verification_status(domain.id, result.is_ok(), result.err())?;
+        let mut store = state.store.lock().await;
+        let _ = store
+            .update_domain_verification_status(domain.id, result.is_ok(), result.err())
+            .await?;
     }
 
     state.metrics.record_domain_verification_run(failures);

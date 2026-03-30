@@ -12,7 +12,7 @@ WF-010,P0,frontend,编写 DuckMail 联调配置与 smoke case,WF-004|WF-009,"tmp
 WF-017,P0,ops,补齐最小部署产物,WF-002,"Dockerfile, compose.yaml, scripts/",done,"已支持单容器部署当前最小 API"
 WF-018,P0,ingest,准备 Inbucket 独立测试部署栈,WF-017,"scripts/inbucket-deploy.sh",done,"已收敛为单脚本生成 compose 与环境文件"
 WF-019,P0,ingest,实现远端 Inbucket 基础轮询导入,WF-018,"后台 poller、消息导入与去重",done,"已验证远端 SMTP 投递后可经 /messages 读取"
-WF-011,P1,storage,接入 PostgreSQL 与 sqlx 仓储层,WF-002,"替换内存仓储，补 migrations",pending,"第二步重点"
+WF-011,P1,storage,接入 PostgreSQL 与 sqlx 仓储层,WF-002,"替换内存仓储，补 migrations",done,"已接入可选 PostgreSQL/sqlx 仓储；新增 migrations 与 TMPMAIL_DATABASE_URL；统一 AppStore 同时支持 Memory/JSON 快照与 Postgres 两种后端"
 WF-012,P1,domains,实现 API Key 与私有域名过滤,WF-004,"ownerId 私有域名返回与权限控制",done,"已支持管理型 API Key、公共/私有域名过滤，以及私有域名下创建账户权限控制"
 WF-013,P1,domains,实现域名添加、DNS 记录生成、验证任务,WF-012,"domains 管理接口与 verification worker",done,"已实现 POST /domains、GET /domains/:id/records、POST /domains/:id/verify、自动验证 worker 与前端设置面板联调"
 WF-014,P1,ingest,对接 Inbucket 邮件接收链路,WF-011,"mail worker 导入、解析、落库",done,"已完成 Inbucket 导入、附件字段透传、上游删除同步、审计写入与实时事件广播；当前仍基于内存仓储，持久化留待 WF-011"

@@ -31,9 +31,11 @@ pub async fn run_cleanup_once(state: &AppState) -> AppResult<crate::store::Clean
         ChronoDuration::seconds(state.config.pending_domain_retention_seconds.max(60));
 
     let report = {
-        let mut store = state.store.write().await;
-        let mut report = store.cleanup_expired_accounts()?;
-        report.deleted_domains = store.cleanup_stale_pending_domains(stale_domain_retention)?;
+        let mut store = state.store.lock().await;
+        let mut report = store.cleanup_expired_accounts().await?;
+        report.deleted_domains = store
+            .cleanup_stale_pending_domains(stale_domain_retention)
+            .await?;
         report
     };
 

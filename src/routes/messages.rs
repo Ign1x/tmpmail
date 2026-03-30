@@ -27,8 +27,8 @@ pub async fn list_messages(
 ) -> AppResult<Json<HydraCollection<MessageSummary>>> {
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let page = query.page.unwrap_or(1);
-    let store = state.store.read().await;
-    let (messages, total) = store.list_messages(account_id, page)?;
+    let mut store = state.store.lock().await;
+    let (messages, total) = store.list_messages(account_id, page).await?;
 
     Ok(Json(HydraCollection::new(messages, total)))
 }
@@ -41,8 +41,8 @@ pub async fn get_message(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let store = state.store.read().await;
-    let message = store.get_message(account_id, message_id)?;
+    let mut store = state.store.lock().await;
+    let message = store.get_message(account_id, message_id).await?;
 
     Ok(Json(message))
 }
@@ -57,8 +57,8 @@ pub async fn patch_message(
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
     let seen = payload.seen.unwrap_or(true);
-    let mut store = state.store.write().await;
-    let response = store.mark_message_seen(account_id, message_id, seen)?;
+    let mut store = state.store.lock().await;
+    let response = store.mark_message_seen(account_id, message_id, seen).await?;
     state.realtime.publish(
         &state.metrics,
         "message.updated",
@@ -77,8 +77,8 @@ pub async fn delete_message(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let mut store = state.store.write().await;
-    store.delete_message(account_id, message_id)?;
+    let mut store = state.store.lock().await;
+    store.delete_message(account_id, message_id).await?;
     state.realtime.publish(
         &state.metrics,
         "message.deleted",

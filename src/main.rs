@@ -1,4 +1,5 @@
 mod admin_state;
+mod app_store;
 mod app;
 mod auth;
 mod cleanup_worker;
@@ -10,6 +11,7 @@ mod inbucket;
 mod ingest;
 mod metrics;
 mod models;
+mod pg_store;
 mod realtime;
 mod routes;
 mod state;
@@ -35,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let inbucket_auth_configured =
         config.inbucket_username.is_some() && config.inbucket_password.is_some();
     let inbucket_poll_interval_seconds = config.inbucket_poll_interval_seconds;
-    let app_state = AppState::new(config)?;
+    let app_state = AppState::new(config).await?;
 
     let listener = TcpListener::bind(&bind_address)
         .await

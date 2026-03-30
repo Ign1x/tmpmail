@@ -27,8 +27,8 @@ pub async fn admin_metrics(
     admin_state::require_admin_access(&headers, &state).await?;
 
     let stats = {
-        let store = state.store.read().await;
-        store.stats()
+        let mut store = state.store.lock().await;
+        store.stats().await?
     };
     let metrics = state.metrics.snapshot();
 
@@ -43,8 +43,8 @@ pub async fn admin_audit_logs(
     admin_state::require_admin_access(&headers, &state).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let entries = {
-        let store = state.store.read().await;
-        store.audit_logs(limit)
+        let mut store = state.store.lock().await;
+        store.audit_logs(limit).await?
     };
 
     Ok(Json(AdminAuditLogsResponse { entries }))
@@ -63,18 +63,21 @@ pub async fn trigger_cleanup(
     ))
 }
 
-pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn metrics(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
     let stats = {
-        let store = state.store.read().await;
-        store.stats()
+        let mut store = state.store.lock().await;
+        store.stats().await?
     };
     let metrics = state.metrics.snapshot();
     let payload = render_metrics(&stats, &metrics);
 
-    (
-        [(CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"))],
+    Ok((
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
         payload,
-    )
+    ))
 }
 
 fn render_metrics(stats: &StoreStats, metrics: &MetricsSnapshot) -> String {
@@ -86,8 +89,14 @@ fn render_metrics(stats: &StoreStats, metrics: &MetricsSnapshot) -> String {
     lines.push(format!("tmpmail_accounts_active {}", stats.active_accounts));
     lines.push(format!("tmpmail_messages_total {}", stats.total_messages));
     lines.push(format!("tmpmail_messages_active {}", stats.active_messages));
-    lines.push(format!("tmpmail_messages_deleted {}", stats.deleted_messages));
-    lines.push(format!("tmpmail_audit_logs_total {}", stats.audit_logs_total));
+    lines.push(format!(
+        "tmpmail_messages_deleted {}",
+        stats.deleted_messages
+    ));
+    lines.push(format!(
+        "tmpmail_audit_logs_total {}",
+        stats.audit_logs_total
+    ));
     lines.push(format!(
         "tmpmail_inbucket_sync_runs_total {}",
         metrics.inbucket_sync_runs_total

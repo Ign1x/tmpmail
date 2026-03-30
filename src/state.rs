@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
-    admin_state::AdminStateStore, config::Config, inbucket::InbucketClient, metrics::AppMetrics,
-    realtime::RealtimeBroker, store::MemoryStore,
+    admin_state::AdminStateStore, app_store::AppStore, config::Config,
+    inbucket::InbucketClient, metrics::AppMetrics, realtime::RealtimeBroker,
 };
 
 #[derive(Clone)]
@@ -15,15 +15,18 @@ pub struct AppState {
     pub admin_state: Arc<RwLock<AdminStateStore>>,
     pub metrics: Arc<AppMetrics>,
     pub realtime: Arc<RealtimeBroker>,
-    pub store: Arc<RwLock<MemoryStore>>,
+    pub store: Arc<Mutex<AppStore>>,
 }
 
 impl AppState {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
-        let store = MemoryStore::new(&config).with_context(|| {
+    pub async fn new(config: Config) -> anyhow::Result<Self> {
+        let store = AppStore::new(&config).await.with_context(|| {
             format!(
                 "failed to initialize store from {}",
-                config.store_state_path
+                config
+                    .database_url
+                    .clone()
+                    .unwrap_or_else(|| config.store_state_path.clone())
             )
         })?;
         let admin_state = AdminStateStore::load(&config.admin_state_path).with_context(|| {
@@ -62,7 +65,7 @@ impl AppState {
             admin_state: Arc::new(RwLock::new(admin_state)),
             metrics,
             realtime,
-            store: Arc::new(RwLock::new(store)),
+            store: Arc::new(Mutex::new(store)),
         })
     }
 }

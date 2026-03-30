@@ -18,11 +18,11 @@ pub async fn list_domains(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<HydraCollection<Domain>>> {
-    let store = state.store.read().await;
+    let mut store = state.store.lock().await;
     let domains = if admin_state::is_admin_access(&headers, &state).await {
-        store.list_all_domains()
+        store.list_all_domains().await?
     } else {
-        store.list_domains()
+        store.list_domains().await?
     };
     let total = domains.len();
 
@@ -35,8 +35,8 @@ pub async fn create_domain(
     Json(payload): Json<CreateDomainRequest>,
 ) -> AppResult<(StatusCode, Json<Domain>)> {
     admin_state::require_admin_access(&headers, &state).await?;
-    let mut store = state.store.write().await;
-    let domain = store.create_domain(&payload.domain)?;
+    let mut store = state.store.lock().await;
+    let domain = store.create_domain(&payload.domain).await?;
 
     Ok((StatusCode::CREATED, Json(domain)))
 }
@@ -48,8 +48,8 @@ pub async fn get_domain_records(
 ) -> AppResult<Json<Vec<DomainDnsRecord>>> {
     admin_state::require_admin_access(&headers, &state).await?;
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
-    let store = state.store.read().await;
-    let records = store.domain_dns_records(domain_id, &state.config)?;
+    let mut store = state.store.lock().await;
+    let records = store.domain_dns_records(domain_id, &state.config).await?;
 
     Ok(Json(records))
 }
@@ -62,13 +62,15 @@ pub async fn verify_domain(
     admin_state::require_admin_access(&headers, &state).await?;
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
     let (domain_name, token) = {
-        let store = state.store.read().await;
-        store.domain_verification_context(domain_id)?
+        let mut store = state.store.lock().await;
+        store.domain_verification_context(domain_id).await?
     };
     let result = verify_domain_dns(&domain_name, &token, &state.config).await;
-    let mut store = state.store.write().await;
+    let mut store = state.store.lock().await;
     let domain =
-        store.update_domain_verification_status(domain_id, result.is_ok(), result.err())?;
+        store
+            .update_domain_verification_status(domain_id, result.is_ok(), result.err())
+            .await?;
 
     Ok(Json(domain))
 }

@@ -7,8 +7,10 @@ pub struct Config {
     pub host: String,
     pub port: u16,
     pub jwt_secret: String,
+    pub database_url: Option<String>,
     pub admin_state_path: String,
     pub store_state_path: String,
+    pub admin_require_secure_transport: bool,
     pub admin_session_ttl_seconds: i64,
     pub public_domains: Vec<String>,
     pub token_ttl_seconds: i64,
@@ -33,8 +35,10 @@ impl Default for Config {
             host: "0.0.0.0".to_owned(),
             port: 8080,
             jwt_secret: "tmpmail-dev-secret-change-me".to_owned(),
+            database_url: None,
             admin_state_path: "data/config/admin-state.json".to_owned(),
             store_state_path: "data/storage/store-state.json".to_owned(),
+            admin_require_secure_transport: true,
             admin_session_ttl_seconds: 12 * 60 * 60,
             public_domains: vec!["tmpmail.local".to_owned(), "inbox.tmpmail.local".to_owned()],
             token_ttl_seconds: 24 * 60 * 60,
@@ -65,10 +69,18 @@ impl Config {
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(defaults.port);
         let jwt_secret = env::var("TMPMAIL_JWT_SECRET").unwrap_or(defaults.jwt_secret);
+        let database_url = env::var("TMPMAIL_DATABASE_URL")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
         let admin_state_path =
             env::var("TMPMAIL_ADMIN_STATE_PATH").unwrap_or(defaults.admin_state_path);
         let store_state_path =
             env::var("TMPMAIL_STORE_STATE_PATH").unwrap_or(defaults.store_state_path);
+        let admin_require_secure_transport = env::var("TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT")
+            .ok()
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(defaults.admin_require_secure_transport);
         let admin_session_ttl_seconds = env::var("TMPMAIL_ADMIN_SESSION_TTL_SECONDS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -137,8 +149,10 @@ impl Config {
             host,
             port,
             jwt_secret,
+            database_url,
             admin_state_path,
             store_state_path,
+            admin_require_secure_transport,
             admin_session_ttl_seconds,
             public_domains,
             token_ttl_seconds,
@@ -212,6 +226,14 @@ fn parse_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
 fn normalize_optional_hostname(value: &str) -> Option<String> {
     let normalized = value.trim().trim_end_matches('.').to_lowercase();
     if normalized.is_empty() {
@@ -240,7 +262,7 @@ fn is_legacy_mail_placeholder(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{Config, parse_bool};
 
     #[test]
     fn derives_public_mail_route_from_remote_inbucket_hostname() {
@@ -316,5 +338,13 @@ mod tests {
             config.effective_mail_route_target().as_deref(),
             Some("185.13.148.129")
         );
+    }
+
+    #[test]
+    fn parses_admin_secure_transport_toggle_values() {
+        assert_eq!(parse_bool("true"), Some(true));
+        assert_eq!(parse_bool("false"), Some(false));
+        assert_eq!(parse_bool("0"), Some(false));
+        assert_eq!(parse_bool("unexpected"), None);
     }
 }

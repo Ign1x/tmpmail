@@ -32,19 +32,20 @@ pub async fn setup(
     headers: HeaderMap,
     Json(payload): Json<AdminPasswordRequest>,
 ) -> AppResult<impl IntoResponse> {
-    auth::require_secure_admin_transport(&headers)?;
+    auth::require_secure_admin_transport(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.setup_password(&payload.password)?;
     let session_token = auth::issue_admin_session_token(&state.config)?;
     {
-        let mut store = state.store.write().await;
+        let mut store = state.store.lock().await;
         store.append_audit_log(
             "admin.setup",
             "admin",
             "system".to_owned(),
             Some("admin".to_owned()),
             "initialized administrator password and generated key".to_owned(),
-        )?;
+        )
+        .await?;
     }
 
     Ok((
@@ -62,7 +63,7 @@ pub async fn login(
     headers: HeaderMap,
     Json(payload): Json<AdminPasswordRequest>,
 ) -> AppResult<impl IntoResponse> {
-    auth::require_secure_admin_transport(&headers)?;
+    auth::require_secure_admin_transport(&headers, &state.config)?;
     let admin_state = state.admin_state.read().await;
     if !admin_state.is_password_configured() {
         return Err(ApiError::forbidden("admin password is not configured"));
@@ -73,14 +74,15 @@ pub async fn login(
     }
 
     {
-        let mut store = state.store.write().await;
+        let mut store = state.store.lock().await;
         store.append_audit_log(
             "admin.login",
             "admin",
             "system".to_owned(),
             Some("admin".to_owned()),
             "admin session issued".to_owned(),
-        )?;
+        )
+        .await?;
     }
 
     Ok((
@@ -113,14 +115,15 @@ pub async fn regenerate_access_key(
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.regenerate_api_key()?;
     {
-        let mut store = state.store.write().await;
+        let mut store = state.store.lock().await;
         store.append_audit_log(
             "admin.access_key.regenerate",
             "admin",
             "system".to_owned(),
             Some("admin".to_owned()),
             "administrator API key rotated".to_owned(),
-        )?;
+        )
+        .await?;
     }
 
     Ok((
@@ -138,14 +141,15 @@ pub async fn change_password(
     let mut admin_state = state.admin_state.write().await;
     admin_state.change_password(&payload.current_password, &payload.new_password)?;
     {
-        let mut store = state.store.write().await;
+        let mut store = state.store.lock().await;
         store.append_audit_log(
             "admin.password.change",
             "admin",
             "system".to_owned(),
             Some("admin".to_owned()),
             "administrator password updated".to_owned(),
-        )?;
+        )
+        .await?;
     }
 
     Ok((StatusCode::NO_CONTENT, sensitive_headers()))

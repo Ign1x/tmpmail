@@ -9,6 +9,7 @@ services:
     env_file:
       - .env
     environment:
+      TMPMAIL_DATABASE_URL: "${TMPMAIL_DATABASE_URL:-}"
       TMPMAIL_ADMIN_STATE_PATH: "${TMPMAIL_ADMIN_STATE_PATH:-data/config/admin-state.json}"
       TMPMAIL_STORE_STATE_PATH: "${TMPMAIL_STORE_STATE_PATH:-data/storage/store-state.json}"
     volumes:
@@ -46,3 +47,23 @@ services:
       timeout: 5s
       retries: 10
       start_period: 20s
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: tmpmail-postgres
+    restart: unless-stopped
+    profiles: ["postgres"]
+    environment:
+      POSTGRES_DB: "${TMPMAIL_POSTGRES_DB:-tmpmail}"
+      POSTGRES_USER: "${TMPMAIL_POSTGRES_USER:-tmpmail}"
+      POSTGRES_PASSWORD: "${TMPMAIL_POSTGRES_PASSWORD:-tmpmail}"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    ports:
+      - "${TMPMAIL_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TMPMAIL_POSTGRES_USER:-tmpmail} -d ${TMPMAIL_POSTGRES_DB:-tmpmail}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
