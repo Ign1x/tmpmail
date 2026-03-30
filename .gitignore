@@ -1,4 +1,5 @@
 DuckMail
+.DS_Store
 .sisyphus
 target
 .env
