@@ -27,5 +27,7 @@ WF-027,P1,admin,改造独立 /admin 密码后台与生成式管理员 Key,WF-023
 WF-028,P1,admin,支持自定义管理员入口路径,WF-027,"TMPMAIL_ADMIN_ENTRY_PATH、可配置入口重写、/domains 跳转到当前管理员入口、文档同步",done,"已支持默认 /admin 和自定义入口路径；前端代理按当前入口重写到独立管理台；/domains 与管理页提示统一跟随当前配置"
 WF-029,P1,domains,修复公网 DNS 记录推导与校验逻辑,WF-013|WF-019,"自动从远端 Inbucket 推导公网 MX 路由，按 A/AAAA/CNAME 生成并校验 DNS 记录，文档与示例配置同步",done,"已忽略 legacy mail.tmpmail.local 占位值；未显式配置时默认生成 MX -> mail.<domain>，再依据 TMPMAIL_INBUCKET_BASE_URL 推导公网 A/AAAA/CNAME；域名验证改为同时校验 TXT、MX 与路由记录"
 WF-030,P1,storage,实现本地快照持久化仓储,WF-014|WF-016,"TMPMAIL_STORE_STATE_PATH、自动落盘/恢复 domains/accounts/messages/audit_logs/imported_source_keys、文档与部署配置同步",done,"已接入内存仓储 JSON 快照持久化；启动时自动恢复数据，写操作原子落盘到 data/storage；补齐默认公共域名回填，作为 PostgreSQL/sqlx 之前的可部署过渡层"
+WF-031,P1,admin,允许本地测试关闭 HTTPS 强制校验,WF-027|WF-030,"TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT 开关、本地 .env 默认关闭、鉴权逻辑与文档同步",done,"管理员密码、会话和管理员 key 鉴权现在支持按环境切换 HTTPS 强制校验；默认仍开启，仅本地开发 .env 关闭以便 HTTP 调试"
+WF-032,P1,frontend,修复 /admin 页面误拦截内网 HTTP 管理操作,WF-031,"管理台前端跟随 TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT 运行时配置，局域网 HTTP 调试可正常初始化密码/登录/复制 Key",done,"已移除前端对 localhost 之外地址的硬编码拦截；/admin 现在按服务端运行时配置决定是否禁用敏感操作，并补齐非 HTTPS 的复制回退"
 WF-015,P2,realtime,实现 SSE 或 Webhook 实时收件推送,WF-014,"前端摆脱轮询的订阅能力",done,"已提供 /events SSE、前端流式订阅与自动重连；修正 accountId 参数兼容与代理长连接稳定性；通过 PATCH/DELETE 真请求验证 message.updated/message.deleted"
 WF-016,P2,ops,补齐清理任务、指标、审计日志,WF-011,"cleanup worker、metrics、audit_logs",done,"已补齐 cleanup worker、/metrics、/admin/metrics、/admin/audit-logs、/admin/cleanup 与 /admin 运维面板；curl 真请求验证通过"

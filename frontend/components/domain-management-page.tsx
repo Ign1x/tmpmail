@@ -43,6 +43,7 @@ const ADMIN_KEY_VISIBLE_MS = 60_000
 
 interface DomainManagementPageProps {
   entryPath: string
+  requireSecureTransport: boolean
 }
 
 function isTrustedAdminContext(): boolean {
@@ -61,6 +62,35 @@ function isTrustedAdminContext(): boolean {
     hostname === "::1" ||
     hostname.endsWith(".localhost")
   )
+}
+
+async function copyTextToClipboard(value: string): Promise<void> {
+  if (typeof window === "undefined") {
+    throw new Error("Clipboard is unavailable")
+  }
+
+  if (window.isSecureContext && navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value)
+    return
+  }
+
+  const textarea = document.createElement("textarea")
+  textarea.value = value
+  textarea.setAttribute("readonly", "true")
+  textarea.style.position = "fixed"
+  textarea.style.opacity = "0"
+  textarea.style.pointerEvents = "none"
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+
+  try {
+    if (!document.execCommand("copy")) {
+      throw new Error("Copy command failed")
+    }
+  } finally {
+    document.body.removeChild(textarea)
+  }
 }
 
 function sortManagedDomains(domains: Domain[]): Domain[] {
@@ -84,7 +114,10 @@ function getErrorDescription(error: unknown, fallback: string): string {
   return fallback
 }
 
-export default function DomainManagementPage({ entryPath }: DomainManagementPageProps) {
+export default function DomainManagementPage({
+  entryPath,
+  requireSecureTransport,
+}: DomainManagementPageProps) {
   const { toast } = useHeroUIToast()
   const router = useRouter()
   const ta = useTranslations("admin")
@@ -122,11 +155,12 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   const [isLoadingOps, setIsLoadingOps] = useState(false)
   const [isRunningCleanup, setIsRunningCleanup] = useState(false)
   const [copiedKey, setCopiedKey] = useState(false)
-  const [isSecureAdminContext, setIsSecureAdminContext] = useState(true)
+  const [isSecureAdminContext, setIsSecureAdminContext] = useState(() => !requireSecureTransport)
 
   const hasAdminSession = sessionToken.trim().length > 0
   const needsSetup = !status?.isPasswordConfigured
   const hasVisibleAdminKey = adminApiKey.trim().length > 0
+  const canUseSensitiveAdminActions = !requireSecureTransport || isSecureAdminContext
 
   const resetManagedDomainState = () => {
     setManagedDomains([])
@@ -290,8 +324,8 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }
 
   useEffect(() => {
-    setIsSecureAdminContext(isTrustedAdminContext())
-  }, [])
+    setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
+  }, [requireSecureTransport])
 
   useEffect(() => {
     const bootstrap = async () => {
@@ -303,7 +337,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
 
         if (typeof window !== "undefined" && nextStatus.isPasswordConfigured) {
           const storedToken = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY)?.trim() || ""
-          if (storedToken && isTrustedAdminContext()) {
+          if (storedToken && (!requireSecureTransport || isTrustedAdminContext())) {
             await restoreAdminSession(storedToken, true)
           } else if (storedToken) {
             clearAdminSession()
@@ -322,7 +356,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     }
 
     void bootstrap()
-  }, [])
+  }, [requireSecureTransport])
 
   useEffect(() => {
     if (!hasVisibleAdminKey) {
@@ -338,7 +372,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }, [hasVisibleAdminKey])
 
   const handleSetupAdmin = async () => {
-    if (!isSecureAdminContext) {
+    if (!canUseSensitiveAdminActions) {
       toast({
         title: ta("secureContextRequired"),
         description: ta("secureContextRequiredDescription"),
@@ -406,7 +440,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   }
 
   const handleLoginAdmin = async () => {
-    if (!isSecureAdminContext) {
+    if (!canUseSensitiveAdminActions) {
       toast({
         title: ta("secureContextRequired"),
         description: ta("secureContextRequiredDescription"),
@@ -448,7 +482,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
       return
     }
 
-    if (!isSecureAdminContext) {
+    if (!canUseSensitiveAdminActions) {
       toast({
         title: ta("secureContextRequired"),
         description: ta("secureContextRequiredDescription"),
@@ -459,7 +493,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     }
 
     try {
-      await navigator.clipboard.writeText(adminApiKey)
+      await copyTextToClipboard(adminApiKey)
       setCopiedKey(true)
       setTimeout(() => setCopiedKey(false), 1600)
       toast({
@@ -482,7 +516,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
       return
     }
 
-    if (!isSecureAdminContext) {
+    if (!canUseSensitiveAdminActions) {
       toast({
         title: ta("secureContextRequired"),
         description: ta("secureContextRequiredDescription"),
@@ -892,7 +926,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                 </p>
               </div>
 
-              {!isSecureAdminContext && (
+              {!canUseSensitiveAdminActions && (
                 <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-200">
                   <div className="font-semibold">{ta("insecureContextTitle")}</div>
                   <div className="mt-1 leading-6">{ta("insecureContextDescription")}</div>
@@ -928,7 +962,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                     className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
                     onPress={handleSetupAdmin}
                     isLoading={isSubmittingSetup}
-                    isDisabled={!isSecureAdminContext}
+                    isDisabled={!canUseSensitiveAdminActions}
                   >
                     {ta("setupSubmit")}
                   </Button>
@@ -990,7 +1024,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                         className="rounded-full bg-sky-600 text-white hover:bg-sky-700"
                         startContent={copiedKey ? <Check size={16} /> : <Copy size={16} />}
                         onPress={handleCopyAdminKey}
-                        isDisabled={!isSecureAdminContext}
+                        isDisabled={!canUseSensitiveAdminActions}
                       >
                         {copiedKey ? ta("keyCopiedAction") : ta("copyKey")}
                       </Button>
@@ -1001,7 +1035,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                       startContent={<RotateCw size={16} />}
                       onPress={handleRegenerateKey}
                       isLoading={isRefreshingKey}
-                      isDisabled={!isSecureAdminContext}
+                      isDisabled={!canUseSensitiveAdminActions}
                     >
                       {ta("regenerateKey")}
                     </Button>
@@ -1023,7 +1057,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
                     className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
                     onPress={handleLoginAdmin}
                     isLoading={isSubmittingLogin}
-                    isDisabled={!isSecureAdminContext}
+                    isDisabled={!canUseSensitiveAdminActions}
                   >
                     {ta("loginSubmit")}
                   </Button>
