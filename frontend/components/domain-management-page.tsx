@@ -20,13 +20,17 @@ import { useLocale, useTranslations } from "next-intl"
 import { useRouter } from "@/i18n/navigation"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import {
+  type AdminMetricsResponse,
   createManagedDomain,
   fetchManagedDomains,
   getAdminAccessKey,
+  getAdminAuditLogs,
+  getAdminMetrics,
   getAdminStatus,
   getManagedDomainRecords,
   loginAdmin,
   regenerateAdminAccessKey,
+  runAdminCleanup,
   setupAdminPassword,
   updateAdminPassword,
   verifyManagedDomain,
@@ -68,6 +72,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   const ta = useTranslations("admin")
   const ts = useTranslations("settings")
   const tc = useTranslations("common")
+  const locale = useLocale()
 
   const [status, setStatus] = useState<AdminStatus | null>(null)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
@@ -93,6 +98,11 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
   const [isSubmittingLogin, setIsSubmittingLogin] = useState(false)
   const [isRefreshingKey, setIsRefreshingKey] = useState(false)
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false)
+  const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null)
+  const [adminAuditLogs, setAdminAuditLogs] = useState<string[]>([])
+  const [adminOpsError, setAdminOpsError] = useState<string | null>(null)
+  const [isLoadingOps, setIsLoadingOps] = useState(false)
+  const [isRunningCleanup, setIsRunningCleanup] = useState(false)
   const [copiedKey, setCopiedKey] = useState(false)
 
   const hasAdminSession = sessionToken.trim().length > 0
@@ -107,6 +117,12 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     setVerifyingDomainId(null)
   }
 
+  const resetAdminOpsState = () => {
+    setAdminMetrics(null)
+    setAdminAuditLogs([])
+    setAdminOpsError(null)
+  }
+
   const clearAdminSession = (shouldToast = false) => {
     try {
       sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY)
@@ -118,6 +134,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     setCurrentPassword("")
     setNextPassword("")
     resetManagedDomainState()
+    resetAdminOpsState()
 
     if (shouldToast) {
       toast({
@@ -168,6 +185,47 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
     }
   }
 
+  const loadAdminOpsData = async (silent = false, tokenOverride = sessionToken) => {
+    const effectiveToken = tokenOverride.trim()
+    if (!effectiveToken) {
+      resetAdminOpsState()
+      return
+    }
+
+    setIsLoadingOps(true)
+
+    try {
+      const [metricsResponse, auditResponse] = await Promise.all([
+        getAdminMetrics(effectiveToken, DEFAULT_PROVIDER_ID),
+        getAdminAuditLogs(effectiveToken, DEFAULT_PROVIDER_ID, 40),
+      ])
+      setAdminMetrics(metricsResponse)
+      setAdminAuditLogs(auditResponse.entries)
+      setAdminOpsError(null)
+
+      if (!silent) {
+        toast({
+          title: ta("opsLoaded"),
+          color: "success",
+          variant: "flat",
+        })
+      }
+    } catch (error) {
+      setAdminOpsError(getErrorDescription(error, ta("opsLoadFailedDescription")))
+
+      if (!silent) {
+        toast({
+          title: ta("opsLoadFailed"),
+          description: getErrorDescription(error, ta("opsLoadFailedDescription")),
+          color: "danger",
+          variant: "flat",
+        })
+      }
+    } finally {
+      setIsLoadingOps(false)
+    }
+  }
+
   const restoreAdminSession = async (token: string, silent = false) => {
     const trimmedToken = token.trim()
     if (!trimmedToken) {
@@ -187,7 +245,10 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
       try {
         sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, trimmedToken)
       } catch {}
-      await loadManagedDomains(true, trimmedToken)
+      await Promise.all([
+        loadManagedDomains(true, trimmedToken),
+        loadAdminOpsData(true, trimmedToken),
+      ])
 
       if (!silent) {
         toast({
@@ -278,7 +339,10 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
       setAdminApiKey(response.apiKey)
       setSetupPassword("")
       setSetupPasswordConfirm("")
-      await loadManagedDomains(true, response.sessionToken)
+      await Promise.all([
+        loadManagedDomains(true, response.sessionToken),
+        loadAdminOpsData(true, response.sessionToken),
+      ])
 
       toast({
         title: ta("setupSuccess"),
@@ -371,6 +435,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
         color: "success",
         variant: "flat",
       })
+      await loadAdminOpsData(true)
     } catch (error) {
       toast({
         title: ta("keyRegenerateFailed"),
@@ -419,6 +484,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
         color: "success",
         variant: "flat",
       })
+      await loadAdminOpsData(true)
     } catch (error) {
       toast({
         title: ta("passwordChangeFailed"),
@@ -488,6 +554,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
           variant: "flat",
         })
       }
+      await loadAdminOpsData(true)
     } catch (error) {
       toast({
         title: ts("domainAddFailed"),
@@ -571,6 +638,7 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
         color: updatedDomain.isVerified ? "success" : "warning",
         variant: "flat",
       })
+      await loadAdminOpsData(true)
     } catch (error) {
       toast({
         title: ts("domainVerifyFailed"),
@@ -606,6 +674,98 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
 
     return "bg-gray-100 text-gray-700 dark:bg-gray-800 dark:text-gray-300"
   }
+
+  const formatTimestamp = (value?: string) => {
+    if (!value) {
+      return ta("opsTimestampEmpty")
+    }
+
+    const parsed = new Date(value)
+    if (Number.isNaN(parsed.getTime())) {
+      return ta("opsTimestampEmpty")
+    }
+
+    return parsed.toLocaleString(locale === "zh" ? "zh-CN" : "en-US")
+  }
+
+  const formatMetricValue = (value: number) =>
+    new Intl.NumberFormat(locale === "zh" ? "zh-CN" : "en-US").format(value)
+
+  const handleRunCleanup = async () => {
+    if (!hasAdminSession) {
+      return
+    }
+
+    setIsRunningCleanup(true)
+
+    try {
+      const response = await runAdminCleanup(sessionToken, DEFAULT_PROVIDER_ID)
+      await Promise.all([loadAdminOpsData(true), loadManagedDomains(true)])
+      toast({
+        title: ta("cleanupCompleted"),
+        description: ta("cleanupCompletedDescription", {
+          accounts: response.deletedAccounts,
+          messages: response.deletedMessages,
+          domains: response.deletedDomains,
+        }),
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("cleanupFailed"),
+        description: getErrorDescription(error, ta("cleanupFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsRunningCleanup(false)
+    }
+  }
+
+  const metricCards = adminMetrics
+    ? [
+        { label: ta("opsDomains"), value: adminMetrics.totalDomains },
+        { label: ta("opsActiveDomains"), value: adminMetrics.activeDomains },
+        { label: ta("opsPendingDomains"), value: adminMetrics.pendingDomains },
+        { label: ta("opsAccounts"), value: adminMetrics.totalAccounts },
+        { label: ta("opsActiveAccounts"), value: adminMetrics.activeAccounts },
+        { label: ta("opsMessages"), value: adminMetrics.totalMessages },
+        { label: ta("opsActiveMessages"), value: adminMetrics.activeMessages },
+        { label: ta("opsDeletedMessages"), value: adminMetrics.deletedMessages },
+        { label: ta("opsAuditLogs"), value: adminMetrics.auditLogsTotal },
+        { label: ta("opsImportedMessages"), value: adminMetrics.importedMessagesTotal },
+        {
+          label: ta("opsDeletedUpstreamMessages"),
+          value: adminMetrics.deletedUpstreamMessagesTotal,
+        },
+        { label: ta("opsRealtime"), value: adminMetrics.realtimeEventsTotal },
+        { label: ta("opsSseConnections"), value: adminMetrics.sseConnectionsActive },
+        { label: ta("opsSyncRuns"), value: adminMetrics.inbucketSyncRunsTotal },
+        { label: ta("opsSyncFailures"), value: adminMetrics.inbucketSyncFailuresTotal },
+        {
+          label: ta("opsVerificationRuns"),
+          value: adminMetrics.domainVerificationRunsTotal,
+        },
+        {
+          label: ta("opsVerificationFailures"),
+          value: adminMetrics.domainVerificationFailuresTotal,
+        },
+        { label: ta("opsCleanupRuns"), value: adminMetrics.cleanupRunsTotal },
+        {
+          label: ta("opsCleanupDeletedAccounts"),
+          value: adminMetrics.cleanupDeletedAccountsTotal,
+        },
+        {
+          label: ta("opsCleanupDeletedMessages"),
+          value: adminMetrics.cleanupDeletedMessagesTotal,
+        },
+        {
+          label: ta("opsCleanupDeletedDomains"),
+          value: adminMetrics.cleanupDeletedDomainsTotal,
+        },
+      ]
+    : []
 
   return (
     <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.14),transparent_30%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] px-4 py-6 text-gray-900 dark:bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] dark:text-gray-100 md:px-6 lg:px-8">
@@ -982,6 +1142,146 @@ export default function DomainManagementPage({ entryPath }: DomainManagementPage
               ))}
             </div>
           )}
+        </section>
+
+        <section className="grid gap-6 xl:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
+          <Card className="border border-slate-200/80 bg-white/90 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
+            <CardBody className="gap-5 p-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div className="space-y-2">
+                  <h2 className="text-lg font-semibold text-gray-950 dark:text-white">
+                    {ta("opsTitle")}
+                  </h2>
+                  <p className="text-sm leading-7 text-gray-600 dark:text-gray-300">
+                    {ta("opsDescription")}
+                  </p>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="flat"
+                    startContent={<RefreshCw size={16} />}
+                    onPress={() => void loadAdminOpsData(false)}
+                    isLoading={isLoadingOps}
+                    isDisabled={!hasAdminSession}
+                  >
+                    {ta("opsRefresh")}
+                  </Button>
+                  <Button
+                    size="sm"
+                    color="primary"
+                    className="bg-sky-600 text-white hover:bg-sky-700"
+                    startContent={<RotateCw size={16} />}
+                    onPress={handleRunCleanup}
+                    isLoading={isRunningCleanup}
+                    isDisabled={!hasAdminSession}
+                  >
+                    {ta("runCleanup")}
+                  </Button>
+                </div>
+              </div>
+
+              {!hasAdminSession ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                  {ta("loginFirst")}
+                </div>
+              ) : isLoadingOps && !adminMetrics ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                  {ta("opsLoading")}
+                </div>
+              ) : (
+                <div className="space-y-5">
+                  {adminOpsError && (
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-600 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300">
+                      <div className="font-medium">{ta("opsLoadFailed")}</div>
+                      <div className="mt-1">{adminOpsError}</div>
+                    </div>
+                  )}
+
+                  {adminMetrics && (
+                    <>
+                      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                        {metricCards.map((item) => (
+                          <div
+                            key={item.label}
+                            className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-900/70"
+                          >
+                            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                              {item.label}
+                            </div>
+                            <div className="mt-3 text-2xl font-semibold text-slate-950 dark:text-white">
+                              {formatMetricValue(item.value)}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="grid gap-3 md:grid-cols-3">
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/70">
+                          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                            {ta("opsLastInbucketSync")}
+                          </div>
+                          <div className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+                            {formatTimestamp(adminMetrics.lastInbucketSyncAt)}
+                          </div>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/70">
+                          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                            {ta("opsLastDomainVerification")}
+                          </div>
+                          <div className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+                            {formatTimestamp(adminMetrics.lastDomainVerificationAt)}
+                          </div>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-900/70">
+                          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                            {ta("opsLastCleanup")}
+                          </div>
+                          <div className="mt-3 text-sm font-medium text-slate-700 dark:text-slate-200">
+                            {formatTimestamp(adminMetrics.lastCleanupAt)}
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
+          <Card className="border border-slate-200/80 bg-white/90 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
+            <CardBody className="gap-5 p-6">
+              <div className="space-y-2">
+                <h2 className="text-lg font-semibold text-gray-950 dark:text-white">
+                  {ta("auditTitle")}
+                </h2>
+                <p className="text-sm leading-7 text-gray-600 dark:text-gray-300">
+                  {ta("auditDescription")}
+                </p>
+              </div>
+
+              {!hasAdminSession ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                  {ta("loginFirst")}
+                </div>
+              ) : adminAuditLogs.length === 0 ? (
+                <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
+                  {isLoadingOps ? ta("opsLoading") : ta("auditEmpty")}
+                </div>
+              ) : (
+                <div className="max-h-[42rem] space-y-3 overflow-y-auto pr-1">
+                  {adminAuditLogs.map((entry, index) => (
+                    <div
+                      key={`${index}-${entry}`}
+                      className="rounded-2xl border border-slate-200 bg-slate-50/80 p-4 font-mono text-xs leading-6 text-slate-700 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-200"
+                    >
+                      {entry}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardBody>
+          </Card>
         </section>
       </div>
     </div>

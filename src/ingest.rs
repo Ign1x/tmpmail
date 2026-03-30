@@ -21,6 +21,7 @@ pub fn spawn_inbucket_poller(state: AppState, client: Arc<InbucketClient>) {
 
         loop {
             if let Err(error) = sync_once(&state, &client).await {
+                state.metrics.record_inbucket_sync_failure();
                 tracing::warn!(error = ?error, "inbucket sync failed");
             }
 
@@ -35,11 +36,24 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
         active_mailboxes(&store.active_account_addresses())
     };
 
+    let mut imported_total = 0_usize;
+    let mut deleted_total = 0_usize;
+
     for mailbox in mailboxes {
         let messages = client
             .list_mailbox(&mailbox)
             .await
             .map_err(|error| crate::error::ApiError::internal(error.to_string()))?;
+        let active_source_keys = messages
+            .iter()
+            .map(|summary| format!("{mailbox}:{}", summary.id))
+            .collect::<HashSet<_>>();
+
+        let deleted_count = {
+            let mut store = state.store.write().await;
+            store.reconcile_mailbox_sources(&mailbox, &active_source_keys)
+        };
+        deleted_total += deleted_count;
 
         for summary in messages {
             let source_key = format!("{mailbox}:{}", summary.id);
@@ -62,21 +76,34 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
                 continue;
             }
 
-            let imported_count = {
+            let imported_receipts = {
                 let mut store = state.store.write().await;
                 store.import_message_for_recipients(&recipients, imported.clone())?
             };
 
-            if imported_count > 0 {
+            if !imported_receipts.is_empty() {
+                imported_total += imported_receipts.len();
+                for receipt in imported_receipts {
+                    state.realtime.publish(
+                        &state.metrics,
+                        "message.created",
+                        receipt.account_id,
+                        Some(receipt.message_id),
+                    );
+                }
                 tracing::info!(
                     mailbox = %mailbox,
                     source_key = %source_key,
-                    imported_count,
+                    imported_count = imported_total,
                     "imported message from inbucket"
                 );
             }
         }
     }
+
+    state
+        .metrics
+        .record_inbucket_sync_success(imported_total, deleted_total);
 
     Ok(())
 }

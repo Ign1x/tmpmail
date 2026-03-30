@@ -31,7 +31,7 @@ export default function MessageList({
   const [error, setError] = useState<string | null>(null);
   const { token, currentAccount } = useAuth();
   const { toast } = useHeroUIToast();
-  const { isEnabled } = useMailStatus();
+  const { isEnabled, connectionState } = useMailStatus();
   const isMobile = useIsMobile();
   const t = useTranslations("messageList");
   const locale = useLocale();
@@ -85,9 +85,9 @@ export default function MessageList({
   }, [token, currentAccount, t]);
 
   useMailChecker({
+    currentMessages: messages,
     onNewMessage: handleNewMessage,
     onMessagesUpdate: handleMessagesUpdate,
-    interval: 2000,
     enabled: isEnabled,
   });
 
@@ -211,7 +211,15 @@ export default function MessageList({
             }`}
           />
           <span className={isMobile ? "text-xs" : ""}>
-            {isEnabled ? t("pollingActive") : t("pollingPaused")}
+            {!isEnabled
+              ? t("streamPaused")
+              : connectionState === "connected"
+                ? t("streamConnected")
+                : connectionState === "reconnecting"
+                  ? t("streamReconnecting")
+                  : connectionState === "error"
+                    ? t("streamError")
+                    : t("streamConnecting")}
           </span>
           <span className="text-xs text-gray-400 ml-2">
             {t("messageCount")}: {messages.length}

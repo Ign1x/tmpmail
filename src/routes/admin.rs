@@ -30,6 +30,16 @@ pub async fn setup(
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.setup_password(&payload.password)?;
     let session_token = auth::issue_admin_session_token(&state.config)?;
+    {
+        let mut store = state.store.write().await;
+        store.append_audit_log(
+            "admin.setup",
+            "admin",
+            "system".to_owned(),
+            Some("admin".to_owned()),
+            "initialized administrator password and generated key".to_owned(),
+        );
+    }
 
     Ok((
         StatusCode::CREATED,
@@ -51,6 +61,17 @@ pub async fn login(
 
     if !admin_state.verify_password(&payload.password)? {
         return Err(ApiError::unauthorized("invalid admin password"));
+    }
+
+    {
+        let mut store = state.store.write().await;
+        store.append_audit_log(
+            "admin.login",
+            "admin",
+            "system".to_owned(),
+            Some("admin".to_owned()),
+            "admin session issued".to_owned(),
+        );
     }
 
     Ok(Json(AdminSessionResponse {
@@ -76,6 +97,16 @@ pub async fn regenerate_access_key(
     auth::require_admin_session(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     let api_key = admin_state.regenerate_api_key()?;
+    {
+        let mut store = state.store.write().await;
+        store.append_audit_log(
+            "admin.access_key.regenerate",
+            "admin",
+            "system".to_owned(),
+            Some("admin".to_owned()),
+            "administrator API key rotated".to_owned(),
+        );
+    }
 
     Ok(Json(AdminAccessKeyResponse { api_key }))
 }
@@ -88,6 +119,16 @@ pub async fn change_password(
     auth::require_admin_session(&headers, &state.config)?;
     let mut admin_state = state.admin_state.write().await;
     admin_state.change_password(&payload.current_password, &payload.new_password)?;
+    {
+        let mut store = state.store.write().await;
+        store.append_audit_log(
+            "admin.password.change",
+            "admin",
+            "system".to_owned(),
+            Some("admin".to_owned()),
+            "administrator password updated".to_owned(),
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

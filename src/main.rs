@@ -1,13 +1,16 @@
 mod admin_state;
 mod app;
 mod auth;
+mod cleanup_worker;
 mod config;
 mod domain_management;
 mod domain_worker;
 mod error;
 mod inbucket;
 mod ingest;
+mod metrics;
 mod models;
+mod realtime;
 mod routes;
 mod state;
 mod store;
@@ -17,8 +20,8 @@ use tokio::net::TcpListener;
 use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
-    app::build_router, config::Config, domain_worker::spawn_domain_verifier,
-    ingest::spawn_inbucket_poller, state::AppState,
+    app::build_router, cleanup_worker::spawn_cleanup_worker, config::Config,
+    domain_worker::spawn_domain_verifier, ingest::spawn_inbucket_poller, state::AppState,
 };
 
 #[tokio::main]
@@ -55,6 +58,11 @@ async fn main() -> anyhow::Result<()> {
     if app_state.config.domain_verification_poll_interval_seconds > 0 {
         spawn_domain_verifier(app_state.clone());
         tracing::info!("spawned domain verification worker");
+    }
+
+    if app_state.config.cleanup_interval_seconds > 0 {
+        spawn_cleanup_worker(app_state.clone());
+        tracing::info!("spawned cleanup worker");
     }
 
     axum::serve(listener, build_router(app_state))

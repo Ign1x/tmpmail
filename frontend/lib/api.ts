@@ -36,6 +36,43 @@ export interface AdminAccessKeyResponse {
   apiKey: string;
 }
 
+export interface AdminAuditLogsResponse {
+  entries: string[];
+}
+
+export interface CleanupRunResponse {
+  deletedAccounts: number;
+  deletedMessages: number;
+  deletedDomains: number;
+}
+
+export interface AdminMetricsResponse {
+  totalDomains: number;
+  activeDomains: number;
+  pendingDomains: number;
+  totalAccounts: number;
+  activeAccounts: number;
+  totalMessages: number;
+  activeMessages: number;
+  deletedMessages: number;
+  auditLogsTotal: number;
+  inbucketSyncRunsTotal: number;
+  inbucketSyncFailuresTotal: number;
+  importedMessagesTotal: number;
+  deletedUpstreamMessagesTotal: number;
+  domainVerificationRunsTotal: number;
+  domainVerificationFailuresTotal: number;
+  cleanupRunsTotal: number;
+  cleanupDeletedAccountsTotal: number;
+  cleanupDeletedMessagesTotal: number;
+  cleanupDeletedDomainsTotal: number;
+  realtimeEventsTotal: number;
+  sseConnectionsActive: number;
+  lastInbucketSyncAt?: string;
+  lastDomainVerificationAt?: string;
+  lastCleanupAt?: string;
+}
+
 function getDefaultProviderConfig() {
   return getPresetDefaultProviderConfig();
 }
@@ -55,6 +92,12 @@ function createBaseHeaders(providerId?: string): Record<string, string> {
   }
 
   return headers;
+}
+
+export function createProviderHeaders(
+  providerId?: string,
+): Record<string, string> {
+  return createBaseHeaders(providerId);
 }
 
 function attachBearerToken(
@@ -670,6 +713,69 @@ export async function updateAdminPassword(
     const error = await res.json().catch(() => ({}));
     throw new Error(getErrorMessage(res.status, error));
   }
+}
+
+export async function getAdminMetrics(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminMetricsResponse> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const res = await fetch(buildProxyUrl("/admin/metrics"), {
+    headers,
+    cache: "no-store",
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(getErrorMessage(res.status, error));
+  }
+
+  return res.json();
+}
+
+export async function getAdminAuditLogs(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+  limit = 50,
+): Promise<AdminAuditLogsResponse> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const res = await fetch(
+    buildProxyUrl(`/admin/audit-logs?limit=${encodeURIComponent(limit)}`),
+    {
+      headers,
+      cache: "no-store",
+    },
+  );
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(getErrorMessage(res.status, error));
+  }
+
+  return res.json();
+}
+
+export async function runAdminCleanup(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<CleanupRunResponse> {
+  const headers = createHeadersWithBearer(
+    sessionToken,
+    { "Content-Type": "application/json" },
+    providerId,
+  );
+  const res = await fetch(buildProxyUrl("/admin/cleanup"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify({}),
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(getErrorMessage(res.status, error));
+  }
+
+  return res.json();
 }
 
 export async function createManagedDomain(

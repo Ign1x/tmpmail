@@ -46,6 +46,7 @@ struct StoredAccount {
 #[derive(Clone, Debug)]
 struct StoredMessage {
     id: Uuid,
+    source_key: Option<String>,
     msgid: String,
     from: MessageAddress,
     to: Vec<MessageAddress>,
@@ -68,6 +69,32 @@ pub struct PendingDomainCheck {
     pub id: Uuid,
     pub domain: String,
     pub verification_token: String,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ImportedMessageReceipt {
+    pub account_id: Uuid,
+    pub message_id: Uuid,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CleanupReport {
+    pub deleted_accounts: usize,
+    pub deleted_messages: usize,
+    pub deleted_domains: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct StoreStats {
+    pub total_domains: usize,
+    pub active_domains: usize,
+    pub pending_domains: usize,
+    pub total_accounts: usize,
+    pub active_accounts: usize,
+    pub total_messages: usize,
+    pub active_messages: usize,
+    pub deleted_messages: usize,
+    pub audit_logs_total: usize,
 }
 
 #[derive(Debug)]
@@ -405,12 +432,12 @@ impl MemoryStore {
         &mut self,
         recipients: &[String],
         imported: ImportedMessage,
-    ) -> AppResult<usize> {
+    ) -> AppResult<Vec<ImportedMessageReceipt>> {
         if self.imported_source_keys.contains(&imported.source_key) {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
-        let mut imported_count = 0;
+        let mut receipts = Vec::new();
 
         for recipient in recipients {
             let Some(account_id) = self.accounts_by_address.get(recipient).copied() else {
@@ -425,15 +452,26 @@ impl MemoryStore {
             }
 
             let message = build_imported_message(&imported);
+            let message_id = message.id;
             self.messages.entry(account_id).or_default().push(message);
-            imported_count += 1;
+            self.record_audit(
+                "message.import",
+                "message",
+                message_id.to_string(),
+                Some(account_id.to_string()),
+                format!("source_key={} subject={}", imported.source_key, imported.subject),
+            );
+            receipts.push(ImportedMessageReceipt {
+                account_id,
+                message_id,
+            });
         }
 
-        if imported_count > 0 {
+        if !receipts.is_empty() {
             self.imported_source_keys.insert(imported.source_key);
         }
 
-        Ok(imported_count)
+        Ok(receipts)
     }
 
     pub fn list_messages(
@@ -496,20 +534,30 @@ impl MemoryStore {
             .ok_or_else(|| ApiError::not_found("account not found"))?;
         ensure_account_active(account)?;
 
-        let message = self
-            .messages
-            .get_mut(&account_id)
-            .and_then(|messages| {
-                messages
-                    .iter_mut()
-                    .find(|message| message.id == message_id && !message.is_deleted)
-            })
-            .ok_or_else(|| ApiError::not_found("message not found"))?;
+        let response = {
+            let message = self
+                .messages
+                .get_mut(&account_id)
+                .and_then(|messages| {
+                    messages
+                        .iter_mut()
+                        .find(|message| message.id == message_id && !message.is_deleted)
+                })
+                .ok_or_else(|| ApiError::not_found("message not found"))?;
 
-        message.seen = seen;
-        message.updated_at = Utc::now();
+            message.seen = seen;
+            message.updated_at = Utc::now();
+            MessageSeenResponse { seen: message.seen }
+        };
+        self.record_audit(
+            "message.seen",
+            "message",
+            message_id.to_string(),
+            Some(account_id.to_string()),
+            format!("seen={seen}"),
+        );
 
-        Ok(MessageSeenResponse { seen: message.seen })
+        Ok(response)
     }
 
     pub fn delete_message(&mut self, account_id: Uuid, message_id: Uuid) -> AppResult<()> {
@@ -519,20 +567,212 @@ impl MemoryStore {
             .ok_or_else(|| ApiError::not_found("account not found"))?;
         ensure_account_active(account)?;
 
-        let message = self
-            .messages
-            .get_mut(&account_id)
-            .and_then(|messages| {
-                messages
-                    .iter_mut()
-                    .find(|message| message.id == message_id && !message.is_deleted)
-            })
-            .ok_or_else(|| ApiError::not_found("message not found"))?;
+        {
+            let message = self
+                .messages
+                .get_mut(&account_id)
+                .and_then(|messages| {
+                    messages
+                        .iter_mut()
+                        .find(|message| message.id == message_id && !message.is_deleted)
+                })
+                .ok_or_else(|| ApiError::not_found("message not found"))?;
 
-        message.is_deleted = true;
-        message.updated_at = Utc::now();
+            message.is_deleted = true;
+            message.updated_at = Utc::now();
+        }
+        self.record_audit(
+            "message.delete",
+            "message",
+            message_id.to_string(),
+            Some(account_id.to_string()),
+            "soft deleted from mailbox".to_owned(),
+        );
 
         Ok(())
+    }
+
+    pub fn reconcile_mailbox_sources(
+        &mut self,
+        mailbox: &str,
+        active_source_keys: &HashSet<String>,
+    ) -> usize {
+        let mut deleted_count = 0_usize;
+        let mailbox_prefix = format!("{mailbox}:");
+
+        let account_ids = self.accounts.keys().copied().collect::<Vec<_>>();
+        for account_id in account_ids {
+            let mut deleted_message_ids = Vec::new();
+            if let Some(messages) = self.messages.get_mut(&account_id) {
+                for message in messages.iter_mut() {
+                    let Some(source_key) = message.source_key.as_deref() else {
+                        continue;
+                    };
+
+                    if !source_key.starts_with(&mailbox_prefix)
+                        || active_source_keys.contains(source_key)
+                        || message.is_deleted
+                    {
+                        continue;
+                    }
+
+                    message.is_deleted = true;
+                    message.updated_at = Utc::now();
+                    deleted_message_ids.push(message.id);
+                    deleted_count += 1;
+                }
+            }
+
+            for message_id in deleted_message_ids {
+                self.record_audit(
+                    "message.delete.sync",
+                    "message",
+                    message_id.to_string(),
+                    Some(account_id.to_string()),
+                    format!("mailbox={mailbox} upstream message missing"),
+                );
+            }
+        }
+
+        deleted_count
+    }
+
+    pub fn cleanup_expired_accounts(&mut self) -> CleanupReport {
+        let now = Utc::now();
+        let mut report = CleanupReport::default();
+        let mut expired_accounts = Vec::new();
+
+        for (account_id, account) in &self.accounts {
+            if account.is_deleted || account.is_disabled {
+                continue;
+            }
+
+            if account
+                .expires_at
+                .map(|expires_at| expires_at <= now)
+                .unwrap_or(false)
+            {
+                expired_accounts.push((*account_id, account.address.clone()));
+            }
+        }
+
+        for (account_id, address) in expired_accounts {
+            if let Some(account) = self.accounts.get_mut(&account_id) {
+                account.is_deleted = true;
+                account.updated_at = now;
+            }
+            self.accounts_by_address.remove(&address);
+
+            if let Some(messages) = self.messages.get_mut(&account_id) {
+                for message in messages.iter_mut().filter(|message| !message.is_deleted) {
+                    message.is_deleted = true;
+                    message.updated_at = now;
+                    report.deleted_messages += 1;
+                }
+            }
+
+            report.deleted_accounts += 1;
+            self.record_audit(
+                "account.expire",
+                "account",
+                account_id.to_string(),
+                None,
+                format!("address={address}"),
+            );
+        }
+
+        report
+    }
+
+    pub fn cleanup_stale_pending_domains(&mut self, max_age: Duration) -> usize {
+        let now = Utc::now();
+        let mut removed = 0_usize;
+        let mut removed_domains = Vec::new();
+
+        self.domains.retain(|domain| {
+            let should_remove = !domain.is_verified
+                && domain.status == "pending_verification"
+                && now.signed_duration_since(domain.created_at) >= max_age;
+
+            if should_remove {
+                removed_domains.push((domain.id, domain.domain.clone()));
+                removed += 1;
+                false
+            } else {
+                true
+            }
+        });
+
+        for (domain_id, domain_name) in removed_domains {
+            self.record_audit(
+                "domain.cleanup",
+                "domain",
+                domain_id.to_string(),
+                None,
+                format!("removed stale pending domain {domain_name}"),
+            );
+        }
+
+        removed
+    }
+
+    pub fn stats(&self) -> StoreStats {
+        let total_domains = self.domains.len();
+        let active_domains = self
+            .domains
+            .iter()
+            .filter(|domain| domain.is_verified && domain.status == "active")
+            .count();
+        let pending_domains = self
+            .domains
+            .iter()
+            .filter(|domain| domain.status == "pending_verification")
+            .count();
+        let total_accounts = self.accounts.len();
+        let active_accounts = self
+            .accounts
+            .values()
+            .filter(|account| ensure_account_active(account).is_ok())
+            .count();
+        let total_messages = self.messages.values().map(Vec::len).sum::<usize>();
+        let deleted_messages = self
+            .messages
+            .values()
+            .flatten()
+            .filter(|message| message.is_deleted)
+            .count();
+
+        StoreStats {
+            total_domains,
+            active_domains,
+            pending_domains,
+            total_accounts,
+            active_accounts,
+            total_messages,
+            active_messages: total_messages.saturating_sub(deleted_messages),
+            deleted_messages,
+            audit_logs_total: self.audit_logs.len(),
+        }
+    }
+
+    pub fn audit_logs(&self, limit: usize) -> Vec<String> {
+        self.audit_logs
+            .iter()
+            .rev()
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn append_audit_log(
+        &mut self,
+        action: &str,
+        entity_type: &str,
+        entity_id: String,
+        actor_id: Option<String>,
+        detail: String,
+    ) {
+        self.record_audit(action, entity_type, entity_id, actor_id, detail);
     }
 
     fn to_account(&self, account: &StoredAccount) -> Account {
@@ -764,6 +1004,7 @@ fn build_welcome_message(account: &StoredAccount) -> StoredMessage {
 
     StoredMessage {
         id: message_id,
+        source_key: None,
         msgid: format!("<{}@tmpmail.local>", message_id),
         from: MessageAddress {
             name: "TmpMail".to_owned(),
@@ -791,6 +1032,7 @@ fn build_welcome_message(account: &StoredAccount) -> StoredMessage {
 fn build_imported_message(imported: &ImportedMessage) -> StoredMessage {
     StoredMessage {
         id: Uuid::new_v4(),
+        source_key: Some(imported.source_key.clone()),
         msgid: imported.msgid.clone(),
         from: imported.from.clone(),
         to: imported.to.clone(),

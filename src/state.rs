@@ -3,13 +3,18 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::RwLock;
 
-use crate::{admin_state::AdminStateStore, config::Config, inbucket::InbucketClient, store::MemoryStore};
+use crate::{
+    admin_state::AdminStateStore, config::Config, inbucket::InbucketClient, metrics::AppMetrics,
+    realtime::RealtimeBroker, store::MemoryStore,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub inbucket_client: Option<Arc<InbucketClient>>,
     pub admin_state: Arc<RwLock<AdminStateStore>>,
+    pub metrics: Arc<AppMetrics>,
+    pub realtime: Arc<RealtimeBroker>,
     pub store: Arc<RwLock<MemoryStore>>,
 }
 
@@ -39,11 +44,15 @@ impl AppState {
         } else {
             None
         };
+        let metrics = Arc::new(AppMetrics::default());
+        let realtime = Arc::new(RealtimeBroker::new(256));
 
         Ok(Self {
             config: Arc::new(config),
             inbucket_client,
             admin_state: Arc::new(RwLock::new(admin_state)),
+            metrics,
+            realtime,
             store: Arc::new(RwLock::new(store)),
         })
     }

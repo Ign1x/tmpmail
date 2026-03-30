@@ -2,148 +2,265 @@
 
 import { useEffect, useRef, useCallback } from "react"
 import { useAuth } from "@/contexts/auth-context"
-import { getMessages } from "@/lib/api"
+import { useMailStatus } from "@/contexts/mail-status-context"
+import { createProviderHeaders, getMessages } from "@/lib/api"
 import type { Message } from "@/types"
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 
 interface UseMailCheckerOptions {
+  currentMessages?: Message[]
   onNewMessage?: (message: Message) => void
   onMessagesUpdate?: (messages: Message[]) => void
-  interval?: number // 检查间隔，默认2500ms (2.5秒)
   enabled?: boolean // 是否启用自动检查
 }
 
 export function useMailChecker({
+  currentMessages = [],
   onNewMessage,
   onMessagesUpdate,
-  interval = 1000, // 默认 1 秒检查间隔
   enabled = true,
 }: UseMailCheckerOptions = {}) {
   const { token, currentAccount, isAuthenticated } = useAuth()
-  const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const { setConnectionState, setLastCheckTime, setNewMessageCount } = useMailStatus()
+  const reconnectRef = useRef<NodeJS.Timeout | null>(null)
+  const abortRef = useRef<AbortController | null>(null)
+  const connectRef = useRef<(() => Promise<void>) | null>(null)
   const lastMessagesRef = useRef<Message[]>([])
-  const isCheckingRef = useRef(false)
-  const isInitializedRef = useRef(false) // 添加初始化标记
+  const isRefreshingRef = useRef(false)
+  const reconnectAttemptsRef = useRef(0)
+  const shouldReconnectRef = useRef(false)
 
-  // 使用 ref 来存储回调函数，避免依赖项问题
   const onNewMessageRef = useRef(onNewMessage)
   const onMessagesUpdateRef = useRef(onMessagesUpdate)
 
-  // 更新 ref 中的回调函数
   useEffect(() => {
     onNewMessageRef.current = onNewMessage
     onMessagesUpdateRef.current = onMessagesUpdate
   }, [onNewMessage, onMessagesUpdate])
 
-  const startChecking = useCallback(() => {
-    // 手动启动入口目前由 effect 自动管理，预留扩展
-  }, [])
+  useEffect(() => {
+    lastMessagesRef.current = currentMessages
+  }, [currentMessages])
+
+  const refreshMessages = useCallback(async () => {
+    if (!token || !currentAccount || !isAuthenticated || isRefreshingRef.current) {
+      return
+    }
+
+    isRefreshingRef.current = true
+
+    try {
+      const providerId = currentAccount.providerId || DEFAULT_PROVIDER_ID
+      const { messages } = await getMessages(token, 1, providerId)
+      const nextMessages = messages || []
+      const previousMessages = lastMessagesRef.current
+      const newMessages = nextMessages.filter(
+        (message) => !previousMessages.some((current) => current.id === message.id),
+      )
+
+      if (newMessages.length > 0) {
+        setNewMessageCount(newMessages.length)
+        newMessages.forEach((message) => {
+          onNewMessageRef.current?.(message)
+        })
+      } else {
+        setNewMessageCount(0)
+      }
+
+      onMessagesUpdateRef.current?.(nextMessages)
+      lastMessagesRef.current = nextMessages
+      setLastCheckTime(new Date())
+    } catch (error) {
+      console.error("❌ [MailChecker] Failed to refresh mailbox from stream:", error)
+    } finally {
+      isRefreshingRef.current = false
+    }
+  }, [
+    currentAccount,
+    isAuthenticated,
+    setLastCheckTime,
+    setNewMessageCount,
+    token,
+  ])
 
   const stopChecking = useCallback(() => {
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
+    shouldReconnectRef.current = false
+
+    if (reconnectRef.current) {
+      clearTimeout(reconnectRef.current)
+      reconnectRef.current = null
     }
 
-    isCheckingRef.current = false
-    isInitializedRef.current = false
-  }, [])
+    abortRef.current?.abort()
+    abortRef.current = null
+    reconnectAttemptsRef.current = 0
+    setConnectionState("idle")
+  }, [setConnectionState])
 
-  // 当依赖项变化时重新开始检查
-  useEffect(() => {
-    // 定义检查函数
-    const checkForNewMessages = async () => {
-      if (!token || !currentAccount || !isAuthenticated) {
+  const scheduleReconnect = useCallback(() => {
+    if (!shouldReconnectRef.current) {
+      return
+    }
+
+    if (reconnectRef.current) {
+      clearTimeout(reconnectRef.current)
+    }
+
+    reconnectAttemptsRef.current += 1
+    const delay = Math.min(1000 * 2 ** (reconnectAttemptsRef.current - 1), 10000)
+    setConnectionState("reconnecting")
+
+    reconnectRef.current = setTimeout(() => {
+      reconnectRef.current = null
+      void connectRef.current?.()
+    }, delay)
+  }, [setConnectionState])
+
+  const handleEvent = useCallback(
+    async (eventName: string, rawData: string) => {
+      if (eventName === "connected" || eventName === "heartbeat" || eventName === "lagged") {
+        setLastCheckTime(new Date())
         return
       }
 
-      if (isCheckingRef.current) {
+      if (eventName.startsWith("message.")) {
+        await refreshMessages()
         return
       }
 
-      isCheckingRef.current = true
-
-      try {
-        const providerId = currentAccount?.providerId || DEFAULT_PROVIDER_ID
-        const { messages } = await getMessages(token, 1, providerId)
-        const currentMessages = messages || []
-
-        // 如果是第一次初始化，直接设置消息列表，不触发新消息通知
-        if (!isInitializedRef.current) {
-          lastMessagesRef.current = currentMessages
-          isInitializedRef.current = true
-          onMessagesUpdateRef.current?.(currentMessages)
-          return
-        }
-
-        // 比较新消息（只有在已初始化后才检查新消息）
-        const lastMessages = lastMessagesRef.current
-        const newMessages = currentMessages.filter(
-          (currentMsg) => !lastMessages.some((lastMsg) => lastMsg.id === currentMsg.id)
-        )
-
-        // 如果有新消息，触发回调
-        if (newMessages.length > 0) {
-          newMessages.forEach((message) => {
-            onNewMessageRef.current?.(message)
-          })
-        }
-
-        // 更新消息列表
-        if (currentMessages.length !== lastMessages.length ||
-            currentMessages.some((msg, index) => msg.id !== lastMessages[index]?.id)) {
-          onMessagesUpdateRef.current?.(currentMessages)
-        }
-
-        // 更新最后的消息列表
-        lastMessagesRef.current = currentMessages
-      } catch (error) {
-        console.error("❌ [MailChecker] Failed to check for new messages:", error)
-        // 不抛出错误，避免中断定时检查
-      } finally {
-        isCheckingRef.current = false
+      if (rawData) {
+        try {
+          const parsed = JSON.parse(rawData)
+          if (typeof parsed?.event === "string" && parsed.event.startsWith("message.")) {
+            await refreshMessages()
+          }
+        } catch {}
       }
+    },
+    [refreshMessages, setLastCheckTime],
+  )
+
+  const connectStream = useCallback(async () => {
+    if (!enabled || !token || !currentAccount || !isAuthenticated) {
+      stopChecking()
+      return
     }
 
-    // 先停止现有的检查
-    if (intervalRef.current) {
-      clearInterval(intervalRef.current)
-      intervalRef.current = null
-    }
+    abortRef.current?.abort()
+    const controller = new AbortController()
+    abortRef.current = controller
 
-    if (enabled && token && currentAccount && isAuthenticated) {
-      // 立即检查一次
-      checkForNewMessages()
+    setConnectionState(
+      reconnectAttemptsRef.current > 0 ? "reconnecting" : "connecting",
+    )
 
-      // 设置定时检查
-      intervalRef.current = setInterval(() => {
-        checkForNewMessages()
-      }, interval)
-    } else {
-      isCheckingRef.current = false
-      isInitializedRef.current = false
-    }
+    try {
+      const providerId = currentAccount.providerId || DEFAULT_PROVIDER_ID
+      const response = await fetch(
+        `/api/sse?accountId=${encodeURIComponent(currentAccount.id)}`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${token}`,
+            ...createProviderHeaders(providerId),
+          },
+          cache: "no-store",
+          signal: controller.signal,
+        },
+      )
 
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current)
-        intervalRef.current = null
+      if (!response.ok || !response.body) {
+        throw new Error(`stream request failed with status ${response.status}`)
       }
-      isCheckingRef.current = false
-      isInitializedRef.current = false
-    }
-  }, [enabled, token, currentAccount, isAuthenticated, interval])
 
-  // 组件卸载时清理
+      reconnectAttemptsRef.current = 0
+      setConnectionState("connected")
+      setLastCheckTime(new Date())
+
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ""
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) {
+          break
+        }
+
+        buffer += decoder.decode(value, { stream: true })
+
+        let separatorIndex = buffer.indexOf("\n\n")
+        while (separatorIndex >= 0) {
+          const rawEvent = buffer.slice(0, separatorIndex)
+          buffer = buffer.slice(separatorIndex + 2)
+
+          const lines = rawEvent
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean)
+          const eventName =
+            lines.find((line) => line.startsWith("event:"))?.slice(6).trim() ||
+            "message"
+          const data = lines
+            .filter((line) => line.startsWith("data:"))
+            .map((line) => line.slice(5).trim())
+            .join("\n")
+
+          await handleEvent(eventName, data)
+          separatorIndex = buffer.indexOf("\n\n")
+        }
+      }
+
+      if (!controller.signal.aborted) {
+        throw new Error("stream closed unexpectedly")
+      }
+    } catch (error) {
+      if (controller.signal.aborted || !shouldReconnectRef.current) {
+        return
+      }
+
+      console.error("❌ [MailChecker] Mail stream disconnected:", error)
+      setConnectionState("error")
+      scheduleReconnect()
+    }
+  }, [
+    currentAccount,
+    enabled,
+    handleEvent,
+    isAuthenticated,
+    scheduleReconnect,
+    setConnectionState,
+    setLastCheckTime,
+    stopChecking,
+    token,
+  ])
+
   useEffect(() => {
+    connectRef.current = connectStream
+  }, [connectStream])
+
+  const startChecking = useCallback(() => {
+    shouldReconnectRef.current = true
+    void connectStream()
+  }, [connectStream])
+
+  useEffect(() => {
+    if (!enabled || !token || !currentAccount || !isAuthenticated) {
+      stopChecking()
+      return
+    }
+
+    shouldReconnectRef.current = true
+    void connectStream()
+
     return () => {
       stopChecking()
     }
-  }, [stopChecking])
+  }, [connectStream, currentAccount, enabled, isAuthenticated, stopChecking, token])
 
   return {
     startChecking,
     stopChecking,
-    isChecking: isCheckingRef.current,
+    isChecking: abortRef.current !== null,
   }
 }

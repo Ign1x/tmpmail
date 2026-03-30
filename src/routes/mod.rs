@@ -1,8 +1,10 @@
 pub mod admin;
 pub mod accounts;
 pub mod domains;
+pub mod events;
 pub mod health;
 pub mod messages;
+pub mod ops;
 
 use axum::{
     Router,
@@ -15,12 +17,17 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(health::health))
         .route("/readyz", get(health::ready))
+        .route("/metrics", get(ops::metrics))
         .route("/admin/status", get(admin::status))
         .route("/admin/setup", post(admin::setup))
         .route("/admin/login", post(admin::login))
         .route("/admin/access-key", get(admin::access_key))
         .route("/admin/access-key/regenerate", post(admin::regenerate_access_key))
         .route("/admin/password", post(admin::change_password))
+        .route("/admin/metrics", get(ops::admin_metrics))
+        .route("/admin/audit-logs", get(ops::admin_audit_logs))
+        .route("/admin/cleanup", post(ops::trigger_cleanup))
+        .route("/events", get(events::stream_events))
         .route(
             "/domains",
             get(domains::list_domains).post(domains::create_domain),

@@ -20,6 +20,8 @@ pub struct Config {
     pub mail_cname_target: String,
     pub domain_txt_prefix: String,
     pub domain_verification_poll_interval_seconds: i64,
+    pub cleanup_interval_seconds: i64,
+    pub pending_domain_retention_seconds: i64,
 }
 
 impl Default for Config {
@@ -43,6 +45,8 @@ impl Default for Config {
             mail_cname_target: "mail.tmpmail.local".to_owned(),
             domain_txt_prefix: "_tmpmail-verify".to_owned(),
             domain_verification_poll_interval_seconds: 60,
+            cleanup_interval_seconds: 300,
+            pending_domain_retention_seconds: 24 * 60 * 60,
         }
     }
 }
@@ -114,6 +118,15 @@ impl Config {
                 .ok()
                 .and_then(|value| value.parse::<i64>().ok())
                 .unwrap_or(defaults.domain_verification_poll_interval_seconds);
+        let cleanup_interval_seconds = env::var("TMPMAIL_CLEANUP_INTERVAL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<i64>().ok())
+            .unwrap_or(defaults.cleanup_interval_seconds);
+        let pending_domain_retention_seconds =
+            env::var("TMPMAIL_PENDING_DOMAIN_RETENTION_SECONDS")
+                .ok()
+                .and_then(|value| value.parse::<i64>().ok())
+                .unwrap_or(defaults.pending_domain_retention_seconds);
 
         Self {
             host,
@@ -134,6 +147,8 @@ impl Config {
             mail_cname_target,
             domain_txt_prefix,
             domain_verification_poll_interval_seconds,
+            cleanup_interval_seconds,
+            pending_domain_retention_seconds,
         }
     }
 

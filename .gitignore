@@ -5,6 +5,8 @@ target
 .env
 frontend/node_modules
 frontend/.next
+frontend/tsconfig.tsbuildinfo
+data/
 output/playwright
 deploy/inbucket/
 inbucket.env

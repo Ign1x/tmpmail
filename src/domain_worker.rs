@@ -31,12 +31,18 @@ async fn verify_pending_domains(state: &AppState) -> crate::error::AppResult<()>
         store.pending_domain_checks()
     };
 
+    let mut failures = 0_usize;
     for domain in pending {
         let result =
             verify_domain_dns(&domain.domain, &domain.verification_token, &state.config).await;
+        if result.is_err() {
+            failures += 1;
+        }
         let mut store = state.store.write().await;
         let _ = store.update_domain_verification_status(domain.id, result.is_ok(), result.err())?;
     }
+
+    state.metrics.record_domain_verification_run(failures);
 
     Ok(())
 }

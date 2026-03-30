@@ -59,6 +59,12 @@ pub async fn patch_message(
     let seen = payload.seen.unwrap_or(true);
     let mut store = state.store.write().await;
     let response = store.mark_message_seen(account_id, message_id, seen)?;
+    state.realtime.publish(
+        &state.metrics,
+        "message.updated",
+        account_id,
+        Some(message_id),
+    );
 
     Ok(Json(response))
 }
@@ -73,6 +79,12 @@ pub async fn delete_message(
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
     let mut store = state.store.write().await;
     store.delete_message(account_id, message_id)?;
+    state.realtime.publish(
+        &state.metrics,
+        "message.deleted",
+        account_id,
+        Some(message_id),
+    );
 
     Ok(StatusCode::NO_CONTENT)
 }
