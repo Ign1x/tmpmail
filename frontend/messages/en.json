@@ -593,6 +593,7 @@
     "responsePlaceholder": "// Run the request to preview the response here.",
     "unexpectedRequestFailure": "Unexpected request failure",
     "path": "Path",
+    "methodTitle": "Method",
     "descriptionTitle": "Description",
     "domainGroup": "Domains",
     "domainGetDesc": "Get the list of active public domains. If an administrator API key is provided, pending and inactive managed domains are also returned.",

@@ -593,6 +593,7 @@
     "responsePlaceholder": "// 执行请求后将在此处显示响应预览。",
     "unexpectedRequestFailure": "请求失败，请稍后重试",
     "path": "路径",
+    "methodTitle": "方法",
     "descriptionTitle": "描述",
     "domainGroup": "域名",
     "domainGetDesc": "获取当前可用的公共域名列表。如果提供管理员 API Key，还会返回待验证或未激活的托管域名。",
