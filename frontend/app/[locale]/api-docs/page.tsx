@@ -15,8 +15,6 @@ import {
 } from "lucide-react"
 import { useTranslations, useLocale } from "next-intl"
 import { useRouter, usePathname } from "@/i18n/navigation"
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { Textarea } from "@/components/ui/textarea"
 import {
   BRAND_NAME,
   BRAND_REPO_URL,
@@ -66,44 +64,16 @@ function methodBadgeClassName(method: ApiMethod): string {
   }
 }
 
-function authLabel(authType: ApiAuthType, t: any): string {
+function authLabel(authType: ApiAuthType, t: (key: string) => string): string {
   switch (authType) {
     case "required-token":
       return t("bearerToken")
     case "required-apikey":
-    case "optional-apikey":
       return t("apiKey")
+    case "optional-apikey":
+      return `${t("apiKey")} (${t("optional")})`
     default:
       return t("none")
-  }
-}
-
-async function parseResponsePayload(response: Response): Promise<unknown> {
-  const rawText = await response.text()
-  if (!rawText.trim()) {
-    return null
-  }
-
-  try {
-    return JSON.parse(rawText)
-  } catch {
-    return rawText
-  }
-}
-
-function stringifyPayload(payload: unknown): string {
-  if (payload == null) {
-    return ""
-  }
-
-  if (typeof payload === "string") {
-    return payload
-  }
-
-  try {
-    return JSON.stringify(payload, null, 2)
-  } catch {
-    return String(payload)
   }
 }
 
@@ -114,77 +84,11 @@ function ApiEndpointCard({
 }: {
   endpoint: ApiEndpoint
   isZh: boolean
-  t: any
+  t: (key: string) => string
 }) {
-  const [apiKey, setApiKey] = useState("")
-  const [token, setToken] = useState("")
-  const [body, setBody] = useState(endpoint.body || "")
-  const [pathParams, setPathParams] = useState<ApiPathParam[]>(
-    () => (endpoint.pathParams || []).map((param) => ({ ...param })),
-  )
-  const [response, setResponse] = useState<{ status: number; payload: unknown } | null>(null)
-  const [error, setError] = useState<{ status: number; payload: unknown } | null>(null)
-  const [loading, setLoading] = useState(false)
-  const fieldLabelClassName = isZh
-    ? "block text-xs font-medium tracking-[0.08em] text-slate-500 dark:text-slate-400"
-    : "block text-xs font-medium uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400"
   const badgeLabelClassName = isZh
     ? "rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium tracking-[0.06em] text-slate-600 dark:bg-slate-900 dark:text-slate-300"
     : "rounded-full bg-slate-100 px-2.5 py-1 text-[11px] font-medium uppercase tracking-[0.16em] text-slate-600 dark:bg-slate-900 dark:text-slate-300"
-
-  const handleExecute = async () => {
-    setLoading(true)
-    setError(null)
-    setResponse(null)
-
-    let urlPath = endpoint.path
-    pathParams.forEach((param) => {
-      urlPath = urlPath.replace(`{${param.name}}`, param.value)
-    })
-
-    const headers: Record<string, string> = {}
-    if (endpoint.method !== "GET") {
-      headers["Content-Type"] = "application/json"
-    }
-
-    if (
-      (endpoint.authType === "optional-apikey" ||
-        endpoint.authType === "required-apikey") &&
-      apiKey.trim()
-    ) {
-      headers["Authorization"] = `Bearer ${apiKey.trim()}`
-    }
-
-    if (endpoint.authType === "required-token" && token.trim()) {
-      headers["Authorization"] = `Bearer ${token.trim()}`
-    }
-
-    try {
-      const res = await fetch(`/api/mail?endpoint=${encodeURIComponent(urlPath)}`, {
-        method: endpoint.method,
-        headers,
-        body: endpoint.method === "GET" ? undefined : body,
-      })
-
-      const payload = await parseResponsePayload(res)
-      if (!res.ok) {
-        setError({ status: res.status, payload })
-        return
-      }
-
-      setResponse({ status: res.status, payload })
-    } catch (requestError) {
-      setError({
-        status: 0,
-        payload:
-          requestError instanceof Error
-            ? requestError.message
-            : t("unexpectedRequestFailure"),
-      })
-    } finally {
-      setLoading(false)
-    }
-  }
 
   return (
     <Card className="overflow-hidden border border-slate-200/80 bg-white/90 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
@@ -200,149 +104,52 @@ function ApiEndpointCard({
               >
                 {endpoint.method}
               </span>
-              <div className="min-w-0 flex-1">
-                <div className="overflow-x-auto">
-                  <code className="api-docs-mono inline-flex min-w-fit rounded-2xl bg-slate-950 px-4 py-3 text-[13px] text-slate-100 shadow-inner dark:bg-black">
-                    {endpoint.path}
-                  </code>
-                </div>
+              <div className="min-w-0 flex-1 overflow-x-auto">
+                <code className="api-docs-mono inline-flex min-w-fit rounded-2xl bg-slate-950 px-4 py-3 text-[13px] text-slate-100 shadow-inner dark:bg-black">
+                  {endpoint.path}
+                </code>
               </div>
+              <span className={badgeLabelClassName}>
+                {t("authorization")}: {authLabel(endpoint.authType, t)}
+              </span>
             </div>
-            <p className="max-w-3xl text-sm leading-7 text-slate-600 dark:text-slate-300">
+            <p className="max-w-4xl text-sm leading-7 text-slate-600 dark:text-slate-300">
               {endpoint.description}
             </p>
           </div>
         </div>
 
-        <div className="grid gap-6 p-5 xl:grid-cols-[minmax(0,380px)_minmax(0,1fr)]">
-          <div className="min-w-0 space-y-5">
-            {endpoint.authType !== "none" && (
-              <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950/70">
-                <div className="mb-3 flex items-center justify-between gap-3">
-                  <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    {t("authorization")}
-                  </h4>
-                  <span className={badgeLabelClassName}>
-                    {authLabel(endpoint.authType, t)}
-                  </span>
-                </div>
-                <label className={fieldLabelClassName}>
-                  {endpoint.authType === "required-token" ? t("bearerToken") : t("apiKey")}
-                </label>
-                <input
-                  className="mt-2 h-12 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:ring-sky-950"
-                  placeholder={
-                    endpoint.authType === "required-token"
-                      ? t("enterBearerToken")
-                      : endpoint.authType === "optional-apikey"
-                        ? t("enterOptionalAdminApiKey")
-                        : t("enterAdminApiKey")
-                  }
-                  type="password"
-                  value={endpoint.authType === "required-token" ? token : apiKey}
-                  onChange={(event) => {
-                    if (endpoint.authType === "required-token") {
-                      setToken(event.target.value)
-                    } else {
-                      setApiKey(event.target.value)
-                    }
-                  }}
-                />
-              </section>
-            )}
-
-            {pathParams.length > 0 && (
-              <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950/70">
-                <h4 className="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {t("path")} {t("parameters")}
-                </h4>
-                <div className="space-y-3">
-                  {pathParams.map((param, index) => (
-                    <div key={param.name} className="min-w-0">
-                      <label className={fieldLabelClassName}>
-                        {param.name}
-                      </label>
-                      <input
-                        className="mt-2 h-11 w-full rounded-xl border border-slate-200 bg-slate-50 px-4 text-sm text-slate-900 outline-none transition focus:border-sky-400 focus:ring-4 focus:ring-sky-100 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100 dark:focus:border-sky-500 dark:focus:ring-sky-950"
-                        value={param.value}
-                        onChange={(event) => {
-                          setPathParams((currentParams) =>
-                            currentParams.map((item, itemIndex) =>
-                              itemIndex === index
-                                ? { ...item, value: event.target.value }
-                                : item,
-                            ),
-                          )
-                        }}
-                      />
+        <div className="grid gap-4 p-5 lg:grid-cols-2">
+          {endpoint.pathParams && endpoint.pathParams.length > 0 && (
+            <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950/70">
+              <h4 className="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                {t("path")} {t("parameters")}
+              </h4>
+              <div className="space-y-3">
+                {endpoint.pathParams.map((param) => (
+                  <div key={param.name} className="rounded-xl bg-slate-50 px-3 py-2 dark:bg-slate-900">
+                    <div className="api-docs-mono text-[13px] font-semibold text-slate-900 dark:text-slate-100">
+                      {param.name}
                     </div>
-                  ))}
-                </div>
-              </section>
-            )}
-
-            {endpoint.body && (
-              <section className="rounded-2xl border border-slate-200 bg-white p-4 dark:border-slate-800 dark:bg-slate-950/70">
-                <h4 className="mb-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  {t("body")}
-                </h4>
-                <Textarea
-                  className="api-docs-mono min-h-[180px] resize-y rounded-2xl border-slate-200 bg-slate-50 text-[13px] leading-6 text-slate-900 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-100"
-                  value={body}
-                  onChange={(event) => setBody(event.target.value)}
-                />
-              </section>
-            )}
-
-            <Button
-              className="h-12 w-full rounded-xl bg-sky-600 text-sm font-semibold text-white hover:bg-sky-700"
-              isLoading={loading}
-              onPress={handleExecute}
-            >
-              {t("execute")}
-            </Button>
-          </div>
-
-          <section className="min-w-0 overflow-hidden rounded-2xl border border-slate-200 bg-slate-950 text-slate-100 shadow-inner dark:border-slate-800">
-            <div className="flex items-center justify-between gap-3 border-b border-white/10 px-4 py-3">
-              <div>
-                <h4 className="text-sm font-semibold">{t("response")}</h4>
-                <p className="text-xs text-slate-400">
-                  {response
-                    ? `${t("success")} · HTTP ${response.status}`
-                    : error
-                      ? `${t("error")} · HTTP ${error.status || "ERR"}`
-                      : t("responsePreview")}
-                </p>
+                    <div className="mt-1 text-sm text-slate-600 dark:text-slate-300">
+                      {param.value}
+                    </div>
+                  </div>
+                ))}
               </div>
-              <span
-                className={cn(
-                  isZh
-                    ? "rounded-full px-2.5 py-1 text-[11px] font-semibold tracking-[0.06em]"
-                    : "rounded-full px-2.5 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]",
-                  response
-                    ? "bg-emerald-500/15 text-emerald-300"
-                    : error
-                      ? "bg-rose-500/15 text-rose-300"
-                      : "bg-slate-800 text-slate-300",
-                )}
-              >
-                {response ? t("success") : error ? t("error") : t("tryItOut")}
-              </span>
-            </div>
-            <div className="overflow-x-auto p-4">
-              {loading ? (
-                <div className="flex min-h-[320px] items-center justify-center text-sm text-slate-400">
-                  {t("loading")}
-                </div>
-              ) : (
-                <pre className="api-docs-mono min-h-[320px] whitespace-pre-wrap break-words text-[13px] leading-6 text-slate-100">
-                  {stringifyPayload(response?.payload ?? error?.payload) ||
-                    t("responsePlaceholder")}
-                </pre>
-              )}
-            </div>
-          </section>
+            </section>
+          )}
+
+          {endpoint.body && (
+            <section className="rounded-2xl border border-slate-200 bg-slate-950 p-4 text-slate-100 shadow-inner dark:border-slate-800">
+              <h4 className="mb-3 text-sm font-semibold text-white">
+                {t("body")}
+              </h4>
+              <pre className="api-docs-mono overflow-x-auto whitespace-pre-wrap break-words text-[13px] leading-6 text-slate-100">
+                {endpoint.body}
+              </pre>
+            </section>
+          )}
         </div>
       </CardBody>
     </Card>
@@ -386,14 +193,14 @@ export default function ApiDocsPage() {
           path: "/domains/{id}/records",
           description: t("domainRecordsDesc"),
           authType: "required-apikey",
-          pathParams: [{ name: "id", value: "" }],
+          pathParams: [{ name: "id", value: "domain-id" }],
         },
         {
           method: "POST",
           path: "/domains/{id}/verify",
           description: t("domainVerifyDesc"),
           authType: "required-apikey",
-          pathParams: [{ name: "id", value: "" }],
+          pathParams: [{ name: "id", value: "domain-id" }],
           body: "{}",
         },
       ],
@@ -419,7 +226,7 @@ export default function ApiDocsPage() {
           path: "/accounts/{id}",
           description: t("accountDeleteDesc"),
           authType: "required-token",
-          pathParams: [{ name: "id", value: "" }],
+          pathParams: [{ name: "id", value: "account-id" }],
         },
       ],
     },
@@ -449,14 +256,14 @@ export default function ApiDocsPage() {
           path: "/messages/{id}",
           description: t("messageGetDesc"),
           authType: "required-token",
-          pathParams: [{ name: "id", value: "" }],
+          pathParams: [{ name: "id", value: "message-id" }],
         },
         {
           method: "DELETE",
           path: "/messages/{id}",
           description: t("messageDeleteDesc"),
           authType: "required-token",
-          pathParams: [{ name: "id", value: "" }],
+          pathParams: [{ name: "id", value: "message-id" }],
         },
       ],
     },
@@ -644,7 +451,7 @@ export default function ApiDocsPage() {
           </div>
 
           <Card className="border border-slate-200/80 bg-white/90 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
-            <CardBody className="gap-5 p-4 md:p-6">
+            <CardBody className="gap-6 p-4 md:p-6">
               <div className="flex items-center gap-3">
                 <Server className="text-sky-600 dark:text-sky-300" size={20} />
                 <h2 className="text-xl font-semibold text-slate-950 dark:text-white">
@@ -652,34 +459,27 @@ export default function ApiDocsPage() {
                 </h2>
               </div>
 
-              <Tabs defaultValue={apiEndpoints[0]?.group} className="min-w-0">
-                <div className="pb-2">
-                  <TabsList className="flex h-auto w-full flex-wrap justify-start gap-2 rounded-2xl bg-slate-100/90 p-2 dark:bg-slate-900/80 sm:min-w-fit sm:flex-nowrap">
-                    {apiEndpoints.map((group) => (
-                      <TabsTrigger
-                        key={group.group}
-                        className="rounded-xl px-4 py-2.5 text-sm font-semibold data-[state=active]:bg-white data-[state=active]:text-slate-950 data-[state=active]:shadow-sm dark:data-[state=active]:bg-slate-950 dark:data-[state=active]:text-white"
-                        value={group.group}
-                      >
-                        {group.group}
-                      </TabsTrigger>
-                    ))}
-                  </TabsList>
-                </div>
-
+              <div className="space-y-8">
                 {apiEndpoints.map((group) => (
-                  <TabsContent key={group.group} value={group.group} className="mt-4 space-y-5">
-                    {group.endpoints.map((endpoint) => (
-                      <ApiEndpointCard
-                        key={`${group.group}-${endpoint.method}-${endpoint.path}`}
-                        endpoint={endpoint}
-                        isZh={isZh}
-                        t={t}
-                      />
-                    ))}
-                  </TabsContent>
+                  <section key={group.group} className="space-y-4">
+                    <div className="border-b border-slate-200/80 pb-3 dark:border-slate-800">
+                      <h3 className="text-lg font-semibold text-slate-950 dark:text-white">
+                        {group.group}
+                      </h3>
+                    </div>
+                    <div className="space-y-5">
+                      {group.endpoints.map((endpoint) => (
+                        <ApiEndpointCard
+                          key={`${group.group}-${endpoint.method}-${endpoint.path}`}
+                          endpoint={endpoint}
+                          isZh={isZh}
+                          t={t}
+                        />
+                      ))}
+                    </div>
+                  </section>
                 ))}
-              </Tabs>
+              </div>
             </CardBody>
           </Card>
 
