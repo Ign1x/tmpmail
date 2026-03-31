@@ -15,9 +15,9 @@ services:
     volumes:
       - ./data:/app/data
     ports:
-      - "${TMPMAIL_PORT:-8080}:${TMPMAIL_PORT:-8080}"
+      - "${TMPMAIL_API_BIND_IP:-127.0.0.1}:${TMPMAIL_PORT:-8080}:${TMPMAIL_PORT:-8080}"
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${TMPMAIL_PORT:-8080}/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${TMPMAIL_PORT:-8080}/readyz"]
       interval: 10s
       timeout: 3s
       retries: 5
@@ -27,6 +27,11 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_TMPMAIL_BRAND_NAME: "${NEXT_PUBLIC_TMPMAIL_BRAND_NAME:-TmpMail}"
+        NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN:-}"
+        NEXT_PUBLIC_TMPMAIL_REPO_URL: "${NEXT_PUBLIC_TMPMAIL_REPO_URL:-}"
+        NEXT_PUBLIC_TMPMAIL_QUICK_CREATE_PASSWORD: "${NEXT_PUBLIC_TMPMAIL_QUICK_CREATE_PASSWORD:-}"
     image: tmpmail-frontend:local
     container_name: tmpmail-frontend
     restart: unless-stopped
@@ -38,9 +43,13 @@ services:
       TMPMAIL_SERVER_API_BASE_URL: "http://api:${TMPMAIL_PORT:-8080}"
       TMPMAIL_ADMIN_ENTRY_PATH: "${TMPMAIL_ADMIN_ENTRY_PATH:-/admin}"
       TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT: "${TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT:-true}"
+      NEXT_PUBLIC_TMPMAIL_BRAND_NAME: "${NEXT_PUBLIC_TMPMAIL_BRAND_NAME:-TmpMail}"
+      NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN:-}"
+      NEXT_PUBLIC_TMPMAIL_REPO_URL: "${NEXT_PUBLIC_TMPMAIL_REPO_URL:-}"
+      NEXT_PUBLIC_TMPMAIL_QUICK_CREATE_PASSWORD: "${NEXT_PUBLIC_TMPMAIL_QUICK_CREATE_PASSWORD:-}"
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
-      - "${TMPMAIL_FRONTEND_PORT:-3000}:3000"
+      - "${TMPMAIL_FRONTEND_BIND_IP:-0.0.0.0}:${TMPMAIL_FRONTEND_PORT:-3000}:3000"
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/en').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s

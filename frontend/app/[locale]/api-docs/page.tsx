@@ -22,6 +22,7 @@ import {
   BRAND_REPO_URL,
   DEFAULT_DOMAIN,
   DEFAULT_PROVIDER_BASE_URL,
+  EXAMPLE_DOMAIN,
 } from "@/lib/provider-config"
 import { cn } from "@/lib/utils"
 
@@ -361,6 +362,7 @@ export default function ApiDocsPage() {
     typeof window === "undefined"
       ? "/llm-api-docs.txt"
       : `${window.location.origin}/llm-api-docs.txt`
+  const exampleDomain = DEFAULT_DOMAIN || EXAMPLE_DOMAIN
 
   const apiEndpoints: ApiEndpointGroup[] = [
     {
@@ -404,7 +406,7 @@ export default function ApiDocsPage() {
           path: "/accounts",
           description: t("accountCreateDesc"),
           authType: "none",
-          body: `{\n  "address": "user@${DEFAULT_DOMAIN}",\n  "password": "your_password",\n  "expiresIn": 0\n}`,
+          body: `{\n  "address": "user@${exampleDomain}",\n  "password": "your_password",\n  "expiresIn": 0\n}`,
         },
         {
           method: "GET",
@@ -429,7 +431,7 @@ export default function ApiDocsPage() {
           path: "/token",
           description: t("tokenDesc"),
           authType: "none",
-          body: `{\n  "address": "user@${DEFAULT_DOMAIN}",\n  "password": "your_password"\n}`,
+          body: `{\n  "address": "user@${exampleDomain}",\n  "password": "your_password"\n}`,
         },
       ],
     },
@@ -551,7 +553,7 @@ export default function ApiDocsPage() {
 {`curl -X POST ${DEFAULT_PROVIDER_BASE_URL}/token \\
   -H "Content-Type: application/json" \\
   -d '{
-    "address": "user@${DEFAULT_DOMAIN}",
+    "address": "user@${exampleDomain}",
     "password": "your_password"
   }'`}
               </pre>

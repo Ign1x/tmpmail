@@ -2,17 +2,19 @@
 
 import { useEffect, useState, useTransition, type ReactNode } from "react"
 import { Button } from "@heroui/button"
-import { Languages, Menu, RefreshCw, X } from "lucide-react"
+import { Languages, Menu, RefreshCw, Wifi, X } from "lucide-react"
 import { useTranslations, useLocale } from "next-intl"
 import { usePathname, useRouter } from "@/i18n/navigation"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { useIsMobile } from "@/hooks/use-mobile"
+import { useAuth } from "@/contexts/auth-context"
+import { useMailStatus } from "@/contexts/mail-status-context"
 import Header from "@/components/header"
 import Sidebar from "@/components/sidebar"
 import AccountModal from "@/components/account-modal"
 import LoginModal from "@/components/login-modal"
 import UpdateNoticeModal from "@/components/update-notice-modal"
-import { BRAND_DOMAIN, BRAND_NAME, BRAND_REPO_URL } from "@/lib/provider-config"
+import { BRAND_LABEL, BRAND_NAME, BRAND_REPO_URL } from "@/lib/provider-config"
 
 interface AppShellProps {
   activeItem: "inbox" | "settings"
@@ -41,10 +43,13 @@ export default function AppShell({
   const [isUpdateNoticeModalOpen, setIsUpdateNoticeModalOpen] = useState(false)
   const { toast } = useHeroUIToast()
   const isMobile = useIsMobile()
+  const { isAuthenticated, currentAccount } = useAuth()
+  const { isEnabled, connectionState } = useMailStatus()
   const locale = useLocale()
   const router = useRouter()
   const pathname = usePathname()
   const t = useTranslations("mainPage")
+  const tm = useTranslations("messageList")
 
   useEffect(() => {
     if (!autoOpenUpdateNotice || typeof window === "undefined") {
@@ -143,20 +148,38 @@ export default function AppShell({
     setIsSidebarOpen(false)
   }
 
+  const mobileStatusLabel =
+    !isAuthenticated || !currentAccount
+      ? BRAND_NAME
+      : !isEnabled
+        ? tm("streamPaused")
+        : connectionState === "connected"
+          ? tm("streamConnected")
+          : connectionState === "reconnecting"
+            ? tm("streamReconnecting")
+            : connectionState === "error"
+              ? tm("streamError")
+              : tm("streamConnecting")
+
   return (
     <>
       <div
-        className={`flex h-screen bg-gray-50 text-gray-800 transition-opacity duration-200 dark:bg-gray-900 dark:text-gray-100 ${
+        className={`relative flex min-h-screen overflow-hidden bg-[linear-gradient(180deg,#f8fbff_0%,#eef4ff_45%,#f6f8fb_100%)] text-gray-800 transition-opacity duration-200 dark:bg-[linear-gradient(180deg,#020617_0%,#0f172a_55%,#111827_100%)] dark:text-gray-100 ${
           isPending ? "pointer-events-none opacity-60" : "opacity-100"
         }`}
       >
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.18),transparent_28%),radial-gradient(circle_at_top_right,rgba(251,191,36,0.12),transparent_24%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_28%),radial-gradient(circle_at_top_right,rgba(15,23,42,0.42),transparent_30%)]" />
+
         {!isMobile && (
-          <Sidebar activeItem={activeItem} onItemClick={handleSidebarItemClick} />
+          <div className="relative hidden h-screen px-4 py-4 md:block">
+            <Sidebar activeItem={activeItem} onItemClick={handleSidebarItemClick} />
+          </div>
         )}
 
-        <div className="flex flex-1 flex-col overflow-hidden">
+        <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden md:py-4 md:pr-4">
+          <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden border border-white/65 bg-white/70 shadow-[0_30px_90px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none md:rounded-[2rem]">
           {isMobile && (
-            <div className="flex items-center justify-between border-b border-gray-200 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
+            <div className="flex items-center justify-between border-b border-slate-200/80 bg-white/80 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80">
               <Button
                 isIconOnly
                 variant="light"
@@ -167,17 +190,23 @@ export default function AppShell({
               >
                 <Menu size={20} />
               </Button>
-              <div className="flex items-center space-x-2">
-                <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-lg">
-                  <img
-                    src="https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png"
-                    alt={`${BRAND_NAME} Logo`}
-                    className="h-full w-full object-contain"
-                  />
+              <div className="min-w-0 px-2">
+                <div className="flex items-center justify-center gap-2">
+                  <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-xl">
+                    <img
+                      src="https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png"
+                      alt={`${BRAND_NAME} Logo`}
+                      className="h-full w-full object-contain"
+                    />
+                  </div>
+                  <span className="truncate text-base font-semibold text-slate-800 dark:text-white">
+                    {BRAND_LABEL}
+                  </span>
                 </div>
-                <span className="text-lg font-semibold text-gray-800 dark:text-white">
-                  {BRAND_DOMAIN}
-                </span>
+                <div className="mt-1 flex items-center justify-center gap-1.5 text-[11px] text-slate-500 dark:text-slate-400">
+                  <Wifi size={11} className={isAuthenticated && isEnabled ? "text-emerald-500" : "text-slate-400"} />
+                  <span className="truncate">{mobileStatusLabel}</span>
+                </div>
               </div>
               <div className="w-8" />
             </div>
@@ -193,46 +222,49 @@ export default function AppShell({
           {banner}
 
           <main className="flex-1 overflow-y-auto">{children}</main>
+          </div>
         </div>
 
         {isMobile && isSidebarOpen && (
           <div className="fixed inset-0 z-50">
             <div
-              className="absolute inset-0 bg-black/50 transition-opacity duration-300"
+              className="absolute inset-0 bg-slate-950/45 backdrop-blur-[2px] transition-opacity duration-300"
               onClick={() => setIsSidebarOpen(false)}
             />
-            <div className="absolute left-0 top-0 h-full w-64 bg-white shadow-lg dark:bg-gray-900">
-              <div className="border-b border-gray-200 p-4 dark:border-gray-800">
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center space-x-2">
-                    <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-lg">
-                      <img
-                        src="https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png"
-                        alt={`${BRAND_NAME} Logo`}
-                        className="h-full w-full object-contain"
-                      />
+            <div className="absolute left-0 top-0 h-full w-[18rem] max-w-[85vw] bg-transparent p-3">
+              <div className="flex h-full flex-col rounded-[1.75rem] border border-white/60 bg-white/92 shadow-[0_24px_60px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92">
+                <div className="border-b border-slate-200/80 p-4 dark:border-slate-800">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <div className="flex h-6 w-6 items-center justify-center overflow-hidden rounded-lg">
+                        <img
+                          src="https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png"
+                          alt={`${BRAND_NAME} Logo`}
+                          className="h-full w-full object-contain"
+                        />
+                      </div>
+                      <span className="text-lg font-semibold text-gray-800 dark:text-white">
+                        {BRAND_LABEL}
+                      </span>
                     </div>
-                    <span className="text-lg font-semibold text-gray-800 dark:text-white">
-                      {BRAND_DOMAIN}
-                    </span>
+                    <Button
+                      isIconOnly
+                      variant="light"
+                      size="sm"
+                      onPress={() => setIsSidebarOpen(false)}
+                      className="text-gray-600 dark:text-gray-300"
+                      aria-label={t("closeMenu")}
+                    >
+                      <X size={18} />
+                    </Button>
                   </div>
-                  <Button
-                    isIconOnly
-                    variant="light"
-                    size="sm"
-                    onPress={() => setIsSidebarOpen(false)}
-                    className="text-gray-600 dark:text-gray-300"
-                    aria-label={t("closeMenu")}
-                  >
-                    <X size={18} />
-                  </Button>
                 </div>
+                <Sidebar
+                  activeItem={activeItem}
+                  onItemClick={handleMobileSidebarItemClick}
+                  isMobile={true}
+                />
               </div>
-              <Sidebar
-                activeItem={activeItem}
-                onItemClick={handleMobileSidebarItemClick}
-                isMobile={true}
-              />
             </div>
           </div>
         )}

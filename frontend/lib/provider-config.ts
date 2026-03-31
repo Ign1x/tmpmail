@@ -5,13 +5,21 @@ function getEnv(name: string, fallback: string): string {
   return value && value.length > 0 ? value : fallback
 }
 
+function getOptionalEnv(name: string): string {
+  return process.env[name]?.trim() || ""
+}
+
 export const DEFAULT_PROVIDER_ID = getEnv("NEXT_PUBLIC_TMPMAIL_PROVIDER_ID", "tmpmail")
 export const DEFAULT_PROVIDER_NAME = getEnv("NEXT_PUBLIC_TMPMAIL_PROVIDER_NAME", "TmpMail")
 export const DEFAULT_PROVIDER_BASE_URL = getEnv("NEXT_PUBLIC_TMPMAIL_API_BASE_URL", "http://127.0.0.1:8080")
-export const DEFAULT_DOMAIN = getEnv("NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN", "tmpmail.local")
+export const DEFAULT_DOMAIN = getEnv("NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN", "")
 export const BRAND_NAME = getEnv("NEXT_PUBLIC_TMPMAIL_BRAND_NAME", DEFAULT_PROVIDER_NAME)
-export const BRAND_DOMAIN = getEnv("NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN", DEFAULT_DOMAIN)
+export const BRAND_DOMAIN = getOptionalEnv("NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN") || DEFAULT_DOMAIN
+export const BRAND_LABEL = BRAND_DOMAIN || BRAND_NAME
+export const EXAMPLE_DOMAIN = "mail.example.com"
+export const EXAMPLE_EMAIL = `example@${DEFAULT_DOMAIN || EXAMPLE_DOMAIN}`
 export const BRAND_REPO_URL = process.env.NEXT_PUBLIC_TMPMAIL_REPO_URL?.trim() || ""
+export const QUICK_CREATE_PASSWORD = process.env.NEXT_PUBLIC_TMPMAIL_QUICK_CREATE_PASSWORD?.trim() || ""
 
 type PresetProvider = ApiProvider & {
   enabledByDefault: boolean

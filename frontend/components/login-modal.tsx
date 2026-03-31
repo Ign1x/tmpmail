@@ -15,7 +15,7 @@ import { Eye, EyeOff, LogIn, AlertCircle } from "lucide-react";
 import { Card, CardBody } from "@heroui/card";
 import { DomainSelector } from "@/components/domain-selector";
 import { useTranslations } from "next-intl";
-import { BRAND_DOMAIN } from "@/lib/provider-config";
+import { EXAMPLE_EMAIL } from "@/lib/provider-config";
 import {
   normalizeEmailAddress,
   normalizeLocalPart,
@@ -237,7 +237,7 @@ export default function LoginModal({
                 </label>
                 <Input
                   type="email"
-                  placeholder={`example@${BRAND_DOMAIN}`}
+                  placeholder={EXAMPLE_EMAIL}
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                   isDisabled={isLoading || !!accountAddress}

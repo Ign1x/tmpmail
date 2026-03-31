@@ -2,11 +2,7 @@ use std::collections::HashSet;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{
-    FromRow, PgPool, Postgres, Transaction,
-    postgres::PgPoolOptions,
-    types::Json,
-};
+use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
 use crate::{
@@ -18,7 +14,10 @@ use crate::{
         Account, Attachment, Domain, DomainDnsRecord, ImportedMessage, MessageAddress,
         MessageDetail, MessageSeenResponse, MessageSummary,
     },
-    store::{CleanupReport, ImportedMessageReceipt, PendingDomainCheck, StoreStats},
+    store::{
+        CleanupReport, ImportedMessageReceipt, PendingDomainCheck, StoreSnapshot, StoreStats,
+        StoredMessage, load_snapshot_for_import, snapshot_has_records,
+    },
 };
 
 const PAGE_SIZE: usize = 30;
@@ -155,9 +154,21 @@ impl PgStore {
             pool,
             default_account_ttl_seconds: config.default_account_ttl_seconds,
         };
+        store
+            .import_snapshot_if_needed(&config.store_state_path)
+            .await?;
         store.ensure_configured_public_domains(config).await?;
 
         Ok(store)
+    }
+
+    pub async fn ready(&self) -> AppResult<()> {
+        sqlx::query_scalar::<_, i32>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        Ok(())
     }
 
     pub async fn list_domains(&self) -> AppResult<Vec<Domain>> {
@@ -236,7 +247,10 @@ impl PgStore {
         Ok(build_dns_records(&row.domain, verification_token, config))
     }
 
-    pub async fn domain_verification_context(&self, domain_id: Uuid) -> AppResult<(String, String)> {
+    pub async fn domain_verification_context(
+        &self,
+        domain_id: Uuid,
+    ) -> AppResult<(String, String)> {
         let row = self.fetch_domain(domain_id).await?;
         let token = row
             .verification_token
@@ -384,7 +398,8 @@ impl PgStore {
         .map_err(|error| match_unique_violation(error, "Email address already exists"))?;
 
         let welcome = build_welcome_message(&account_row.address);
-        self.insert_message_tx(&mut tx, account_id, &welcome).await?;
+        self.insert_message_tx(&mut tx, account_id, &welcome)
+            .await?;
         insert_audit_log_tx(
             &mut tx,
             "account.create",
@@ -622,7 +637,8 @@ impl PgStore {
         let mut receipts = Vec::with_capacity(accounts.len());
         for account in accounts {
             let prepared = build_imported_message(&imported);
-            self.insert_message_tx(&mut tx, account.id, &prepared).await?;
+            self.insert_message_tx(&mut tx, account.id, &prepared)
+                .await?;
             insert_audit_log_tx(
                 &mut tx,
                 "message.import",
@@ -695,7 +711,11 @@ impl PgStore {
         Ok((messages, i64_to_usize(total, "total messages")?))
     }
 
-    pub async fn get_message(&self, account_id: Uuid, message_id: Uuid) -> AppResult<MessageDetail> {
+    pub async fn get_message(
+        &self,
+        account_id: Uuid,
+        message_id: Uuid,
+    ) -> AppResult<MessageDetail> {
         self.assert_account_active(account_id).await?;
 
         let row = sqlx::query_as::<_, MessageRow>(
@@ -880,7 +900,10 @@ impl PgStore {
             return Ok(CleanupReport::default());
         }
 
-        let account_ids = expired_accounts.iter().map(|row| row.id).collect::<Vec<_>>();
+        let account_ids = expired_accounts
+            .iter()
+            .map(|row| row.id)
+            .collect::<Vec<_>>();
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let deleted_messages = sqlx::query_scalar::<_, i64>(
@@ -1076,6 +1099,178 @@ impl PgStore {
         Ok(())
     }
 
+    async fn import_snapshot_if_needed(&self, snapshot_path: &str) -> AppResult<()> {
+        if !self.is_database_empty().await? {
+            return Ok(());
+        }
+
+        let Some(snapshot) = load_snapshot_for_import(snapshot_path)? else {
+            return Ok(());
+        };
+        if !snapshot_has_records(&snapshot) {
+            return Ok(());
+        }
+
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        self.import_domains_tx(&mut tx, &snapshot).await?;
+        self.import_accounts_tx(&mut tx, &snapshot).await?;
+        self.import_imported_sources_tx(&mut tx, &snapshot).await?;
+        self.import_messages_tx(&mut tx, &snapshot).await?;
+        self.import_audit_logs_tx(&mut tx, &snapshot).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+
+        tracing::info!(
+            domains = snapshot.domains.len(),
+            accounts = snapshot.accounts.len(),
+            mailbox_count = snapshot.messages.len(),
+            audit_logs = snapshot.audit_logs.len(),
+            "imported JSON snapshot into PostgreSQL store"
+        );
+
+        Ok(())
+    }
+
+    async fn is_database_empty(&self) -> AppResult<bool> {
+        let has_records = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT
+                EXISTS(SELECT 1 FROM domains LIMIT 1)
+                OR EXISTS(SELECT 1 FROM accounts LIMIT 1)
+                OR EXISTS(SELECT 1 FROM messages LIMIT 1)
+                OR EXISTS(SELECT 1 FROM imported_source_keys LIMIT 1)
+                OR EXISTS(SELECT 1 FROM audit_logs LIMIT 1)
+            "#,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(!has_records)
+    }
+
+    async fn import_domains_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        snapshot: &StoreSnapshot,
+    ) -> AppResult<()> {
+        for domain in &snapshot.domains {
+            sqlx::query(
+                r#"
+                INSERT INTO domains (
+                    id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (domain) DO NOTHING
+                "#,
+            )
+            .bind(domain.id)
+            .bind(&domain.domain)
+            .bind(domain.is_verified)
+            .bind(&domain.status)
+            .bind(domain.verification_token.clone())
+            .bind(domain.verification_error.clone())
+            .bind(domain.created_at)
+            .bind(domain.updated_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn import_accounts_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        snapshot: &StoreSnapshot,
+    ) -> AppResult<()> {
+        for account in snapshot.accounts.values() {
+            sqlx::query(
+                r#"
+                INSERT INTO accounts (
+                    id, address, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                ON CONFLICT (id) DO NOTHING
+                "#,
+            )
+            .bind(account.id)
+            .bind(&account.address)
+            .bind(&account.password_hash)
+            .bind(u64_to_i64(account.quota, "quota")?)
+            .bind(account.is_disabled)
+            .bind(account.is_deleted)
+            .bind(account.created_at)
+            .bind(account.updated_at)
+            .bind(account.expires_at)
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn import_imported_sources_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        snapshot: &StoreSnapshot,
+    ) -> AppResult<()> {
+        for source_key in &snapshot.imported_source_keys {
+            sqlx::query(
+                r#"
+                INSERT INTO imported_source_keys (source_key, created_at)
+                VALUES ($1, $2)
+                ON CONFLICT (source_key) DO NOTHING
+                "#,
+            )
+            .bind(source_key)
+            .bind(Utc::now())
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        Ok(())
+    }
+
+    async fn import_messages_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        snapshot: &StoreSnapshot,
+    ) -> AppResult<()> {
+        for (account_id, messages) in &snapshot.messages {
+            for message in messages {
+                let prepared = prepared_message_from_snapshot(message);
+                self.insert_message_tx(tx, *account_id, &prepared).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn import_audit_logs_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        snapshot: &StoreSnapshot,
+    ) -> AppResult<()> {
+        for entry in &snapshot.audit_logs {
+            sqlx::query(
+                r#"
+                INSERT INTO audit_logs (entry, created_at)
+                VALUES ($1, $2)
+                "#,
+            )
+            .bind(entry)
+            .bind(parse_audit_log_timestamp(entry))
+            .execute(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+
+        trim_audit_logs_tx(tx).await
+    }
+
     async fn fetch_domain(&self, domain_id: Uuid) -> AppResult<DomainRow> {
         sqlx::query_as::<_, DomainRow>(
             r#"
@@ -1239,6 +1434,10 @@ impl MessageRow {
 fn build_welcome_message(address: &str) -> PreparedMessageRecord {
     let now = Utc::now();
     let message_id = Uuid::new_v4();
+    let sender_domain = address
+        .split_once('@')
+        .map(|(_, domain)| domain)
+        .unwrap_or("localhost");
     let text = format!(
         "Welcome to TmpMail.\n\nMailbox {} is ready. This is a seed message for the P0 flow.\n",
         address
@@ -1252,10 +1451,10 @@ fn build_welcome_message(address: &str) -> PreparedMessageRecord {
     PreparedMessageRecord {
         id: message_id,
         source_key: None,
-        msgid: format!("<{}@tmpmail.local>", message_id),
+        msgid: format!("<{}@{}>", message_id, sender_domain),
         from_address: MessageAddress {
             name: "TmpMail".to_owned(),
-            address: "noreply@tmpmail.local".to_owned(),
+            address: format!("noreply@{}", sender_domain),
         },
         to_addresses: vec![MessageAddress {
             name: address.to_owned(),
@@ -1295,6 +1494,28 @@ fn build_imported_message(imported: &ImportedMessage) -> PreparedMessageRecord {
         text_content: imported.text.clone(),
         html_parts: imported.html.clone(),
         attachments: imported.attachments.clone(),
+    }
+}
+
+fn prepared_message_from_snapshot(message: &StoredMessage) -> PreparedMessageRecord {
+    PreparedMessageRecord {
+        id: message.id,
+        source_key: message.source_key.clone(),
+        msgid: message.msgid.clone(),
+        from_address: message.from.clone(),
+        to_addresses: message.to.clone(),
+        subject: message.subject.clone(),
+        intro: message.intro.clone(),
+        seen: message.seen,
+        is_deleted: message.is_deleted,
+        has_attachments: message.has_attachments,
+        size: message.size,
+        download_url: message.download_url.clone(),
+        created_at: message.created_at,
+        updated_at: message.updated_at,
+        text_content: message.text.clone(),
+        html_parts: message.html.clone(),
+        attachments: message.attachments.clone(),
     }
 }
 
@@ -1354,6 +1575,15 @@ fn format_audit_entry(
         "{} action={action} entity={entity_type}:{entity_id} actor={actor} detail={detail}",
         Utc::now().to_rfc3339(),
     )
+}
+
+fn parse_audit_log_timestamp(entry: &str) -> DateTime<Utc> {
+    entry
+        .split_whitespace()
+        .next()
+        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now)
 }
 
 fn normalize_address(address: &str) -> AppResult<String> {

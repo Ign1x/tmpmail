@@ -10,7 +10,7 @@ interface EmptyStateProps {
   onCreateAccount: () => void
   isAuthenticated: boolean
   isCreating?: boolean
-  primaryDomain: string
+  primaryDomain: string | null
   availableDomainCount: number
   domainPreview: string[]
   serviceStatus: ServiceStatusResponse | null
@@ -48,7 +48,8 @@ export default function EmptyState({
 }: EmptyStateProps) {
   const t = useTranslations("emptyState")
   const serviceTone = getServiceTone(serviceStatus)
-  const readyAddress = `quick-start@${primaryDomain}`
+  const hasAvailableDomain = Boolean(primaryDomain)
+  const readyAddress = hasAvailableDomain ? `quick-start@${primaryDomain}` : t("previewUnavailable")
   const serviceLabel =
     serviceStatus?.status === "ready"
       ? t("serviceReady")
@@ -95,7 +96,7 @@ export default function EmptyState({
                     {t("defaultDomainLabel")}
                   </div>
                   <div className="mt-3 break-all font-mono text-sm leading-6 text-slate-900 dark:text-slate-100">
-                    {primaryDomain}
+                    {primaryDomain || t("notConfigured")}
                   </div>
                 </div>
 
@@ -130,11 +131,17 @@ export default function EmptyState({
                     className="h-12 rounded-full bg-sky-600 px-7 text-base font-semibold text-white shadow-lg shadow-sky-500/20 hover:bg-sky-700"
                     onPress={onCreateAccount}
                     isLoading={isCreating}
-                    isDisabled={isCreating}
-                    endContent={!isCreating ? <ArrowRight size={18} /> : undefined}
+                    isDisabled={isCreating || !hasAvailableDomain}
+                    endContent={!isCreating && hasAvailableDomain ? <ArrowRight size={18} /> : undefined}
                   >
-                    {isCreating ? t("creating") : t("useNow")}
+                    {isCreating ? t("creating") : hasAvailableDomain ? t("useNow") : t("waitingForDomain")}
                   </Button>
+                )}
+
+                {!hasAvailableDomain && !isOverviewLoading && (
+                  <p className="text-xs leading-6 text-amber-700 dark:text-amber-300">
+                    {t("domainSetupHint")}
+                  </p>
                 )}
 
                 <p className="text-xs leading-6 text-slate-500 dark:text-slate-400">
@@ -151,19 +158,21 @@ export default function EmptyState({
                 {readyAddress}
               </div>
               <div className="mt-3 text-xs text-slate-300">
-                {t("credentialHint")}
+                {hasAvailableDomain ? t("credentialHint") : t("previewHint")}
               </div>
 
-              <div className="mt-5 flex flex-wrap gap-2">
-                {(domainPreview.length > 0 ? domainPreview : [primaryDomain]).map((domain) => (
-                  <div
-                    key={domain}
-                    className="max-w-full break-all rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-left text-xs font-medium leading-5 text-slate-100"
-                  >
-                    {domain}
-                  </div>
-                ))}
-              </div>
+              {domainPreview.length > 0 && (
+                <div className="mt-5 flex flex-wrap gap-2">
+                  {domainPreview.map((domain) => (
+                    <div
+                      key={domain}
+                      className="max-w-full break-all rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-left text-xs font-medium leading-5 text-slate-100"
+                    >
+                      {domain}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
         </section>

@@ -16,7 +16,7 @@ Options:
   --web-port PORT        Web UI port. Default: 9000
   --smtp-port PORT       SMTP port. Default: 2500
   --pop3-port PORT       POP3 port. Default: 1100
-  --smtp-domain DOMAIN   SMTP banner domain. Default: mail.tmpmail.local
+  --smtp-domain DOMAIN   SMTP banner domain. Required
   --retention PERIOD     Retention period. Default: 168h
   --mailbox-cap N        Mailbox message cap. Default: 2000
   --loglevel LEVEL       Log level. Default: info
@@ -25,7 +25,7 @@ Options:
 
 Examples:
   ./scripts/inbucket-deploy.sh render
-  ./scripts/inbucket-deploy.sh up --smtp-domain mail.tmpmail.local
+  ./scripts/inbucket-deploy.sh up --smtp-domain mail.your-domain.tld
 EOF
 }
 
@@ -44,7 +44,7 @@ pop3_port="${INBUCKET_POP3_PORT:-1100}"
 retention_period="${INBUCKET_STORAGE_RETENTIONPERIOD:-168h}"
 mailbox_cap="${INBUCKET_STORAGE_MAILBOXMSGCAP:-2000}"
 loglevel="${INBUCKET_LOGLEVEL:-info}"
-smtp_domain="${INBUCKET_SMTP_DOMAIN:-mail.tmpmail.local}"
+smtp_domain="${INBUCKET_SMTP_DOMAIN:-}"
 force="false"
 
 while [ $# -gt 0 ]; do
@@ -104,6 +104,12 @@ while [ $# -gt 0 ]; do
       ;;
   esac
 done
+
+if [ -z "$smtp_domain" ]; then
+  echo "--smtp-domain is required" >&2
+  usage >&2
+  exit 1
+fi
 
 case "$mode" in
   render|up|down|logs|ps)

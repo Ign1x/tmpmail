@@ -22,52 +22,52 @@ use crate::{
 const PAGE_SIZE: usize = 30;
 const DEFAULT_QUOTA_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_AUDIT_LOGS: usize = 500;
-const STORE_SNAPSHOT_VERSION: u32 = 1;
+pub(crate) const STORE_SNAPSHOT_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredDomain {
-    id: Uuid,
-    domain: String,
-    is_verified: bool,
-    status: String,
-    verification_token: Option<String>,
-    verification_error: Option<String>,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
+pub(crate) struct StoredDomain {
+    pub(crate) id: Uuid,
+    pub(crate) domain: String,
+    pub(crate) is_verified: bool,
+    pub(crate) status: String,
+    pub(crate) verification_token: Option<String>,
+    pub(crate) verification_error: Option<String>,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredAccount {
-    id: Uuid,
-    address: String,
-    password_hash: String,
-    quota: u64,
-    is_disabled: bool,
-    is_deleted: bool,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    expires_at: Option<DateTime<Utc>>,
+pub(crate) struct StoredAccount {
+    pub(crate) id: Uuid,
+    pub(crate) address: String,
+    pub(crate) password_hash: String,
+    pub(crate) quota: u64,
+    pub(crate) is_disabled: bool,
+    pub(crate) is_deleted: bool,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredMessage {
-    id: Uuid,
-    source_key: Option<String>,
-    msgid: String,
-    from: MessageAddress,
-    to: Vec<MessageAddress>,
-    subject: String,
-    intro: String,
-    seen: bool,
-    is_deleted: bool,
-    has_attachments: bool,
-    size: u64,
-    download_url: String,
-    created_at: DateTime<Utc>,
-    updated_at: DateTime<Utc>,
-    text: String,
-    html: Vec<String>,
-    attachments: Vec<Attachment>,
+pub(crate) struct StoredMessage {
+    pub(crate) id: Uuid,
+    pub(crate) source_key: Option<String>,
+    pub(crate) msgid: String,
+    pub(crate) from: MessageAddress,
+    pub(crate) to: Vec<MessageAddress>,
+    pub(crate) subject: String,
+    pub(crate) intro: String,
+    pub(crate) seen: bool,
+    pub(crate) is_deleted: bool,
+    pub(crate) has_attachments: bool,
+    pub(crate) size: u64,
+    pub(crate) download_url: String,
+    pub(crate) created_at: DateTime<Utc>,
+    pub(crate) updated_at: DateTime<Utc>,
+    pub(crate) text: String,
+    pub(crate) html: Vec<String>,
+    pub(crate) attachments: Vec<Attachment>,
 }
 
 #[derive(Clone, Debug)]
@@ -104,13 +104,13 @@ pub struct StoreStats {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct StoreSnapshot {
-    version: u32,
-    domains: Vec<StoredDomain>,
-    audit_logs: VecDeque<String>,
-    accounts: HashMap<Uuid, StoredAccount>,
-    imported_source_keys: HashSet<String>,
-    messages: HashMap<Uuid, Vec<StoredMessage>>,
+pub(crate) struct StoreSnapshot {
+    pub(crate) version: u32,
+    pub(crate) domains: Vec<StoredDomain>,
+    pub(crate) audit_logs: VecDeque<String>,
+    pub(crate) accounts: HashMap<Uuid, StoredAccount>,
+    pub(crate) imported_source_keys: HashSet<String>,
+    pub(crate) messages: HashMap<Uuid, Vec<StoredMessage>>,
 }
 
 #[derive(Debug)]
@@ -1166,6 +1166,50 @@ fn normalize_snapshot_path(path: &str) -> Option<PathBuf> {
     Some(PathBuf::from(normalized))
 }
 
+pub(crate) fn load_snapshot_for_import(path: &str) -> AppResult<Option<StoreSnapshot>> {
+    let Some(snapshot_path) = normalize_snapshot_path(path) else {
+        return Ok(None);
+    };
+
+    if !snapshot_path.exists() {
+        return Ok(None);
+    }
+
+    let raw = fs::read_to_string(&snapshot_path).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to read store snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+    let snapshot: StoreSnapshot = serde_json::from_str(&raw).map_err(|error| {
+        ApiError::internal(format!(
+            "failed to parse store snapshot {}: {error}",
+            snapshot_path.display()
+        ))
+    })?;
+
+    if snapshot.version != STORE_SNAPSHOT_VERSION {
+        return Err(ApiError::internal(format!(
+            "unsupported store snapshot version {} in {}",
+            snapshot.version,
+            snapshot_path.display()
+        )));
+    }
+
+    Ok(Some(snapshot))
+}
+
+pub(crate) fn snapshot_has_records(snapshot: &StoreSnapshot) -> bool {
+    !snapshot.domains.is_empty()
+        || !snapshot.audit_logs.is_empty()
+        || !snapshot.accounts.is_empty()
+        || !snapshot.imported_source_keys.is_empty()
+        || snapshot
+            .messages
+            .values()
+            .any(|messages| !messages.is_empty())
+}
+
 fn resolve_expires_at(
     now: DateTime<Utc>,
     expires_in: Option<i64>,
@@ -1202,6 +1246,11 @@ fn ensure_account_active(account: &StoredAccount) -> AppResult<()> {
 fn build_welcome_message(account: &StoredAccount) -> StoredMessage {
     let now = Utc::now();
     let message_id = Uuid::new_v4();
+    let sender_domain = account
+        .address
+        .split_once('@')
+        .map(|(_, domain)| domain)
+        .unwrap_or("localhost");
     let text = format!(
         "Welcome to TmpMail.\n\nMailbox {} is ready. This is a seed message for the P0 flow.\n",
         account.address
@@ -1215,10 +1264,10 @@ fn build_welcome_message(account: &StoredAccount) -> StoredMessage {
     StoredMessage {
         id: message_id,
         source_key: None,
-        msgid: format!("<{}@tmpmail.local>", message_id),
+        msgid: format!("<{}@{}>", message_id, sender_domain),
         from: MessageAddress {
             name: "TmpMail".to_owned(),
-            address: "noreply@tmpmail.local".to_owned(),
+            address: format!("noreply@{}", sender_domain),
         },
         to: vec![MessageAddress {
             name: account.address.clone(),
@@ -1274,9 +1323,12 @@ mod tests {
         models::{ImportedMessage, MessageAddress},
     };
 
+    const TEST_PUBLIC_DOMAIN: &str = "configured.example.com";
+
     fn test_config() -> Config {
         Config {
             store_state_path: String::new(),
+            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
             ..Config::default()
         }
     }
@@ -1293,7 +1345,7 @@ mod tests {
         let config = test_config();
         let mut store = MemoryStore::new(&config).expect("load store");
         let account = store
-            .create_account("demo@tmpmail.local", "secret", None)
+            .create_account("demo@configured.example.com", "secret", None)
             .expect("create account");
 
         let (messages, total) = store
@@ -1348,7 +1400,7 @@ mod tests {
         assert!(
             all_domains
                 .iter()
-                .any(|domain| domain.domain == "tmpmail.local" && domain.status == "active")
+                .any(|domain| domain.domain == TEST_PUBLIC_DOMAIN && domain.status == "active")
         );
         assert!(
             public_domains
@@ -1363,7 +1415,7 @@ mod tests {
         let mut store = MemoryStore::new(&config).expect("load store");
 
         let error = store
-            .create_account("demo@tmpmail.local", "short", None)
+            .create_account("demo@configured.example.com", "short", None)
             .expect_err("short password should be rejected");
 
         assert_eq!(error.to_string(), "password must be at least 6 characters");
@@ -1375,7 +1427,7 @@ mod tests {
         let mut store = MemoryStore::new(&config).expect("load store");
 
         let error = store
-            .create_account("ab@tmpmail.local", "secret123", None)
+            .create_account("ab@configured.example.com", "secret123", None)
             .expect_err("short username should be rejected");
 
         assert_eq!(
@@ -1401,7 +1453,8 @@ mod tests {
 
     #[test]
     fn split_address_rejects_multiple_at_signs() {
-        let error = split_address("demo@@tmpmail.local").expect_err("multiple @ should fail");
+        let error =
+            split_address("demo@@configured.example.com").expect_err("multiple @ should fail");
 
         assert_eq!(error.to_string(), "address must be a valid email");
     }
@@ -1409,7 +1462,7 @@ mod tests {
     #[test]
     fn split_address_rejects_invalid_local_part() {
         let error =
-            split_address(".bad@tmpmail.local").expect_err("invalid local part should fail");
+            split_address(".bad@configured.example.com").expect_err("invalid local part should fail");
 
         assert_eq!(error.to_string(), "address must be a valid email");
     }
@@ -1434,17 +1487,17 @@ mod tests {
         let mut store = MemoryStore::new(&config).expect("load store");
 
         store
-            .create_account("demo@tmpmail.local", "  secret123  ", None)
+            .create_account("demo@configured.example.com", "  secret123  ", None)
             .expect("create account");
 
         assert!(
             store
-                .authenticate("demo@tmpmail.local", "  secret123  ")
+                .authenticate("demo@configured.example.com", "  secret123  ")
                 .is_ok()
         );
         assert!(
             store
-                .authenticate("demo@tmpmail.local", "secret123")
+                .authenticate("demo@configured.example.com", "secret123")
                 .is_err()
         );
     }
@@ -1523,7 +1576,7 @@ mod tests {
         let snapshot_path = temp_snapshot_path("public-domains");
         let initial_config = Config {
             store_state_path: snapshot_path.clone(),
-            public_domains: vec!["tmpmail.local".to_owned()],
+            public_domains: vec!["configured.example.com".to_owned()],
             ..Config::default()
         };
         let _ = MemoryStore::new(&initial_config).expect("create initial snapshot");
@@ -1531,7 +1584,7 @@ mod tests {
         let updated_config = Config {
             store_state_path: snapshot_path.clone(),
             public_domains: vec![
-                "tmpmail.local".to_owned(),
+                "configured.example.com".to_owned(),
                 "new-public.example.com".to_owned(),
             ],
             ..Config::default()

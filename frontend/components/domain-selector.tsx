@@ -65,7 +65,7 @@ export function DomainSelector({ value, onSelectionChange, isDisabled }: DomainS
         })
 
         if (mergedDomains.length === 0) {
-          setError(t("allFailed"))
+          setError(t("noDomainsConfigured"))
           localStorage.removeItem("cached-domains")
           setLoading(false)
           return

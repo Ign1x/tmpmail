@@ -41,13 +41,19 @@ fi
 API_BASE_URL="${API_BASE_URL:-http://127.0.0.1:${tmpmail_port:-8080}}"
 FRONTEND_BASE_URL="${FRONTEND_BASE_URL:-http://127.0.0.1:${frontend_port:-3000}}"
 SMOKE_SKIP_FRONTEND="${SMOKE_SKIP_FRONTEND:-0}"
-SMOKE_ADDRESS="${smoke_address:-smoke@tmpmail.local}"
-SMOKE_PASSWORD="${smoke_password:-secret12345}"
+SMOKE_ADDRESS="${smoke_address:-}"
+SMOKE_PASSWORD="${smoke_password:-123456}"
+
+if [ -z "$SMOKE_ADDRESS" ]; then
+  echo "SMOKE_ADDRESS is required. Set TMPMAIL_SMOKE_ADDRESS to an active real mailbox address."
+  exit 1
+fi
 
 echo "API_BASE_URL=$API_BASE_URL"
 echo "FRONTEND_BASE_URL=$FRONTEND_BASE_URL"
 
 health="$(curl -fsS "$API_BASE_URL/healthz")"
+ready="$(curl -fsS "$API_BASE_URL/readyz")"
 account_payload="$(mktemp)"
 account_status="$(
   curl -sS -o "$account_payload" -w '%{http_code}' -X POST "$API_BASE_URL/accounts" \
@@ -75,11 +81,20 @@ token="$(
 
 me="$(curl -fsS "$API_BASE_URL/me" -H "Authorization: Bearer $token")"
 messages="$(curl -fsS "$API_BASE_URL/messages?page=1" -H "Authorization: Bearer $token")"
+first_message_id="$(printf '%s' "$messages" | jq -r '."hydra:member"[0].id // empty')"
+raw_http="skipped"
+if [ -n "$first_message_id" ]; then
+  raw_http="$(
+    curl -sS -o /dev/null -w '%{http_code}' \
+      "$API_BASE_URL/messages/$first_message_id/raw" \
+      -H "Authorization: Bearer $token"
+  )"
+fi
 frontend_http="skipped"
 
 if [ "$SMOKE_SKIP_FRONTEND" != "1" ]; then
   frontend_http="$(curl -fsS -o /dev/null -w '%{http_code}' "$FRONTEND_BASE_URL/en")"
 fi
 
-printf 'HEALTH=%s\nACCOUNT=%s\nME=%s\nMESSAGES=%s\nFRONTEND_HTTP=%s\n' \
-  "$health" "$account" "$me" "$messages" "$frontend_http"
+printf 'HEALTH=%s\nREADY=%s\nACCOUNT=%s\nME=%s\nMESSAGES=%s\nRAW_HTTP=%s\nFRONTEND_HTTP=%s\n' \
+  "$health" "$ready" "$account" "$me" "$messages" "$raw_http" "$frontend_http"

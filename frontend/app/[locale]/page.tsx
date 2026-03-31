@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import AppShell from "@/components/app-shell"
 import EmptyState from "@/components/empty-state"
 import FeatureCards from "@/components/feature-cards"
@@ -8,12 +8,12 @@ import AccountInfoBanner from "@/components/account-info-banner"
 import MessageList from "@/components/message-list"
 import MessageDetail from "@/components/message-detail"
 import { useAuth } from "@/contexts/auth-context"
-import type { Message } from "@/types"
+import type { Domain, Message } from "@/types"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { useTranslations } from "next-intl"
 import { CheckCircle, AlertCircle } from "lucide-react"
-import { fetchDomainsFromProvider } from "@/lib/api"
-import { DEFAULT_DOMAIN, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { fetchDomainsFromProvider, getServiceStatus, type ServiceStatusResponse } from "@/lib/api"
+import { DEFAULT_DOMAIN, DEFAULT_PROVIDER_ID, QUICK_CREATE_PASSWORD } from "@/lib/provider-config"
 
 function generateRandomString(length: number) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
@@ -41,27 +41,83 @@ function MainContent() {
   const [isCreatingAccount, setIsCreatingAccount] = useState(false)
   const [showAccountBanner, setShowAccountBanner] = useState(false)
   const [createdAccountInfo, setCreatedAccountInfo] = useState<{ email: string; password: string } | null>(null)
+  const [availableDomains, setAvailableDomains] = useState<Domain[]>([])
+  const [serviceStatus, setServiceStatus] = useState<ServiceStatusResponse | null>(null)
+  const [isOverviewLoading, setIsOverviewLoading] = useState(true)
   const t = useTranslations("mainPage")
+  const primaryDomain = availableDomains[0]?.domain || DEFAULT_DOMAIN || null
+
+  useEffect(() => {
+    let active = true
+
+    const loadOverview = async () => {
+      setIsOverviewLoading(true)
+
+      const [domainsResult, statusResult] = await Promise.allSettled([
+        fetchDomainsFromProvider(DEFAULT_PROVIDER_ID),
+        getServiceStatus(DEFAULT_PROVIDER_ID),
+      ])
+
+      if (!active) {
+        return
+      }
+
+      if (domainsResult.status === "fulfilled") {
+        setAvailableDomains(domainsResult.value)
+      } else {
+        setAvailableDomains([])
+      }
+
+      if (statusResult.status === "fulfilled") {
+        setServiceStatus(statusResult.value)
+      } else {
+        setServiceStatus({ status: "offline" })
+      }
+
+      setIsOverviewLoading(false)
+    }
+
+    void loadOverview()
+
+    return () => {
+      active = false
+    }
+  }, [])
 
   const handleQuickCreate = async () => {
     if (isCreatingAccount) return
     setIsCreatingAccount(true)
 
     const maxAttempts = 5
-    let domain = DEFAULT_DOMAIN
+    let domain = availableDomains[0]?.domain || DEFAULT_DOMAIN || ""
 
     try {
-      const availableDomains = await fetchDomainsFromProvider(DEFAULT_PROVIDER_ID)
-      if (availableDomains[0]?.domain) {
-        domain = availableDomains[0].domain
+      if (availableDomains.length === 0) {
+        const nextDomains = await fetchDomainsFromProvider(DEFAULT_PROVIDER_ID)
+        setAvailableDomains(nextDomains)
+        if (nextDomains[0]?.domain) {
+          domain = nextDomains[0].domain
+        }
       }
     } catch (error) {
-      console.warn("加载默认域名失败，回退到静态默认域名:", error)
+      console.warn("加载可用域名失败:", error)
+    }
+
+    if (!domain) {
+      toast({
+        title: t("domainUnavailable"),
+        description: t("domainUnavailableDesc"),
+        color: "warning",
+        variant: "flat",
+        icon: <AlertCircle size={16} />,
+      })
+      setIsCreatingAccount(false)
+      return
     }
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const username = generateRandomString(10)
-      const password = generateRandomString(12)
+      const password = QUICK_CREATE_PASSWORD || generateRandomString(12)
       const email = `${username}@${domain}`
 
       try {
@@ -156,6 +212,11 @@ function MainContent() {
               onCreateAccount={handleQuickCreate}
               isAuthenticated={isAuthenticated}
               isCreating={isCreatingAccount}
+              primaryDomain={primaryDomain}
+              availableDomainCount={availableDomains.length}
+              domainPreview={availableDomains.slice(0, 4).map((domain) => domain.domain)}
+              serviceStatus={serviceStatus}
+              isOverviewLoading={isOverviewLoading}
             />
           )}
         </div>

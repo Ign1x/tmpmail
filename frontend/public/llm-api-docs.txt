@@ -41,7 +41,7 @@ POST /accounts
 - Create a mailbox account on any active domain.
 - Body:
 {
-  "address": "user@tmpmail.local",
+  "address": "user@mail.example.com",
   "password": "your_password",
   "expiresIn": 0
 }
@@ -49,7 +49,7 @@ POST /accounts
 POST /token
 - Body:
 {
-  "address": "user@tmpmail.local",
+  "address": "user@mail.example.com",
   "password": "your_password"
 }
 

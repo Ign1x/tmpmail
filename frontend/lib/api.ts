@@ -22,6 +22,7 @@ interface FetchDomainsFromProviderOptions {
 export interface AdminStatus {
   isPasswordConfigured: boolean;
   hasGeneratedApiKey: boolean;
+  isRecoveryEnabled: boolean;
 }
 
 export interface AdminSessionResponse {
@@ -30,6 +31,11 @@ export interface AdminSessionResponse {
 
 export interface AdminSetupResponse extends AdminSessionResponse {
   apiKey: string;
+}
+
+export interface AdminRecoveryRequest {
+  recoveryToken: string;
+  newPassword: string;
 }
 
 export interface AdminAccessKeyResponse {
@@ -44,6 +50,11 @@ export interface CleanupRunResponse {
   deletedAccounts: number;
   deletedMessages: number;
   deletedDomains: number;
+}
+
+export interface ServiceStatusResponse {
+  status: "ready" | "degraded" | "offline";
+  storeBackend?: string;
 }
 
 export interface AdminMetricsResponse {
@@ -158,6 +169,28 @@ function createHeadersWithToken(
   return headers;
 }
 
+function parseDownloadFilename(contentDisposition: string | null): string | null {
+  if (!contentDisposition) {
+    return null;
+  }
+
+  const utf8Match = contentDisposition.match(/filename\*\s*=\s*UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]).trim();
+    } catch {
+      return utf8Match[1].trim();
+    }
+  }
+
+  const plainMatch = contentDisposition.match(/filename\s*=\s*"?([^"]+)"?/i);
+  if (plainMatch?.[1]) {
+    return plainMatch[1].trim();
+  }
+
+  return null;
+}
+
 // 从邮箱地址推断提供商ID
 function inferProviderFromEmail(email: string): string {
   if (typeof window === "undefined") return DEFAULT_PROVIDER_ID;
@@ -166,9 +199,10 @@ function inferProviderFromEmail(email: string): string {
     const domain = normalizeEmailAddress(email).split("@")[1];
     if (!domain) return DEFAULT_PROVIDER_ID;
 
-    const knownDomainPatterns: Record<string, string> = {
-      [DEFAULT_DOMAIN]: DEFAULT_PROVIDER_ID,
-    };
+    const knownDomainPatterns: Record<string, string> = {};
+    if (DEFAULT_DOMAIN) {
+      knownDomainPatterns[DEFAULT_DOMAIN] = DEFAULT_PROVIDER_ID;
+    }
 
     // 检查是否是已知域名
     if (knownDomainPatterns[domain]) {
@@ -226,7 +260,15 @@ function getErrorMessage(status: number, errorData: any): string {
     case 400:
       return prefix + "请求参数错误或缺失必要信息";
     case 401:
-      return prefix + "认证失败，请检查登录状态";
+      return (
+        prefix +
+        (errorData?.detail || errorData?.message || "认证失败，请检查登录状态")
+      );
+    case 403:
+      return (
+        prefix +
+        (errorData?.detail || errorData?.message || "当前操作被拒绝")
+      );
     case 404:
       return prefix + "请求的资源不存在";
     case 405:
@@ -590,6 +632,39 @@ export async function fetchManagedDomains(
   }));
 }
 
+export async function getServiceStatus(
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<ServiceStatusResponse> {
+  const headers = createBaseHeaders(providerId);
+  const readyResponse = await fetch(buildProxyUrl("/readyz"), {
+    headers,
+    cache: "no-store",
+  });
+
+  if (readyResponse.ok) {
+    const data = await readyResponse.json();
+    return {
+      status: "ready",
+      storeBackend: data?.storeBackend,
+    };
+  }
+
+  const healthResponse = await fetch(buildProxyUrl("/healthz"), {
+    headers,
+    cache: "no-store",
+  });
+
+  if (healthResponse.ok) {
+    const data = await healthResponse.json();
+    return {
+      status: "degraded",
+      storeBackend: data?.storeBackend,
+    };
+  }
+
+  return { status: "offline" };
+}
+
 export async function getAdminStatus(
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminStatus> {
@@ -641,6 +716,50 @@ export async function loginAdmin(
     method: "POST",
     headers,
     body: JSON.stringify({ password }),
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(getErrorMessage(res.status, error));
+  }
+
+  return res.json();
+}
+
+export async function validateAdminSession(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<boolean> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const res = await fetch(buildProxyUrl("/admin/session"), {
+    headers,
+    cache: "no-store",
+  });
+
+  if (res.ok) {
+    return true;
+  }
+
+  if (res.status === 401 || res.status === 403) {
+    return false;
+  }
+
+  const error = await res.json().catch(() => ({}));
+  throw new Error(getErrorMessage(res.status, error));
+}
+
+export async function recoverAdmin(
+  payload: AdminRecoveryRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminSetupResponse> {
+  const headers = {
+    ...createBaseHeaders(providerId),
+    "Content-Type": "application/json",
+  };
+  const res = await fetch(buildProxyUrl("/admin/recover"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
@@ -1209,4 +1328,93 @@ export async function deleteAccount(
 
     return res;
   });
+}
+
+export async function downloadProtectedAsset(
+  token: string,
+  endpoint: string,
+  providerId?: string,
+  fallbackFilename?: string,
+): Promise<void> {
+  let currentToken = token;
+
+  const response = await retryFetch(async () => {
+    const headers = createHeadersWithToken(currentToken, {}, providerId);
+    const res = await fetchWithTokenRefresh(
+      buildProxyUrl(endpoint),
+      { headers },
+      providerId,
+    );
+
+    if (!res.ok) {
+      if (res.status === 401) {
+        const account = getCurrentAccountFromStorage();
+        if (account && account.token && account.token !== currentToken) {
+          currentToken = account.token;
+          const retryHeaders = createHeadersWithToken(
+            currentToken,
+            {},
+            providerId,
+          );
+          const retryRes = await fetch(buildProxyUrl(endpoint), {
+            headers: retryHeaders,
+          });
+          if (retryRes.ok) return retryRes;
+        }
+      }
+
+      const contentType = res.headers.get("content-type") || "";
+      const errorPayload = contentType.includes("application/json")
+        ? await res.json().catch(() => ({}))
+        : { message: await res.text().catch(() => "") };
+      throw new Error(getErrorMessage(res.status, errorPayload));
+    }
+
+    return res;
+  });
+
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const filename =
+    parseDownloadFilename(response.headers.get("content-disposition")) ||
+    fallbackFilename ||
+    "download.bin";
+
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+}
+
+export async function downloadMessageSource(
+  token: string,
+  id: string,
+  providerId?: string,
+): Promise<void> {
+  await downloadProtectedAsset(
+    token,
+    `/messages/${id}/raw`,
+    providerId,
+    `${id}.eml`,
+  );
+}
+
+export async function downloadMessageAttachment(
+  token: string,
+  messageId: string,
+  attachmentId: string,
+  providerId?: string,
+  fallbackFilename?: string,
+): Promise<void> {
+  await downloadProtectedAsset(
+    token,
+    `/messages/${messageId}/attachments/${attachmentId}`,
+    providerId,
+    fallbackFilename,
+  );
 }
