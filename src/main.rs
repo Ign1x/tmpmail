@@ -1,6 +1,6 @@
 mod admin_state;
-mod app_store;
 mod app;
+mod app_store;
 mod auth;
 mod cleanup_worker;
 mod config;

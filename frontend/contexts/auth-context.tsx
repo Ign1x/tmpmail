@@ -16,7 +16,11 @@ import {
   deleteAccount as deleteAccountApi,
 } from "@/lib/api";
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config";
-import { readStoredJson } from "@/lib/storage";
+import {
+  readStoredJson,
+  removeStoredValue,
+  writeStoredJson,
+} from "@/lib/storage";
 
 interface AuthContextType extends AuthState {
   login: (address: string, password: string) => Promise<void>;
@@ -35,75 +39,118 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+type StoredAuthPayload = {
+  token?: string | null;
+  currentAccount?: unknown;
+  accounts?: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function normalizeStoredAccount(value: unknown): Account | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = typeof value.id === "string" ? value.id.trim() : "";
+  const address = typeof value.address === "string" ? value.address.trim() : "";
+
+  if (!id || !address) {
+    return null;
+  }
+
+  return {
+    id,
+    address,
+    quota: typeof value.quota === "number" ? value.quota : 0,
+    used: typeof value.used === "number" ? value.used : 0,
+    isDisabled: Boolean(value.isDisabled),
+    isDeleted: Boolean(value.isDeleted),
+    createdAt:
+      typeof value.createdAt === "string" ? value.createdAt : new Date(0).toISOString(),
+    updatedAt:
+      typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
+    password: typeof value.password === "string" ? value.password : undefined,
+    token: typeof value.token === "string" ? value.token : undefined,
+    providerId: DEFAULT_PROVIDER_ID,
+  };
+}
+
+function dedupeAccounts(accounts: Account[]): Account[] {
+  const seen = new Set<string>();
+  const nextAccounts: Account[] = [];
+
+  for (const account of accounts) {
+    const key = `${account.id}:${account.address.toLowerCase()}`;
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    nextAccounts.push(account);
+  }
+
+  return nextAccounts;
+}
+
+function loadInitialAuthState(): AuthState {
+  const parsedAuth = readStoredJson<StoredAuthPayload | null>("auth", null);
+  if (!parsedAuth || !isRecord(parsedAuth)) {
+    return {
+      token: null,
+      currentAccount: null,
+      accounts: [],
+      isAuthenticated: false,
+    };
+  }
+
+  const accounts = Array.isArray(parsedAuth.accounts)
+    ? dedupeAccounts(
+        parsedAuth.accounts
+          .map(normalizeStoredAccount)
+          .filter((account): account is Account => !!account),
+      )
+    : [];
+
+  const currentAccountCandidate = normalizeStoredAccount(parsedAuth.currentAccount);
+  const currentAccount =
+    (currentAccountCandidate &&
+      accounts.find((account) => account.id === currentAccountCandidate.id)) ||
+    (currentAccountCandidate &&
+      accounts.find((account) => account.address === currentAccountCandidate.address)) ||
+    currentAccountCandidate ||
+    accounts[0] ||
+    null;
+
+  const token =
+    currentAccount?.token ||
+    (typeof parsedAuth.token === "string" && parsedAuth.token.trim()
+      ? parsedAuth.token
+      : null);
+
+  return {
+    token,
+    currentAccount,
+    accounts,
+    isAuthenticated: Boolean(token && currentAccount),
+  };
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const t = useTranslations("auth");
-  const [authState, setAuthState] = useState<AuthState>({
-    token: null,
-    currentAccount: null,
-    accounts: [],
-    isAuthenticated: false,
-  });
+  const [authState, setAuthState] = useState<AuthState>(() => loadInitialAuthState());
 
-  // 从邮箱地址获取提供商ID
-  const getProviderIdFromEmail = (email: string) => {
-    if (typeof window === "undefined") return DEFAULT_PROVIDER_ID;
-
-    try {
-      const domain = email.split("@")[1];
-      if (!domain) return DEFAULT_PROVIDER_ID;
-
-      // 获取缓存的域名信息
-      const domains = readStoredJson<unknown>("cached-domains", []);
-      if (Array.isArray(domains)) {
-        const matchedDomain = domains.find((d: any) => d.domain === domain);
-        if (matchedDomain && matchedDomain.providerId) {
-          return matchedDomain.providerId;
-        }
-      }
-
-      return DEFAULT_PROVIDER_ID;
-    } catch (error) {
-      console.error("Error getting provider from email:", error);
-      return DEFAULT_PROVIDER_ID;
-    }
-  };
-
-  useEffect(() => {
-    // 从本地存储加载认证状态
-    const parsedAuth = readStoredJson<any>("auth", null);
-    if (parsedAuth && typeof parsedAuth === "object") {
-      const rawAccounts = Array.isArray(parsedAuth.accounts)
-        ? parsedAuth.accounts
-        : [];
-
-      // 数据迁移：为现有账户添加providerId（向后兼容）
-      const migratedAccounts = rawAccounts.map((account: Account) => ({
-        ...account,
-        providerId: account.providerId || DEFAULT_PROVIDER_ID,
-      }));
-
-      const migratedCurrentAccount =
-        parsedAuth.currentAccount &&
-        typeof parsedAuth.currentAccount === "object"
-          ? {
-              ...parsedAuth.currentAccount,
-              providerId:
-                parsedAuth.currentAccount.providerId || DEFAULT_PROVIDER_ID,
-            }
-          : null;
-
-      setAuthState({
-        ...parsedAuth,
-        accounts: migratedAccounts,
-        currentAccount: migratedCurrentAccount,
-      });
-    }
-  }, []);
+  const getProviderIdFromEmail = () => DEFAULT_PROVIDER_ID;
 
   // 监听token刷新事件，同步更新React state
   useEffect(() => {
-    const handleTokenRefreshed = (event: CustomEvent<{ token: string }>) => {
-      const newToken = event.detail.token;
+    const handleTokenRefreshed = (event: Event) => {
+      const newToken = (event as CustomEvent<{ token?: string }>).detail?.token;
+      if (!newToken) {
+        return;
+      }
 
       setAuthState((prev) => {
         if (!prev.currentAccount) return prev;
@@ -148,17 +195,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       authState.currentAccount ||
       authState.token
     ) {
-      localStorage.setItem("auth", JSON.stringify(authState));
+      writeStoredJson("auth", authState);
     } else {
       // 如果没有任何账户信息，清除localStorage
-      localStorage.removeItem("auth");
+      removeStoredValue("auth");
     }
   }, [authState]);
 
   const login = async (address: string, password: string) => {
     try {
-      const { token, id } = await getToken(address, password);
-      const providerId = getProviderIdFromEmail(address);
+      const { token } = await getToken(address, password);
+      const providerId = getProviderIdFromEmail();
       const account = await getAccount(token, providerId);
 
       // 添加密码、token和providerId到账户信息
@@ -169,27 +216,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         providerId,
       };
 
-      // 检查账户是否已存在
-      const existingAccountIndex = authState.accounts.findIndex(
-        (acc) => acc.address === account.address,
-      );
-
-      let updatedAccounts: Account[];
-      if (existingAccountIndex !== -1) {
-        // 更新现有账户的信息
-        updatedAccounts = authState.accounts.map((acc, index) =>
-          index === existingAccountIndex ? accountWithAuth : acc,
+      setAuthState((prev) => {
+        const existingAccountIndex = prev.accounts.findIndex(
+          (acc) => acc.address === account.address,
         );
-      } else {
-        // 添加新账户
-        updatedAccounts = [...authState.accounts, accountWithAuth];
-      }
 
-      setAuthState({
-        token,
-        currentAccount: accountWithAuth,
-        accounts: updatedAccounts,
-        isAuthenticated: true,
+        const updatedAccounts =
+          existingAccountIndex !== -1
+            ? prev.accounts.map((acc, index) =>
+                index === existingAccountIndex ? accountWithAuth : acc,
+              )
+            : [...prev.accounts, accountWithAuth];
+
+        return {
+          token,
+          currentAccount: accountWithAuth,
+          accounts: dedupeAccounts(updatedAccounts),
+          isAuthenticated: true,
+        };
       });
     } catch (error) {
       console.error("Login failed:", error);
@@ -203,7 +247,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     expiresIn?: number,
   ) => {
     try {
-      const providerId = getProviderIdFromEmail(address);
+      const providerId = getProviderIdFromEmail();
       await createAccount(address, password, providerId, expiresIn);
       // 注册成功后直接登录
       await login(address, password);
@@ -442,7 +486,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const addAccount = (account: Account, token: string, password?: string) => {
-    const providerId = getProviderIdFromEmail(account.address);
+    const providerId = getProviderIdFromEmail();
     const accountWithAuth = {
       ...account,
       password,
@@ -450,12 +494,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       providerId,
     };
 
-    setAuthState({
+    setAuthState((prev) => ({
       token,
       currentAccount: accountWithAuth,
-      accounts: [...authState.accounts, accountWithAuth],
+      accounts: dedupeAccounts([...prev.accounts, accountWithAuth]),
       isAuthenticated: true,
-    });
+    }));
   };
 
   // 获取指定提供商的账户

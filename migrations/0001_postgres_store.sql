@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS domains (
     domain TEXT NOT NULL UNIQUE,
     is_verified BOOLEAN NOT NULL,
     status TEXT NOT NULL,
+    owner_user_id UUID,
     verification_token TEXT,
     verification_error TEXT,
     created_at TIMESTAMPTZ NOT NULL,
@@ -10,6 +11,10 @@ CREATE TABLE IF NOT EXISTS domains (
 );
 
 CREATE INDEX IF NOT EXISTS domains_status_idx ON domains (status);
+CREATE INDEX IF NOT EXISTS domains_owner_user_id_idx ON domains (owner_user_id);
+
+ALTER TABLE domains ADD COLUMN IF NOT EXISTS owner_user_id UUID;
+CREATE INDEX IF NOT EXISTS domains_owner_user_id_idx ON domains (owner_user_id);
 
 CREATE TABLE IF NOT EXISTS accounts (
     id UUID PRIMARY KEY,

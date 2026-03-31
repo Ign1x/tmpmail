@@ -6,7 +6,13 @@ import { Card, CardBody } from "@heroui/card"
 import { Spinner } from "@heroui/spinner"
 import { Avatar } from "@heroui/avatar"
 import { ArrowLeft, Trash2, Download, CheckCircle, XCircle } from "lucide-react"
-import { getMessage, markMessageAsRead, deleteMessage as apiDeleteMessage } from "@/lib/api"
+import {
+  deleteMessage as apiDeleteMessage,
+  downloadMessageAttachment,
+  downloadMessageSource,
+  getMessage,
+  markMessageAsRead,
+} from "@/lib/api"
 import type { Message, MessageDetail as MessageDetailType } from "@/types"
 import { useAuth } from "@/contexts/auth-context"
 import { useIsMobile } from "@/hooks/use-mobile"
@@ -17,9 +23,24 @@ import { useTranslations, useLocale } from "next-intl"
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 
 // 邮件内容渲染组件 - 使用 iframe 隔离样式
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;")
+}
+
 function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string; isMobile: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeHeight, setIframeHeight] = useState(200)
+  const resizeTimeoutIdsRef = useRef<number[]>([])
+
+  const clearResizeTimeouts = useCallback(() => {
+    resizeTimeoutIdsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
+    resizeTimeoutIdsRef.current = []
+  }, [])
 
   const adjustIframeHeight = useCallback(() => {
     const iframe = iframeRef.current
@@ -37,7 +58,9 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
     if (!iframe) return
 
     const hasHtml = html && html.length > 0 && html.join("").trim()
-    const content = hasHtml ? html.join("") : `<pre style="white-space: pre-wrap; font-family: sans-serif; margin: 0;">${text || ""}</pre>`
+    const content = hasHtml
+      ? html.join("")
+      : `<pre style="white-space: pre-wrap; font-family: sans-serif; margin: 0;">${escapeHtml(text || "")}</pre>`
     const isDarkMode = document.documentElement.classList.contains("dark")
 
     const wrappedContent = `
@@ -72,12 +95,18 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
       doc.open()
       doc.write(wrappedContent)
       doc.close()
-      iframe.onload = adjustIframeHeight
-      setTimeout(adjustIframeHeight, 100)
-      setTimeout(adjustIframeHeight, 500)
-      setTimeout(adjustIframeHeight, 1000)
+      iframe.onload = () => adjustIframeHeight()
+      clearResizeTimeouts()
+      resizeTimeoutIdsRef.current = [100, 500, 1000].map((delay) =>
+        window.setTimeout(adjustIframeHeight, delay),
+      )
     }
-  }, [html, text, isMobile, adjustIframeHeight])
+
+    return () => {
+      clearResizeTimeouts()
+      iframe.onload = null
+    }
+  }, [html, text, isMobile, adjustIframeHeight, clearResizeTimeouts])
 
   useEffect(() => {
     const observer = new MutationObserver(() => {
@@ -123,26 +152,37 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
   const [messageDetail, setMessageDetail] = useState<MessageDetailType | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [isDownloadingSource, setIsDownloadingSource] = useState(false)
+  const [downloadingAttachmentId, setDownloadingAttachmentId] = useState<string | null>(null)
   const { token, currentAccount } = useAuth()
   const { toast } = useHeroUIToast()
   const isMobile = useIsMobile()
   const t = useTranslations("messageDetail")
   const locale = useLocale()
+  const providerId = currentAccount?.providerId || DEFAULT_PROVIDER_ID
 
   const localeDate = locale === "en" ? enUS : zhCN
 
   useEffect(() => {
+    let active = true
+
     const fetchMessageDetail = async () => {
       if (!token) {
-        setError(t("authError"))
-        setLoading(false)
+        if (active) {
+          setError(t("authError"))
+          setLoading(false)
+        }
         return
       }
 
       try {
-        setLoading(true)
-        const providerId = currentAccount?.providerId || DEFAULT_PROVIDER_ID
+        if (active) {
+          setLoading(true)
+        }
         const detail = await getMessage(token, message.id, providerId)
+        if (!active) {
+          return
+        }
         setMessageDetail(detail)
 
         if (!message.seen) {
@@ -150,21 +190,29 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
         }
         setError(null)
       } catch (err) {
+        if (!active) {
+          return
+        }
         console.error("Failed to fetch message detail:", err)
         setError(t("fetchError"))
       } finally {
-        setLoading(false)
+        if (active) {
+          setLoading(false)
+        }
       }
     }
 
-    fetchMessageDetail()
-  }, [token, message.id, message.seen, t])
+    void fetchMessageDetail()
+
+    return () => {
+      active = false
+    }
+  }, [token, message.id, message.seen, providerId, t])
 
   const handleDelete = async () => {
     if (!token || !messageDetail) return
 
     try {
-      const providerId = currentAccount?.providerId || DEFAULT_PROVIDER_ID
       await apiDeleteMessage(token, messageDetail.id, providerId)
       toast({
         title: t("messageDeleted"),
@@ -182,6 +230,50 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
         icon: <XCircle size={16} />
       })
       setError(t("deleteError"))
+    }
+  }
+
+  const handleDownloadSource = async () => {
+    if (!token || !messageDetail || isDownloadingSource) return
+
+    try {
+      setIsDownloadingSource(true)
+      await downloadMessageSource(token, messageDetail.id, providerId)
+    } catch (err) {
+      console.error("Failed to download message source:", err)
+      toast({
+        title: t("downloadFailed"),
+        color: "danger",
+        variant: "flat",
+        icon: <XCircle size={16} />
+      })
+    } finally {
+      setIsDownloadingSource(false)
+    }
+  }
+
+  const handleDownloadAttachment = async (attachmentId: string, filename: string) => {
+    if (!token || !messageDetail || downloadingAttachmentId) return
+
+    try {
+      setDownloadingAttachmentId(attachmentId)
+      await downloadMessageAttachment(
+        token,
+        messageDetail.id,
+        attachmentId,
+        providerId,
+        filename,
+      )
+    } catch (err) {
+      console.error("Failed to download attachment:", err)
+      toast({
+        title: t("downloadFailed"),
+        color: "danger",
+        variant: "flat",
+        icon: <XCircle size={16} />
+      })
+    } finally {
+      setDownloadingAttachmentId(null)
     }
   }
 
@@ -236,11 +328,9 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
               variant="light"
               color="primary"
               startContent={<Download size={18} />}
-              as="a"
-              href={messageDetail.downloadUrl}
-              target="_blank"
-              rel="noopener noreferrer"
+              onPress={handleDownloadSource}
               size={isMobile ? "sm" : "md"}
+              isLoading={isDownloadingSource}
             >
               {isMobile ? t("downloadMobile") : t("download")} (.eml)
             </Button>
@@ -261,7 +351,11 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
                 </div>
               </div>
               <div className={`${isMobile ? 'text-xs self-start ml-8' : 'text-sm'} text-gray-500 dark:text-gray-400`}>
-                {format(new Date(messageDetail.createdAt), "yyyy年MM月dd日 HH:mm", { locale: localeDate })}
+                {format(
+                  new Date(messageDetail.createdAt),
+                  locale === "zh" ? "yyyy年MM月dd日 HH:mm" : "MMM d, yyyy HH:mm",
+                  { locale: localeDate },
+                )}
               </div>
             </div>
           </div>
@@ -338,12 +432,12 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
                           size={isMobile ? "sm" : "sm"}
                           variant="light"
                           isIconOnly
-                          as="a"
-                          href={attachment.downloadUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
+                          onPress={() =>
+                            handleDownloadAttachment(attachment.id, attachment.filename)
+                          }
                           aria-label={`Download ${attachment.filename}`}
                           className="text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-primary-light"
+                          isLoading={downloadingAttachmentId === attachment.id}
                         >
                           <Download size={isMobile ? 16 : 18} />
                         </Button>

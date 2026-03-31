@@ -30,6 +30,8 @@ pub(crate) struct StoredDomain {
     pub(crate) domain: String,
     pub(crate) is_verified: bool,
     pub(crate) status: String,
+    #[serde(default)]
+    pub(crate) owner_user_id: Option<Uuid>,
     pub(crate) verification_token: Option<String>,
     pub(crate) verification_error: Option<String>,
     pub(crate) created_at: DateTime<Utc>,
@@ -152,6 +154,7 @@ impl MemoryStore {
                 domain: domain.clone(),
                 is_verified: true,
                 status: "active".to_owned(),
+                owner_user_id: None,
                 verification_token: None,
                 verification_error: None,
                 created_at: now,
@@ -237,6 +240,7 @@ impl MemoryStore {
                 if needs_update {
                     existing.is_verified = true;
                     existing.status = "active".to_owned();
+                    existing.owner_user_id = None;
                     existing.verification_token = None;
                     existing.verification_error = None;
                     existing.updated_at = now;
@@ -250,6 +254,7 @@ impl MemoryStore {
                 domain: public_domain.clone(),
                 is_verified: true,
                 status: "active".to_owned(),
+                owner_user_id: None,
                 verification_token: None,
                 verification_error: None,
                 created_at: now,
@@ -342,7 +347,34 @@ impl MemoryStore {
         domains
     }
 
-    pub fn create_domain(&mut self, domain: &str) -> AppResult<Domain> {
+    pub fn list_domains_for_owner(&self, owner_user_id: Uuid) -> Vec<Domain> {
+        let mut domains = self
+            .domains
+            .iter()
+            .filter(|domain| domain.owner_user_id == Some(owner_user_id))
+            .map(StoredDomain::to_public)
+            .collect::<Vec<_>>();
+
+        domains.sort_by(|left, right| left.domain.cmp(&right.domain));
+        domains
+    }
+
+    pub fn count_domains_owned_by(&self, owner_user_id: Uuid) -> usize {
+        self.domains
+            .iter()
+            .filter(|domain| domain.owner_user_id == Some(owner_user_id))
+            .count()
+    }
+
+    pub fn domain_owner_user_id(&self, domain_id: Uuid) -> AppResult<Option<Uuid>> {
+        Ok(self.domain_by_id(domain_id)?.owner_user_id)
+    }
+
+    pub fn create_domain(
+        &mut self,
+        domain: &str,
+        owner_user_id: Option<Uuid>,
+    ) -> AppResult<Domain> {
         let normalized_domain = normalize_domain(domain)?;
 
         if self
@@ -359,6 +391,7 @@ impl MemoryStore {
             domain: normalized_domain,
             is_verified: false,
             status: "pending_verification".to_owned(),
+            owner_user_id,
             verification_token: Some(format!("tmpmail-verify-{}", Uuid::new_v4().simple())),
             verification_error: None,
             created_at: now,
@@ -403,6 +436,42 @@ impl MemoryStore {
             .ok_or_else(|| ApiError::validation("system domains do not require verification"))?;
 
         Ok((domain.domain.clone(), token))
+    }
+
+    pub fn delete_domain(&mut self, domain_id: Uuid) -> AppResult<()> {
+        let (domain_id, domain_name, should_cleanup_mailboxes) = {
+            let domain = self.domain_by_id(domain_id)?;
+            if domain.verification_token.is_none() {
+                return Err(ApiError::validation("system domains cannot be deleted"));
+            }
+
+            (
+                domain.id,
+                domain.domain.clone(),
+                !domain.is_verified || domain.status == "pending_verification",
+            )
+        };
+        let deleted_accounts =
+            if self.domain_has_mailboxes(&domain_name) && should_cleanup_mailboxes {
+                self.soft_delete_accounts_for_domain(&domain_name)
+            } else {
+                0
+            };
+        if self.domain_has_mailboxes(&domain_name) {
+            return Err(ApiError::validation("domain still has mailbox accounts"));
+        }
+
+        self.domains.retain(|domain| domain.id != domain_id);
+        self.record_audit(
+            "domain.delete",
+            "domain",
+            domain_id.to_string(),
+            None,
+            format!("domain={domain_name} deleted_accounts={deleted_accounts}"),
+        );
+        self.persist()?;
+
+        Ok(())
     }
 
     pub fn update_domain_verification_status(
@@ -1006,6 +1075,46 @@ impl MemoryStore {
             .ok_or_else(|| ApiError::not_found("domain not found"))
     }
 
+    fn domain_has_mailboxes(&self, domain_name: &str) -> bool {
+        self.accounts.values().any(|account| {
+            !account.is_deleted
+                && split_address(&account.address)
+                    .map(|(_, domain)| domain == domain_name)
+                    .unwrap_or(false)
+        })
+    }
+
+    fn soft_delete_accounts_for_domain(&mut self, domain_name: &str) -> usize {
+        let now = Utc::now();
+        let affected_accounts = self
+            .accounts
+            .values()
+            .filter(|account| {
+                !account.is_deleted
+                    && split_address(&account.address)
+                        .map(|(_, domain)| domain == domain_name)
+                        .unwrap_or(false)
+            })
+            .map(|account| (account.id, account.address.clone()))
+            .collect::<Vec<_>>();
+
+        for (account_id, address) in &affected_accounts {
+            if let Some(account) = self.accounts.get_mut(account_id) {
+                account.is_deleted = true;
+                account.updated_at = now;
+            }
+            self.accounts_by_address.remove(address);
+            if let Some(messages) = self.messages.get_mut(account_id) {
+                for message in messages.iter_mut().filter(|message| !message.is_deleted) {
+                    message.is_deleted = true;
+                    message.updated_at = now;
+                }
+            }
+        }
+
+        affected_accounts.len()
+    }
+
     fn record_audit(
         &mut self,
         action: &str,
@@ -1034,6 +1143,7 @@ impl StoredDomain {
             domain: self.domain.clone(),
             is_verified: self.is_verified,
             status: self.status.clone(),
+            owner_user_id: self.owner_user_id.map(|value| value.to_string()),
             verification_token: self.verification_token.clone(),
             verification_error: self.verification_error.clone(),
             created_at: self.created_at,
@@ -1362,7 +1472,7 @@ mod tests {
         let config = test_config();
         let mut store = MemoryStore::new(&config).expect("load store");
         let domain = store
-            .create_domain("public.example.com")
+            .create_domain("public.example.com", None)
             .expect("create domain");
         let domain_id = uuid::Uuid::parse_str(&domain.id).expect("uuid");
         let _ = store
@@ -1380,7 +1490,7 @@ mod tests {
         let config = test_config();
         let mut store = MemoryStore::new(&config).expect("load store");
         store
-            .create_domain("team.example.com")
+            .create_domain("team.example.com", None)
             .expect("create domain");
 
         let public_domains = store.list_domains();
@@ -1407,6 +1517,107 @@ mod tests {
                 .iter()
                 .all(|domain| domain.domain != "team.example.com")
         );
+    }
+
+    #[test]
+    fn delete_domain_removes_admin_managed_domain_without_accounts() {
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let domain = store
+            .create_domain("team.example.com", None)
+            .expect("create domain");
+        let domain_id = Uuid::parse_str(&domain.id).expect("uuid");
+
+        store.delete_domain(domain_id).expect("delete domain");
+
+        assert!(
+            store
+                .list_all_domains()
+                .iter()
+                .all(|item| item.domain != "team.example.com")
+        );
+    }
+
+    #[test]
+    fn delete_domain_rejects_mailboxes_on_domain() {
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let domain = store
+            .create_domain("team.example.com", None)
+            .expect("create domain");
+        let domain_id = Uuid::parse_str(&domain.id).expect("uuid");
+        store
+            .update_domain_verification_status(domain_id, true, None)
+            .expect("verify domain");
+        store
+            .create_account("alice@team.example.com", "secret123", None)
+            .expect("create account");
+
+        let error = store
+            .delete_domain(domain_id)
+            .expect_err("domain with mailbox should not delete");
+
+        assert_eq!(error.to_string(), "domain still has mailbox accounts");
+    }
+
+    #[test]
+    fn delete_pending_domain_cleans_up_legacy_mailboxes() {
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let domain = store
+            .create_domain("team.example.com", None)
+            .expect("create domain");
+        let domain_id = Uuid::parse_str(&domain.id).expect("uuid");
+        store
+            .update_domain_verification_status(domain_id, true, None)
+            .expect("verify domain");
+        let account = store
+            .create_account("alice@team.example.com", "secret123", None)
+            .expect("create account");
+        let account_id = Uuid::parse_str(&account.id).expect("account uuid");
+        store
+            .update_domain_verification_status(
+                domain_id,
+                false,
+                Some("legacy dns mismatch".to_owned()),
+            )
+            .expect("revert domain to pending");
+
+        store
+            .delete_domain(domain_id)
+            .expect("delete pending domain");
+
+        assert!(
+            store
+                .list_all_domains()
+                .iter()
+                .all(|item| item.domain != "team.example.com")
+        );
+        assert!(
+            store
+                .accounts
+                .get(&account_id)
+                .expect("legacy account")
+                .is_deleted
+        );
+    }
+
+    #[test]
+    fn delete_domain_rejects_configured_system_domain() {
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let domain_id = store
+            .list_all_domains()
+            .into_iter()
+            .find(|domain| domain.domain == TEST_PUBLIC_DOMAIN)
+            .and_then(|domain| Uuid::parse_str(&domain.id).ok())
+            .expect("configured domain id");
+
+        let error = store
+            .delete_domain(domain_id)
+            .expect_err("system domain should not delete");
+
+        assert_eq!(error.to_string(), "system domains cannot be deleted");
     }
 
     #[test]
@@ -1461,8 +1672,8 @@ mod tests {
 
     #[test]
     fn split_address_rejects_invalid_local_part() {
-        let error =
-            split_address(".bad@configured.example.com").expect_err("invalid local part should fail");
+        let error = split_address(".bad@configured.example.com")
+            .expect_err("invalid local part should fail");
 
         assert_eq!(error.to_string(), "address must be a valid email");
     }
@@ -1511,7 +1722,7 @@ mod tests {
         };
         let mut store = MemoryStore::new(&config).expect("load store");
         let domain = store
-            .create_domain("persisted.example.com")
+            .create_domain("persisted.example.com", None)
             .expect("create domain");
         let domain_id = Uuid::parse_str(&domain.id).expect("uuid");
         store

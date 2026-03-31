@@ -44,7 +44,8 @@ pub struct MetricsSnapshot {
 
 impl AppMetrics {
     pub fn record_inbucket_sync_success(&self, imported_messages: usize, deleted_messages: usize) {
-        self.inbucket_sync_runs_total.fetch_add(1, Ordering::Relaxed);
+        self.inbucket_sync_runs_total
+            .fetch_add(1, Ordering::Relaxed);
         self.imported_messages_total
             .fetch_add(imported_messages as u64, Ordering::Relaxed);
         self.deleted_upstream_messages_total
@@ -126,7 +127,8 @@ impl AppMetrics {
                 self.last_inbucket_sync_at_unix.load(Ordering::Relaxed),
             ),
             last_domain_verification_at: unix_to_datetime(
-                self.last_domain_verification_at_unix.load(Ordering::Relaxed),
+                self.last_domain_verification_at_unix
+                    .load(Ordering::Relaxed),
             ),
             last_cleanup_at: unix_to_datetime(self.last_cleanup_at_unix.load(Ordering::Relaxed)),
         }

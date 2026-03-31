@@ -3,7 +3,7 @@
 import { Avatar } from "@heroui/avatar"
 import { Button } from "@heroui/button"
 import { Card } from "@heroui/card"
-import { Bell, Code, ExternalLink, HelpCircle, Mail, MessageSquare, RefreshCw, Settings2, Sparkles, Wifi } from "lucide-react"
+import { Bell, Code, ExternalLink, HelpCircle, Mail, MessageSquare, RefreshCw, Sparkles, Wifi } from "lucide-react"
 import { useTranslations } from "next-intl"
 import { useAuth } from "@/contexts/auth-context"
 import { useMailStatus } from "@/contexts/mail-status-context"
@@ -49,7 +49,6 @@ export default function Sidebar({ activeItem, onItemClick, isMobile = false }: S
   ]
 
   const bottomItems = [
-    { id: "settings", label: t("settings"), icon: Settings2 },
     { id: "update-notice", label: t("updates"), icon: Bell },
     { id: "api", label: t("api"), icon: Code },
     { id: "faq", label: t("faq"), icon: HelpCircle },
@@ -125,10 +124,33 @@ export default function Sidebar({ activeItem, onItemClick, isMobile = false }: S
               </div>
             )}
           </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-3 dark:border-slate-800 dark:bg-slate-950/80">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                {t("workspace")}
+              </div>
+              <div className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
+                {isAuthenticated ? t("signedInState") : t("guestModeTitle")}
+              </div>
+            </div>
+            <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-3 dark:border-slate-800 dark:bg-slate-950/80">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
+                {t("providerLabel")}
+              </div>
+              <div className="mt-2 truncate text-sm font-semibold text-slate-900 dark:text-white">
+                {getProviderName(currentProviderId)}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="px-4 space-y-3">
+      <div className="px-4">
+        <div className="mb-3 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+          {t("primaryMenu")}
+        </div>
+        <div className="space-y-3">
         {menuItems.map((item) => {
           const Icon = item.icon
           return (
@@ -144,11 +166,15 @@ export default function Sidebar({ activeItem, onItemClick, isMobile = false }: S
             </Button>
           )
         })}
+        </div>
       </div>
 
       <div className="flex-grow" />
 
       <div className="space-y-2 border-t border-slate-200/80 p-4 dark:border-slate-800">
+        <div className="px-1 pb-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+          {t("secondaryMenu")}
+        </div>
         {bottomItems.map((item) => {
           const Icon = item.icon
           return (

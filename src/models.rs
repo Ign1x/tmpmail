@@ -26,6 +26,8 @@ pub struct Domain {
     pub is_verified: bool,
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verification_error: Option<String>,
@@ -123,14 +125,101 @@ pub struct MessageSeenResponse {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminStatusResponse {
-    pub is_password_configured: bool,
-    pub has_generated_api_key: bool,
+    pub is_bootstrap_required: bool,
+    pub users_total: usize,
+    pub admin_users_total: usize,
+    pub is_recovery_enabled: bool,
+    pub system_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConsoleUserRole {
+    Admin,
+    User,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleUser {
+    pub id: String,
+    pub username: String,
+    pub role: ConsoleUserRole,
+    pub domain_limit: u32,
+    pub is_disabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_hint: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicNoticeTone {
+    Info,
+    Warning,
+    Success,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUpdateNoticeSection {
+    pub tone: PublicNoticeTone,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bullets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalizedUpdateNoticeContent {
+    pub title: String,
+    pub date_label: String,
+    pub dismiss_label: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<PublicUpdateNoticeSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub footer: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicUpdateNotice {
+    pub enabled: bool,
+    pub auto_open: bool,
+    pub version: String,
+    pub zh: LocalizedUpdateNoticeContent,
+    pub en: LocalizedUpdateNoticeContent,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSystemSettings {
+    pub system_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_exchange_host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mail_route_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_txt_prefix: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_notice: Option<PublicUpdateNotice>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSessionInfo {
+    pub user: ConsoleUser,
+    pub system_settings: AdminSystemSettings,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSessionResponse {
     pub session_token: String,
+    pub session: AdminSessionInfo,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -138,6 +227,7 @@ pub struct AdminSessionResponse {
 pub struct AdminSetupResponse {
     pub session_token: String,
     pub api_key: String,
+    pub session: AdminSessionInfo,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -261,7 +351,16 @@ pub struct CreateDomainRequest {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct AdminPasswordRequest {
+#[serde(rename_all = "camelCase")]
+pub struct AdminBootstrapRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminLoginRequest {
+    pub username: String,
     pub password: String,
 }
 
@@ -270,6 +369,48 @@ pub struct AdminPasswordRequest {
 pub struct AdminPasswordChangeRequest {
     pub current_password: String,
     pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRecoveryRequest {
+    pub recovery_token: String,
+    pub username: Option<String>,
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminCreateUserRequest {
+    pub username: String,
+    pub password: String,
+    pub role: ConsoleUserRole,
+    pub domain_limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUpdateUserRequest {
+    pub username: Option<String>,
+    pub role: Option<ConsoleUserRole>,
+    pub domain_limit: Option<u32>,
+    pub is_disabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminResetUserPasswordRequest {
+    pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUpdateSystemSettingsRequest {
+    pub system_enabled: Option<bool>,
+    pub mail_exchange_host: Option<String>,
+    pub mail_route_target: Option<String>,
+    pub domain_txt_prefix: Option<String>,
+    pub update_notice: Option<PublicUpdateNotice>,
 }
 
 #[derive(Clone, Debug)]

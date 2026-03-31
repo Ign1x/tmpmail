@@ -1,11 +1,17 @@
 import createMiddleware from "next-intl/middleware"
 import { NextRequest, NextResponse } from "next/server"
 
-import { getAdminEntryPath, getLocalizedAdminPath } from "./lib/admin-entry"
+import {
+  getAdminConsoleEntryPath,
+  getAdminEntryPath,
+  getLocalizedAdminConsolePath,
+  getLocalizedAdminPath,
+} from "./lib/admin-entry"
 import { routing } from "./i18n/routing"
 
 const handleI18nRouting = createMiddleware(routing)
 const adminEntryPath = getAdminEntryPath()
+const adminConsoleEntryPath = getAdminConsoleEntryPath()
 
 function normalizePathname(pathname: string): string {
   if (pathname.length > 1 && pathname.endsWith("/")) {
@@ -21,13 +27,15 @@ function resolvePreferredLocale(request: NextRequest, pathname: string): string 
     return cookieLocale
   }
 
-  const matchedLocale = routing.locales.find((locale) => pathname === `/${locale}/admin`)
+  const matchedLocale = routing.locales.find(
+    (locale) => pathname === `/${locale}/admin` || pathname === `/${locale}/admin/console`,
+  )
   return matchedLocale ?? routing.defaultLocale
 }
 
-function redirectToAdminEntry(request: NextRequest, locale: string) {
+function redirectToPath(request: NextRequest, locale: string, targetPath: string) {
   const url = request.nextUrl.clone()
-  url.pathname = adminEntryPath
+  url.pathname = targetPath
 
   const response = NextResponse.redirect(url)
   response.cookies.set("NEXT_LOCALE", locale, {
@@ -41,11 +49,20 @@ function redirectToAdminEntry(request: NextRequest, locale: string) {
 export default function proxy(request: NextRequest) {
   const pathname = normalizePathname(request.nextUrl.pathname)
   const localizedAdminLocale = routing.locales.find((locale) => pathname === `/${locale}/admin`)
+  const localizedAdminConsoleLocale = routing.locales.find(
+    (locale) => pathname === `/${locale}/admin/console`,
+  )
 
-  if (adminEntryPath !== "/admin" && (pathname === "/admin" || localizedAdminLocale)) {
-    return redirectToAdminEntry(
+  if (
+    adminEntryPath !== "/admin" &&
+    (pathname === "/admin" || pathname === "/admin/console" || localizedAdminLocale || localizedAdminConsoleLocale)
+  ) {
+    return redirectToPath(
       request,
-      localizedAdminLocale ?? resolvePreferredLocale(request, pathname),
+      localizedAdminLocale ?? localizedAdminConsoleLocale ?? resolvePreferredLocale(request, pathname),
+      pathname === "/admin/console" || Boolean(localizedAdminConsoleLocale)
+        ? adminConsoleEntryPath
+        : adminEntryPath,
     )
   }
 
@@ -53,6 +70,13 @@ export default function proxy(request: NextRequest) {
     const locale = resolvePreferredLocale(request, pathname)
     const url = request.nextUrl.clone()
     url.pathname = getLocalizedAdminPath(locale)
+    return NextResponse.rewrite(url)
+  }
+
+  if (pathname === adminConsoleEntryPath) {
+    const locale = resolvePreferredLocale(request, pathname)
+    const url = request.nextUrl.clone()
+    url.pathname = getLocalizedAdminConsolePath(locale)
     return NextResponse.rewrite(url)
   }
 

@@ -1,9 +1,10 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Button } from "@heroui/button"
 import { Copy, Check, X, Key, Mail } from "lucide-react"
 import { useTranslations } from "next-intl"
+import { copyTextToClipboard } from "@/lib/clipboard"
 
 interface AccountInfoBannerProps {
   email: string
@@ -14,13 +15,29 @@ interface AccountInfoBannerProps {
 export default function AccountInfoBanner({ email, password, onClose }: AccountInfoBannerProps) {
   const [copiedEmail, setCopiedEmail] = useState(false)
   const [copiedPassword, setCopiedPassword] = useState(false)
+  const emailResetTimeoutRef = useRef<number | null>(null)
+  const passwordResetTimeoutRef = useRef<number | null>(null)
   const t = useTranslations("accountBanner")
+
+  useEffect(() => {
+    return () => {
+      if (emailResetTimeoutRef.current) {
+        window.clearTimeout(emailResetTimeoutRef.current)
+      }
+      if (passwordResetTimeoutRef.current) {
+        window.clearTimeout(passwordResetTimeoutRef.current)
+      }
+    }
+  }, [])
 
   const handleCopyEmail = async () => {
     try {
-      await navigator.clipboard.writeText(email)
+      await copyTextToClipboard(email)
       setCopiedEmail(true)
-      setTimeout(() => setCopiedEmail(false), 2000)
+      if (emailResetTimeoutRef.current) {
+        window.clearTimeout(emailResetTimeoutRef.current)
+      }
+      emailResetTimeoutRef.current = window.setTimeout(() => setCopiedEmail(false), 2000)
     } catch (err) {
       console.error("Failed to copy email:", err)
     }
@@ -28,9 +45,12 @@ export default function AccountInfoBanner({ email, password, onClose }: AccountI
 
   const handleCopyPassword = async () => {
     try {
-      await navigator.clipboard.writeText(password)
+      await copyTextToClipboard(password)
       setCopiedPassword(true)
-      setTimeout(() => setCopiedPassword(false), 2000)
+      if (passwordResetTimeoutRef.current) {
+        window.clearTimeout(passwordResetTimeoutRef.current)
+      }
+      passwordResetTimeoutRef.current = window.setTimeout(() => setCopiedPassword(false), 2000)
     } catch (err) {
       console.error("Failed to copy password:", err)
     }

@@ -7,11 +7,11 @@ Authentication
 - POST /token returns a bearer token for mailbox operations.
 - Use this token for /me, /messages, /messages/:id, and DELETE /accounts/:id.
 
-2. Admin API key
-- Domain-management endpoints use the administrator API key generated inside the admin console after the admin password is configured.
+2. Console API key
+- Domain-management endpoints use the backend API key generated for the currently signed-in console user.
 - The key is shown only when it is first created or rotated. The server stores only a hash and cannot reveal the previous plaintext value again.
-- Use HTTPS on any public network before transmitting the administrator password, session token, or admin API key.
-- Send it as: Authorization: Bearer <admin-api-key>
+- Use HTTPS on any public network before transmitting the console password, session token, or console API key.
+- Send it as: Authorization: Bearer <console-session-token-or-api-key>
 
 Core Endpoints
 
@@ -19,22 +19,27 @@ GET /healthz
 - Health probe.
 
 GET /domains
-- Without admin API key: returns active public domains.
-- With admin API key: also returns pending managed domains.
+- Without console credentials: returns active public domains.
+- With a signed-in console user or console API key: returns the caller's managed domains.
+- With an administrator session or admin-role API key: returns all managed domains.
 
 POST /domains
-- Admin only.
+- Console user required.
+- Regular users create domains under their own quota.
+- Administrators can create and inspect all managed domains.
 - Body:
 {
   "domain": "mail.example.com"
 }
 
 GET /domains/:id/records
-- Admin only.
-- Returns TXT, MX, and public routing records (A / AAAA / CNAME) for verification.
+- Console user required.
+- Regular users can only read DNS records for their own managed domains.
+- Returns the CNAME, MX, and TXT records required for managed-domain verification.
 
 POST /domains/:id/verify
-- Admin only.
+- Console user required.
+- Regular users can only verify their own managed domains.
 - Triggers an immediate DNS verification pass.
 
 POST /accounts
@@ -76,15 +81,16 @@ PATCH /messages/:id
 DELETE /messages/:id
 - Bearer token required.
 
-Typical Admin Flow
+Typical Console Flow
 
 1. Open the configured admin entry in the frontend. The default entry is /admin.
-2. Set the admin password on first access, then log in.
-3. Copy the generated administrator API key once if you need to manage the system outside the web UI, and store it in your own secret manager.
-4. Create a domain with POST /domains.
-5. Read DNS records from GET /domains/:id/records.
-6. Verify with POST /domains/:id/verify.
-7. Once status becomes active, all users can create accounts on that domain.
+2. On the first access, create the first administrator username and password.
+3. Administrators can create more console users and assign domain quotas.
+4. Sign in with username + password, then issue or rotate the current user's backend API key if needed.
+5. Create a domain with POST /domains.
+6. Read DNS records from GET /domains/:id/records.
+7. Verify with POST /domains/:id/verify.
+8. Once status becomes active, all users can create accounts on that domain.
 
 Typical User Flow
 

@@ -25,8 +25,8 @@ pub async fn stream_events(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
 
     if let Some(requested_account_id) = query.account_id.as_deref() {
-        let requested =
-            Uuid::parse_str(requested_account_id).map_err(|_| crate::error::ApiError::validation("invalid account id"))?;
+        let requested = Uuid::parse_str(requested_account_id)
+            .map_err(|_| crate::error::ApiError::validation("invalid account id"))?;
         if requested != account_id {
             return Err(crate::error::ApiError::forbidden(
                 "token does not belong to the target account",

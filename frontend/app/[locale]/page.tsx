@@ -13,7 +13,7 @@ import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { useTranslations } from "next-intl"
 import { CheckCircle, AlertCircle } from "lucide-react"
 import { fetchDomainsFromProvider, getServiceStatus, type ServiceStatusResponse } from "@/lib/api"
-import { DEFAULT_DOMAIN, DEFAULT_PROVIDER_ID, QUICK_CREATE_PASSWORD } from "@/lib/provider-config"
+import { DEFAULT_DOMAIN, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 
 function generateRandomString(length: number) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789"
@@ -117,7 +117,7 @@ function MainContent() {
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       const username = generateRandomString(10)
-      const password = QUICK_CREATE_PASSWORD || generateRandomString(12)
+      const password = generateRandomString(12)
       const email = `${username}@${domain}`
 
       try {

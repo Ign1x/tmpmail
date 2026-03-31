@@ -1,99 +1,11 @@
 import { type NextRequest, NextResponse } from "next/server";
 
-import {
-  DEFAULT_PROVIDER_BASE_URL,
-  DEFAULT_PROVIDER_ID,
-  PRESET_PROVIDERS,
-} from "@/lib/provider-config";
+import { DEFAULT_PROVIDER_BASE_URL } from "@/lib/provider-config";
 
 const UPSTREAM_TIMEOUT_MS = 15_000;
 
-function getServerProviderBaseUrls(): Record<string, string> {
-  const providerBaseUrls = PRESET_PROVIDERS.reduce<Record<string, string>>(
-    (acc, provider) => {
-      acc[provider.id] = provider.baseUrl;
-      return acc;
-    },
-    {},
-  );
-
-  providerBaseUrls[DEFAULT_PROVIDER_ID] =
-    process.env.TMPMAIL_SERVER_API_BASE_URL?.trim() ||
-    DEFAULT_PROVIDER_BASE_URL;
-
-  return providerBaseUrls;
-}
-
-function isPrivateIpv4(hostname: string): boolean {
-  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname)) {
-    return false;
-  }
-
-  const parts = hostname.split(".").map((part) => Number.parseInt(part, 10));
-  if (parts.some((part) => Number.isNaN(part) || part < 0 || part > 255)) {
-    return true;
-  }
-
-  return (
-    parts[0] === 10 ||
-    parts[0] === 127 ||
-    (parts[0] === 169 && parts[1] === 254) ||
-    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
-    (parts[0] === 192 && parts[1] === 168)
-  );
-}
-
-function isDisallowedCustomBaseUrl(value: string): boolean {
-  let parsed: URL;
-
-  try {
-    parsed = new URL(value);
-  } catch {
-    return true;
-  }
-
-  const hostname = parsed.hostname.toLowerCase();
-  const protocolAllowed =
-    parsed.protocol === "http:" || parsed.protocol === "https:";
-  if (!protocolAllowed || parsed.username || parsed.password) {
-    return true;
-  }
-
-  if (
-    hostname === "localhost" ||
-    hostname === "0.0.0.0" ||
-    hostname === "::1" ||
-    hostname.endsWith(".local") ||
-    hostname.startsWith("fe80:") ||
-    hostname.startsWith("fc") ||
-    hostname.startsWith("fd") ||
-    isPrivateIpv4(hostname)
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-function getApiBaseUrl(request: NextRequest): string | Response {
-  const providerBaseUrl = request.headers
-    .get("X-API-Provider-Base-URL")
-    ?.trim();
-  if (providerBaseUrl) {
-    if (isDisallowedCustomBaseUrl(providerBaseUrl)) {
-      return NextResponse.json(
-        { error: "Invalid provider base URL" },
-        { status: 400 },
-      );
-    }
-
-    return providerBaseUrl;
-  }
-
-  const providerId =
-    request.headers.get("X-API-Provider-ID")?.trim() || DEFAULT_PROVIDER_ID;
-  const providerBaseUrls = getServerProviderBaseUrls();
-  return providerBaseUrls[providerId] || providerBaseUrls[DEFAULT_PROVIDER_ID];
+function getApiBaseUrl(): string {
+  return process.env.TMPMAIL_SERVER_API_BASE_URL?.trim() || DEFAULT_PROVIDER_BASE_URL;
 }
 
 function normalizeEndpoint(endpoint: string | null): string | null {
@@ -152,11 +64,6 @@ async function proxyRequest(
   endpoint: string,
   options: RequestInit,
 ): Promise<Response> {
-  const apiBaseUrl = getApiBaseUrl(originalRequest);
-  if (apiBaseUrl instanceof Response) {
-    return apiBaseUrl;
-  }
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
 
@@ -166,7 +73,7 @@ async function proxyRequest(
       headers.delete("Content-Type");
     }
 
-    const upstreamUrl = `${apiBaseUrl.replace(/\/+$/, "")}${endpoint}`;
+    const upstreamUrl = `${getApiBaseUrl().replace(/\/+$/, "")}${endpoint}`;
     const response = await fetch(upstreamUrl, {
       ...options,
       headers,

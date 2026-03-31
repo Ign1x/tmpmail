@@ -14,24 +14,7 @@ pub fn build_dns_records(
     config: &Config,
 ) -> Vec<DomainDnsRecord> {
     let exchange_host = config.effective_mail_exchange_host(domain);
-    let mut records = vec![
-        DomainDnsRecord {
-            kind: "TXT".to_owned(),
-            name: format!(
-                "{}.{}",
-                config.domain_txt_prefix.trim_end_matches('.'),
-                domain
-            ),
-            value: verification_token.to_owned(),
-            ttl: 300,
-        },
-        DomainDnsRecord {
-            kind: "MX".to_owned(),
-            name: domain.to_owned(),
-            value: format!("{} {}", config.mail_exchange_priority, exchange_host),
-            ttl: 300,
-        },
-    ];
+    let mut records = Vec::new();
 
     if let Some(route_record) = build_mail_route_record(
         domain,
@@ -40,6 +23,19 @@ pub fn build_dns_records(
     ) {
         records.push(route_record);
     }
+
+    records.push(DomainDnsRecord {
+        kind: "MX".to_owned(),
+        name: domain.to_owned(),
+        value: format!("{} {}", config.mail_exchange_priority, exchange_host),
+        ttl: 300,
+    });
+    records.push(DomainDnsRecord {
+        kind: "TXT".to_owned(),
+        name: verification_txt_name(domain, config),
+        value: verification_token.to_owned(),
+        ttl: 300,
+    });
 
     records
 }
@@ -51,7 +47,7 @@ pub async fn verify_domain_dns(
 ) -> Result<(), String> {
     verify_domain_dns_inner(domain, verification_token, config)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| format_error_chain(&error))
 }
 
 async fn verify_domain_dns_inner(
@@ -61,30 +57,7 @@ async fn verify_domain_dns_inner(
 ) -> Result<()> {
     let resolver = TokioAsyncResolver::tokio_from_system_conf()
         .context("failed to initialize DNS resolver")?;
-    let txt_name = format!(
-        "{}.{}",
-        config.domain_txt_prefix.trim_end_matches('.'),
-        domain
-    );
-
-    let txt_lookup = resolver
-        .txt_lookup(txt_name.clone())
-        .await
-        .with_context(|| format!("failed to query TXT for {txt_name}"))?;
-    let txt_ok = txt_lookup.iter().any(|record| {
-        record
-            .txt_data()
-            .iter()
-            .any(|value| String::from_utf8_lossy(value).trim() == verification_token)
-    });
-
-    if !txt_ok {
-        anyhow::bail!(
-            "TXT record {} does not contain {}",
-            txt_name,
-            verification_token
-        );
-    }
+    verify_txt_token(&resolver, domain, verification_token, config).await?;
 
     let expected_mx = normalize_dns_name(&config.effective_mail_exchange_host(domain));
     let mx_lookup = resolver
@@ -109,7 +82,16 @@ async fn verify_domain_dns_inner(
         &expected_mx,
         config.effective_mail_route_target().as_deref(),
     ) {
-        verify_mail_route_record(&resolver, &route_record).await?;
+        if let Err(error) = verify_mail_route_record(&resolver, &route_record).await {
+            tracing::debug!(
+                domain,
+                record_kind = route_record.kind,
+                record_name = route_record.name,
+                record_value = route_record.value,
+                error = ?error,
+                "managed domain route record missing or mismatched; allowing verification because MX/TXT are valid"
+            );
+        }
     }
 
     Ok(())
@@ -121,8 +103,15 @@ fn build_mail_route_record(
     route_target: Option<&str>,
 ) -> Option<DomainDnsRecord> {
     let alias = format!("mail.{domain}");
-    if normalize_dns_name(exchange_host) != alias {
-        return None;
+    let normalized_exchange_host = normalize_dns_name(exchange_host);
+
+    if normalized_exchange_host != alias {
+        return Some(DomainDnsRecord {
+            kind: "CNAME".to_owned(),
+            name: alias,
+            value: normalized_exchange_host,
+            ttl: 300,
+        });
     }
 
     let value = normalize_dns_name(route_target?.trim());
@@ -148,6 +137,81 @@ fn route_record_kind(route_target: &str) -> &'static str {
 
 fn normalize_dns_name(value: &str) -> String {
     value.trim().trim_end_matches('.').to_lowercase()
+}
+
+fn verification_txt_name(domain: &str, config: &Config) -> String {
+    let prefix = config.domain_txt_prefix.trim().trim_end_matches('.');
+
+    if prefix.is_empty() || prefix == "@" {
+        domain.to_owned()
+    } else {
+        format!("{prefix}.{domain}")
+    }
+}
+
+fn verification_txt_candidates(domain: &str, config: &Config) -> Vec<String> {
+    let mut names = Vec::new();
+
+    for candidate in [
+        verification_txt_name(domain, config),
+        domain.to_owned(),
+        format!("_tmpmail-verify.{domain}"),
+    ] {
+        let normalized = normalize_dns_name(&candidate);
+        if !normalized.is_empty() && !names.contains(&normalized) {
+            names.push(normalized);
+        }
+    }
+
+    names
+}
+
+fn format_error_chain(error: &anyhow::Error) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
+async fn verify_txt_token(
+    resolver: &TokioAsyncResolver,
+    domain: &str,
+    verification_token: &str,
+    config: &Config,
+) -> Result<()> {
+    let mut checked = Vec::new();
+
+    for txt_name in verification_txt_candidates(domain, config) {
+        match resolver.txt_lookup(txt_name.clone()).await {
+            Ok(lookup) => {
+                let matched = lookup.iter().any(|record| {
+                    record
+                        .txt_data()
+                        .iter()
+                        .any(|value| String::from_utf8_lossy(value).trim() == verification_token)
+                });
+
+                if matched {
+                    return Ok(());
+                }
+
+                checked.push(format!("{txt_name} (record found but token did not match)"));
+            }
+            Err(error) => {
+                checked.push(format!("{txt_name} ({error})"));
+            }
+        }
+    }
+
+    if checked.len() == 1 {
+        anyhow::bail!("failed to verify TXT record: {}", checked[0]);
+    }
+
+    anyhow::bail!(
+        "failed to verify TXT record; checked: {}",
+        checked.join(", ")
+    );
 }
 
 async fn verify_mail_route_record(
@@ -206,7 +270,7 @@ async fn verify_mail_route_record(
 
 #[cfg(test)]
 mod tests {
-    use super::build_dns_records;
+    use super::{build_dns_records, format_error_chain, verification_txt_candidates};
     use crate::config::Config;
 
     #[test]
@@ -221,10 +285,12 @@ mod tests {
         let records = build_dns_records("fuckcyh.de", "token", &config);
 
         assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, "A");
+        assert_eq!(records[0].name, "mail.fuckcyh.de");
+        assert_eq!(records[0].value, "185.13.148.129");
         assert_eq!(records[1].value, "10 mail.fuckcyh.de");
-        assert_eq!(records[2].kind, "A");
-        assert_eq!(records[2].name, "mail.fuckcyh.de");
-        assert_eq!(records[2].value, "185.13.148.129");
+        assert_eq!(records[2].kind, "TXT");
+        assert_eq!(records[2].name, "fuckcyh.de");
     }
 
     #[test]
@@ -238,8 +304,8 @@ mod tests {
 
         let records = build_dns_records("fuckcyh.de", "token", &config);
 
-        assert_eq!(records[2].kind, "AAAA");
-        assert_eq!(records[2].value, "2001:db8::25");
+        assert_eq!(records[0].kind, "AAAA");
+        assert_eq!(records[0].value, "2001:db8::25");
     }
 
     #[test]
@@ -253,12 +319,12 @@ mod tests {
 
         let records = build_dns_records("fuckcyh.de", "token", &config);
 
-        assert_eq!(records[2].kind, "CNAME");
-        assert_eq!(records[2].value, "mx.example.net");
+        assert_eq!(records[0].kind, "CNAME");
+        assert_eq!(records[0].value, "mx.example.net");
     }
 
     #[test]
-    fn skips_route_record_when_mx_host_is_custom() {
+    fn builds_mail_subdomain_cname_when_mx_host_is_shared() {
         let config = Config {
             mail_exchange_host: "mx.public-mail.example".to_owned(),
             mail_cname_target: "185.13.148.129".to_owned(),
@@ -268,7 +334,50 @@ mod tests {
 
         let records = build_dns_records("fuckcyh.de", "token", &config);
 
-        assert_eq!(records.len(), 2);
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].kind, "CNAME");
+        assert_eq!(records[0].name, "mail.fuckcyh.de");
+        assert_eq!(records[0].value, "mx.public-mail.example");
         assert_eq!(records[1].value, "10 mx.public-mail.example");
+        assert_eq!(records[2].name, "fuckcyh.de");
+    }
+
+    #[test]
+    fn uses_custom_txt_prefix_when_configured() {
+        let config = Config {
+            domain_txt_prefix: "_tmpmail-verify".to_owned(),
+            ..Config::default()
+        };
+
+        let records = build_dns_records("fuckcyh.de", "token", &config);
+        let txt_record = records.last().expect("txt record");
+
+        assert_eq!(txt_record.kind, "TXT");
+        assert_eq!(txt_record.name, "_tmpmail-verify.fuckcyh.de");
+    }
+
+    #[test]
+    fn txt_candidates_include_root_and_legacy_prefix_for_compatibility() {
+        let config = Config::default();
+        let candidates = verification_txt_candidates("fuckcyh.de", &config);
+
+        assert_eq!(
+            candidates,
+            vec![
+                "fuckcyh.de".to_owned(),
+                "_tmpmail-verify.fuckcyh.de".to_owned()
+            ]
+        );
+    }
+
+    #[test]
+    fn formats_error_chain_with_root_cause() {
+        let error = anyhow::anyhow!("resolver returned nxdomain")
+            .context("failed to query TXT for example.com");
+
+        assert_eq!(
+            format_error_chain(&error),
+            "failed to query TXT for example.com: resolver returned nxdomain"
+        );
     }
 }

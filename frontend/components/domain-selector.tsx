@@ -6,11 +6,9 @@ import { Spinner } from "@heroui/spinner"
 
 import type { Domain } from "@/types"
 import { useTranslations } from "next-intl"
-import { useApiProvider } from "@/contexts/api-provider-context"
-import {
-  DEFAULT_PROVIDER_ID,
-  getProviderAccentClass,
-} from "@/lib/provider-config"
+import { fetchDomainsFromProvider } from "@/lib/api"
+import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { removeStoredValue, writeStoredJson } from "@/lib/storage"
 
 interface DomainSelectorProps {
   value: string
@@ -19,62 +17,43 @@ interface DomainSelectorProps {
 }
 
 export function DomainSelector({ value, onSelectionChange, isDisabled }: DomainSelectorProps) {
-  const { enabledProviders } = useApiProvider()
   const [domains, setDomains] = useState<Domain[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const t = useTranslations("domainSelector")
 
   useEffect(() => {
+    let active = true
+
     const loadDomains = async () => {
       try {
         setLoading(true)
         setError(null)
         setDomains([])
 
-        if (enabledProviders.length === 0) {
-          setError(t("noProviders"))
-          setLoading(false)
-          localStorage.removeItem("cached-domains")
-          return
-        }
+        const nextDomains = await fetchDomainsFromProvider(DEFAULT_PROVIDER_ID)
 
-        const domainResults = await Promise.all(
-          enabledProviders.map(async (provider) => {
-            const { fetchDomainsFromProvider } = await import("@/lib/api")
-            const providerDomains = await fetchDomainsFromProvider(provider.id)
-            return providerDomains.map((domain) => ({
-              ...domain,
-              providerId: provider.id,
-              providerName: provider.name,
-            }))
-          }),
-        )
-
-        const mergedDomains: Domain[] = []
-        const existingKeys = new Set<string>()
-
-        domainResults.flat().forEach((domain) => {
-          const key = `${domain.providerId || DEFAULT_PROVIDER_ID}:${domain.domain}`
-          if (existingKeys.has(key)) {
+        if (nextDomains.length === 0) {
+          if (!active) {
             return
           }
-
-          existingKeys.add(key)
-          mergedDomains.push(domain)
-        })
-
-        if (mergedDomains.length === 0) {
           setError(t("noDomainsConfigured"))
-          localStorage.removeItem("cached-domains")
+          removeStoredValue("cached-domains")
           setLoading(false)
           return
         }
 
-        setDomains(mergedDomains)
-        localStorage.setItem("cached-domains", JSON.stringify(mergedDomains))
+        if (!active) {
+          return
+        }
+
+        setDomains(nextDomains)
+        writeStoredJson("cached-domains", nextDomains)
         setLoading(false)
       } catch (err) {
+        if (!active) {
+          return
+        }
         console.error("Failed to load domains:", err)
         setDomains([])
         setError(t("fetchFailed"))
@@ -83,7 +62,11 @@ export function DomainSelector({ value, onSelectionChange, isDisabled }: DomainS
     }
 
     void loadDomains()
-  }, [enabledProviders, t])
+
+    return () => {
+      active = false
+    }
+  }, [t])
 
   if (loading) {
     return (
@@ -100,66 +83,34 @@ export function DomainSelector({ value, onSelectionChange, isDisabled }: DomainS
     )
   }
 
-  const domainsByProvider = domains.reduce((acc, domain) => {
-    const providerId = domain.providerId || DEFAULT_PROVIDER_ID
-    if (!acc[providerId]) {
-      acc[providerId] = { providerName: domain.providerName || providerId, domains: [] }
-    }
-    acc[providerId].domains.push(domain)
-    return acc
-  }, {} as Record<string, { providerName: string; domains: Domain[] }>)
-
   return (
     <Select
       label={t("selectDomain")}
       placeholder={t("chooseDomain")}
-      selectedKeys={value ? (() => {
-        const matchingKey = Object.entries(domainsByProvider).flatMap(([providerId, { domains }]) =>
-          domains.map(domain => `${providerId}-${domain.domain}`)
-        ).find(key => key.endsWith(`-${value}`))
-        return matchingKey ? [matchingKey] : []
-      })() : []}
+      selectedKeys={value ? [value] : []}
       onSelectionChange={(keys) => {
         const selectedKey = Array.from(keys)[0] as string
         if (selectedKey) {
-          const domain = selectedKey.includes('-') ? selectedKey.split('-').slice(1).join('-') : selectedKey
-          onSelectionChange(domain)
+          onSelectionChange(selectedKey)
         }
       }}
       isDisabled={isDisabled}
       className="w-full"
       classNames={{ listbox: "p-0", popoverContent: "p-1" }}
     >
-      {Object.entries(domainsByProvider).flatMap(([providerId, { providerName, domains: providerDomains }]) => [
+      {domains.map((domain) => (
         <SelectItem
-          key={`header-${providerId}`}
-          textValue={`${providerName}`}
-          className="opacity-100 cursor-default pointer-events-none"
-          classNames={{ base: "bg-gray-50 dark:bg-gray-800 rounded-md mx-1 my-1", wrapper: "px-3 py-2" }}
-          isReadOnly
+          key={domain.domain}
+          textValue={domain.domain}
+          className="mx-1 rounded-md"
+          classNames={{ base: "hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors", wrapper: "px-3 py-2" }}
         >
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${getProviderAccentClass(providerId)}`} />
-            <span className="font-medium text-gray-700 dark:text-gray-300 text-sm">{providerName}</span>
+          <div className="flex items-center gap-3">
+            <div className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+            <span className="font-mono text-sm text-gray-800 dark:text-gray-200">{domain.domain}</span>
           </div>
-        </SelectItem>,
-        ...providerDomains.map((domain) => (
-          <SelectItem
-            key={`${providerId}-${domain.domain}`}
-            textValue={domain.domain}
-            className="mx-1 rounded-md"
-            classNames={{ base: "hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors", wrapper: "px-3 py-2" }}
-          >
-            <div className="flex items-center justify-between w-full">
-              <div className="flex items-center gap-3">
-                <div className={`w-1.5 h-1.5 rounded-full ${getProviderAccentClass(providerId, "soft")}`} />
-                <span className="text-gray-800 dark:text-gray-200 font-mono text-sm">{domain.domain}</span>
-              </div>
-              <div className="flex items-center gap-1" />
-            </div>
-          </SelectItem>
-        ))
-      ])}
+        </SelectItem>
+      ))}
     </Select>
   )
 }

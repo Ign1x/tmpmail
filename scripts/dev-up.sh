@@ -22,6 +22,7 @@ docker compose -f "$ROOT_DIR/compose.yaml" ps
 
 frontend_port="${TMPMAIL_FRONTEND_PORT:-}"
 api_port="${TMPMAIL_PORT:-}"
+public_host="${TMPMAIL_PUBLIC_HOST:-}"
 
 if [ -z "$frontend_port" ]; then
   frontend_port="$(env_read TMPMAIL_FRONTEND_PORT "$ENV_FILE" 2>/dev/null || true)"
@@ -31,5 +32,18 @@ if [ -z "$api_port" ]; then
   api_port="$(env_read TMPMAIL_PORT "$ENV_FILE" 2>/dev/null || true)"
 fi
 
-echo "frontend: http://127.0.0.1:${frontend_port:-3000}/en"
+if [ -z "$public_host" ]; then
+  public_host="$(env_read TMPMAIL_PUBLIC_HOST "$ENV_FILE" 2>/dev/null || true)"
+fi
+
+if [ -z "$public_host" ]; then
+  public_host="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") { print $(i+1); exit }}' || true)"
+fi
+
+if [ -z "$public_host" ]; then
+  public_host="127.0.0.1"
+fi
+
+echo "frontend: http://${public_host}:${frontend_port:-3000}/en"
+echo "admin:    http://${public_host}:${frontend_port:-3000}/admin"
 echo "api:      http://127.0.0.1:${api_port:-8080}/healthz"

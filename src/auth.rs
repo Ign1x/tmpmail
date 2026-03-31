@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     error::{ApiError, AppResult},
+    models::ConsoleUserRole,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -26,8 +27,10 @@ pub struct TokenClaims {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct AdminSessionClaims {
+pub struct ConsoleSessionClaims {
     pub sub: String,
+    pub username: String,
+    pub role: String,
     pub scope: String,
     pub iat: usize,
     pub exp: usize,
@@ -68,12 +71,23 @@ pub fn issue_token(account_id: Uuid, address: &str, config: &Config) -> AppResul
     .map_err(|error| ApiError::internal(format!("failed to encode token: {error}")))
 }
 
-pub fn issue_admin_session_token(config: &Config) -> AppResult<String> {
+pub fn issue_console_session_token(
+    user_id: Uuid,
+    username: &str,
+    role: &ConsoleUserRole,
+    config: &Config,
+) -> AppResult<String> {
     let now = Utc::now();
     let ttl_seconds = config.admin_session_ttl_seconds.max(60);
-    let claims = AdminSessionClaims {
-        sub: "admin".to_owned(),
-        scope: "admin-session".to_owned(),
+    let claims = ConsoleSessionClaims {
+        sub: user_id.to_string(),
+        username: username.to_owned(),
+        role: match role {
+            ConsoleUserRole::Admin => "admin",
+            ConsoleUserRole::User => "user",
+        }
+        .to_owned(),
+        scope: "console-session".to_owned(),
         iat: now.timestamp() as usize,
         exp: (now + Duration::seconds(ttl_seconds)).timestamp() as usize,
     };
@@ -83,7 +97,7 @@ pub fn issue_admin_session_token(config: &Config) -> AppResult<String> {
         &claims,
         &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
     )
-    .map_err(|error| ApiError::internal(format!("failed to encode admin session token: {error}")))
+    .map_err(|error| ApiError::internal(format!("failed to encode console session token: {error}")))
 }
 
 pub fn account_id_from_headers(headers: &HeaderMap, config: &Config) -> AppResult<Uuid> {
@@ -99,25 +113,33 @@ pub fn account_id_from_headers(headers: &HeaderMap, config: &Config) -> AppResul
     Uuid::parse_str(&claims.sub).map_err(|_| ApiError::unauthorized("invalid token subject"))
 }
 
-pub fn is_valid_admin_session_token(token: &str, config: &Config) -> bool {
-    decode::<AdminSessionClaims>(
+pub fn decode_console_session_token(
+    token: &str,
+    config: &Config,
+) -> AppResult<ConsoleSessionClaims> {
+    let claims = decode::<ConsoleSessionClaims>(
         token,
         &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
         &Validation::default(),
     )
-    .map(|token_data| token_data.claims.scope == "admin-session")
-    .unwrap_or(false)
-}
+    .map_err(|_| ApiError::unauthorized("invalid console session"))?
+    .claims;
 
-pub fn require_admin_session(headers: &HeaderMap, config: &Config) -> AppResult<()> {
-    require_secure_admin_transport(headers)?;
-    let token = bearer_token(headers)?;
-
-    if !is_valid_admin_session_token(&token, config) {
-        return Err(ApiError::unauthorized("invalid admin session"));
+    if claims.scope != "console-session" {
+        return Err(ApiError::unauthorized("invalid console session"));
     }
 
-    Ok(())
+    Ok(claims)
+}
+
+pub fn require_console_session(
+    headers: &HeaderMap,
+    config: &Config,
+) -> AppResult<ConsoleSessionClaims> {
+    require_secure_admin_transport(headers, config)?;
+    let token = bearer_token(headers)?;
+
+    decode_console_session_token(&token, config)
 }
 
 pub fn optional_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -143,7 +165,11 @@ pub fn bearer_token(headers: &HeaderMap) -> AppResult<String> {
         .ok_or_else(|| ApiError::unauthorized("missing Authorization header"))
 }
 
-pub fn require_secure_admin_transport(headers: &HeaderMap) -> AppResult<()> {
+pub fn require_secure_admin_transport(headers: &HeaderMap, config: &Config) -> AppResult<()> {
+    if !config.admin_require_secure_transport {
+        return Ok(());
+    }
+
     if is_local_request(headers) || is_secure_forwarded_request(headers) {
         return Ok(());
     }
@@ -157,7 +183,14 @@ fn is_secure_forwarded_request(headers: &HeaderMap) -> bool {
     let forwarded_proto = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').next().unwrap_or(value).trim().to_ascii_lowercase());
+        .map(|value| {
+            value
+                .split(',')
+                .next()
+                .unwrap_or(value)
+                .trim()
+                .to_ascii_lowercase()
+        });
     if forwarded_proto.as_deref() == Some("https") {
         return true;
     }
@@ -177,8 +210,7 @@ fn is_local_request(headers: &HeaderMap) -> bool {
         .map(normalize_host)
         .unwrap_or_default();
 
-    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1")
-        || host.ends_with(".localhost")
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") || host.ends_with(".localhost")
 }
 
 fn normalize_host(value: &str) -> String {
@@ -202,4 +234,32 @@ fn normalize_host(value: &str) -> String {
         .unwrap_or_default()
         .trim()
         .to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::http::{HeaderMap, HeaderValue, header::HOST};
+
+    use super::require_secure_admin_transport;
+    use crate::config::Config;
+
+    #[test]
+    fn allows_insecure_admin_transport_when_config_disabled() {
+        let config = Config {
+            admin_require_secure_transport: false,
+            ..Config::default()
+        };
+        let headers = HeaderMap::new();
+
+        assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn allows_local_admin_transport_when_enforced() {
+        let config = Config::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("127.0.0.1:18081"));
+
+        assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
 }

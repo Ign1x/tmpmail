@@ -34,3 +34,10 @@ export function getLocalizedAdminPath(locale: string): string {
   return `/${locale}/admin`
 }
 
+export function getAdminConsoleEntryPath(): string {
+  return `${getAdminEntryPath()}/console`
+}
+
+export function getLocalizedAdminConsolePath(locale: string): string {
+  return `/${locale}/admin/console`
+}

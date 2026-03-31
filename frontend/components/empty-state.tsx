@@ -1,8 +1,11 @@
 "use client"
 
+import { useState } from "react"
 import { Button } from "@heroui/button"
 import { useTranslations } from "next-intl"
-import { ArrowRight, Globe2, Layers3, ServerCog, ShieldCheck, Sparkles } from "lucide-react"
+import { ArrowRight, Copy, Globe2, Layers3, ServerCog, ShieldCheck, Sparkles } from "lucide-react"
+import { useHeroUIToast } from "@/hooks/use-heroui-toast"
+import { copyTextToClipboard } from "@/lib/clipboard"
 import { BRAND_NAME } from "@/lib/provider-config"
 import type { ServiceStatusResponse } from "@/lib/api"
 
@@ -47,6 +50,9 @@ export default function EmptyState({
   isOverviewLoading = false,
 }: EmptyStateProps) {
   const t = useTranslations("emptyState")
+  const tc = useTranslations("common")
+  const { toast } = useHeroUIToast()
+  const [copiedPreview, setCopiedPreview] = useState(false)
   const serviceTone = getServiceTone(serviceStatus)
   const hasAvailableDomain = Boolean(primaryDomain)
   const readyAddress = hasAvailableDomain ? `quick-start@${primaryDomain}` : t("previewUnavailable")
@@ -56,6 +62,36 @@ export default function EmptyState({
       : serviceStatus?.status === "degraded"
         ? t("serviceDegraded")
         : t("serviceOffline")
+  const flowSteps = [
+    { title: t("stepCreateTitle"), description: t("stepCreateDescription") },
+    { title: t("stepReceiveTitle"), description: t("stepReceiveDescription") },
+    { title: t("stepResetTitle"), description: t("stepResetDescription") },
+  ]
+
+  const handleCopyPreview = async () => {
+    if (!hasAvailableDomain) {
+      return
+    }
+
+    try {
+      await copyTextToClipboard(readyAddress)
+      setCopiedPreview(true)
+      toast({
+        title: t("previewCopied"),
+        color: "success",
+        variant: "flat",
+      })
+      window.setTimeout(() => setCopiedPreview(false), 1800)
+    } catch (error) {
+      console.error("Failed to copy preview address:", error)
+      toast({
+        title: tc("copyFailed"),
+        description: tc("clipboardError"),
+        color: "danger",
+        variant: "flat",
+      })
+    }
+  }
 
   return (
     <div className="relative overflow-hidden px-4 py-10 sm:px-6 lg:px-8">
@@ -148,31 +184,89 @@ export default function EmptyState({
                   {t("poweredBy")}
                 </p>
               </div>
+
+              <div className="mt-8">
+                <div className="mb-3 inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+                  <Sparkles size={12} />
+                  {t("flowTitle")}
+                </div>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {flowSteps.map((step, index) => (
+                    <div
+                      key={step.title}
+                      className="rounded-[1.5rem] border border-slate-200/80 bg-white/75 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/55"
+                    >
+                      <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-600 dark:text-sky-300">
+                        {String(index + 1).padStart(2, "0")}
+                      </div>
+                      <div className="mt-3 text-sm font-semibold text-slate-900 dark:text-slate-100">
+                        {step.title}
+                      </div>
+                      <div className="mt-2 text-xs leading-6 text-slate-600 dark:text-slate-300">
+                        {step.description}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
             <div className="min-w-0 rounded-[1.75rem] border border-slate-900/90 bg-slate-950 px-5 py-5 text-white shadow-[0_20px_70px_rgba(15,23,42,0.22)] dark:border-slate-700 dark:bg-slate-900">
-              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-300">
-                {t("previewLabel")}
-              </div>
-              <div className="mt-3 break-all font-mono text-lg text-white sm:text-xl">
-                {readyAddress}
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-sky-300">
+                    {t("previewLabel")}
+                  </div>
+                  <div className="mt-3 break-all font-mono text-lg text-white sm:text-xl">
+                    {readyAddress}
+                  </div>
+                </div>
+                <Button
+                  isIconOnly
+                  size="sm"
+                  variant="flat"
+                  className="shrink-0 rounded-xl bg-white/10 text-white hover:bg-white/20"
+                  onPress={handleCopyPreview}
+                  isDisabled={!hasAvailableDomain}
+                  aria-label={t("copyPreview")}
+                >
+                  <Copy size={15} />
+                </Button>
               </div>
               <div className="mt-3 text-xs text-slate-300">
                 {hasAvailableDomain ? t("credentialHint") : t("previewHint")}
               </div>
 
               {domainPreview.length > 0 && (
-                <div className="mt-5 flex flex-wrap gap-2">
-                  {domainPreview.map((domain) => (
-                    <div
-                      key={domain}
-                      className="max-w-full break-all rounded-2xl border border-white/10 bg-white/5 px-3 py-1.5 text-left text-xs font-medium leading-5 text-slate-100"
-                    >
-                      {domain}
-                    </div>
-                  ))}
+                <div className="mt-5 space-y-2">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                    {t("domainPoolLabel")}
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {domainPreview.map((domain) => (
+                      <div
+                        key={domain}
+                        className={`max-w-full break-all rounded-2xl border px-3 py-1.5 text-left text-xs font-medium leading-5 ${
+                          domain === primaryDomain
+                            ? "border-sky-400/40 bg-sky-400/10 text-sky-100"
+                            : "border-white/10 bg-white/5 text-slate-100"
+                        }`}
+                      >
+                        {domain}
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
+
+              <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4">
+                <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400">
+                  {t("flowDescription")}
+                </div>
+                <div className="mt-2 text-xs leading-6 text-slate-300">
+                  {copiedPreview ? tc("copied") : t("ctaHint")}
+                </div>
+              </div>
             </div>
           </div>
         </section>

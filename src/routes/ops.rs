@@ -10,7 +10,7 @@ use crate::{
     admin_state, cleanup_worker,
     error::AppResult,
     metrics::MetricsSnapshot,
-    models::{AdminAuditLogsResponse, AdminMetricsResponse},
+    models::{AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice},
     state::AppState,
     store::StoreStats,
 };
@@ -24,7 +24,7 @@ pub async fn admin_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<AdminMetricsResponse>> {
-    admin_state::require_admin_access(&headers, &state).await?;
+    let _ = admin_state::require_admin_access(&headers, &state).await?;
 
     let stats = {
         let mut store = state.store.lock().await;
@@ -40,7 +40,7 @@ pub async fn admin_audit_logs(
     headers: HeaderMap,
     Query(query): Query<AuditLogsQuery>,
 ) -> AppResult<Json<AdminAuditLogsResponse>> {
-    admin_state::require_admin_access(&headers, &state).await?;
+    let _ = admin_state::require_admin_access(&headers, &state).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
     let entries = {
         let mut store = state.store.lock().await;
@@ -50,11 +50,18 @@ pub async fn admin_audit_logs(
     Ok(Json(AdminAuditLogsResponse { entries }))
 }
 
+pub async fn public_update_notice(
+    State(state): State<AppState>,
+) -> AppResult<Json<Option<PublicUpdateNotice>>> {
+    let admin_state = state.admin_state.read().await;
+    Ok(Json(admin_state.system_settings().update_notice))
+}
+
 pub async fn trigger_cleanup(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<(StatusCode, Json<crate::models::CleanupRunResponse>)> {
-    admin_state::require_admin_access(&headers, &state).await?;
+    let _ = admin_state::require_admin_access(&headers, &state).await?;
     let report = cleanup_worker::run_cleanup_once(&state).await?;
 
     Ok((

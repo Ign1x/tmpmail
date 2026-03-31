@@ -14,6 +14,8 @@ interface UseMailCheckerOptions {
   enabled?: boolean // 是否启用自动检查
 }
 
+const STREAM_STALL_TIMEOUT_MS = 45_000
+
 export function useMailChecker({
   currentMessages = [],
   onNewMessage,
@@ -23,12 +25,14 @@ export function useMailChecker({
   const { token, currentAccount, isAuthenticated } = useAuth()
   const { setConnectionState, setLastCheckTime, setNewMessageCount } = useMailStatus()
   const reconnectRef = useRef<NodeJS.Timeout | null>(null)
+  const watchdogRef = useRef<NodeJS.Timeout | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const connectRef = useRef<(() => Promise<void>) | null>(null)
   const lastMessagesRef = useRef<Message[]>([])
   const isRefreshingRef = useRef(false)
   const reconnectAttemptsRef = useRef(0)
   const shouldReconnectRef = useRef(false)
+  const connectionIdRef = useRef(0)
 
   const onNewMessageRef = useRef(onNewMessage)
   const onMessagesUpdateRef = useRef(onMessagesUpdate)
@@ -83,6 +87,30 @@ export function useMailChecker({
     token,
   ])
 
+  const clearWatchdog = useCallback(() => {
+    if (watchdogRef.current) {
+      clearTimeout(watchdogRef.current)
+      watchdogRef.current = null
+    }
+  }, [])
+
+  const armWatchdog = useCallback(() => {
+    clearWatchdog()
+
+    if (!shouldReconnectRef.current) {
+      return
+    }
+
+    watchdogRef.current = setTimeout(() => {
+      if (!shouldReconnectRef.current) {
+        return
+      }
+
+      console.warn("⚠️ [MailChecker] Mail stream stalled, forcing reconnect")
+      abortRef.current?.abort()
+    }, STREAM_STALL_TIMEOUT_MS)
+  }, [clearWatchdog])
+
   const stopChecking = useCallback(() => {
     shouldReconnectRef.current = false
 
@@ -94,8 +122,11 @@ export function useMailChecker({
     abortRef.current?.abort()
     abortRef.current = null
     reconnectAttemptsRef.current = 0
+    connectionIdRef.current += 1
+    clearWatchdog()
+    setNewMessageCount(0)
     setConnectionState("idle")
-  }, [setConnectionState])
+  }, [clearWatchdog, setConnectionState, setNewMessageCount])
 
   const scheduleReconnect = useCallback(() => {
     if (!shouldReconnectRef.current) {
@@ -118,6 +149,8 @@ export function useMailChecker({
 
   const handleEvent = useCallback(
     async (eventName: string, rawData: string) => {
+      armWatchdog()
+
       if (eventName === "connected" || eventName === "heartbeat" || eventName === "lagged") {
         setLastCheckTime(new Date())
         return
@@ -137,7 +170,7 @@ export function useMailChecker({
         } catch {}
       }
     },
-    [refreshMessages, setLastCheckTime],
+    [armWatchdog, refreshMessages, setLastCheckTime],
   )
 
   const connectStream = useCallback(async () => {
@@ -146,7 +179,10 @@ export function useMailChecker({
       return
     }
 
+    const connectionId = connectionIdRef.current + 1
+    connectionIdRef.current = connectionId
     abortRef.current?.abort()
+    clearWatchdog()
     const controller = new AbortController()
     abortRef.current = controller
 
@@ -176,6 +212,7 @@ export function useMailChecker({
       reconnectAttemptsRef.current = 0
       setConnectionState("connected")
       setLastCheckTime(new Date())
+      armWatchdog()
 
       const reader = response.body.getReader()
       const decoder = new TextDecoder()
@@ -187,7 +224,7 @@ export function useMailChecker({
           break
         }
 
-        buffer += decoder.decode(value, { stream: true })
+        buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n")
 
         let separatorIndex = buffer.indexOf("\n\n")
         while (separatorIndex >= 0) {
@@ -215,19 +252,25 @@ export function useMailChecker({
         throw new Error("stream closed unexpectedly")
       }
     } catch (error) {
-      if (controller.signal.aborted || !shouldReconnectRef.current) {
+      clearWatchdog()
+
+      if (connectionId !== connectionIdRef.current || !shouldReconnectRef.current) {
         return
       }
 
       console.error("❌ [MailChecker] Mail stream disconnected:", error)
+      await refreshMessages()
       setConnectionState("error")
       scheduleReconnect()
     }
   }, [
+    armWatchdog,
+    clearWatchdog,
     currentAccount,
     enabled,
     handleEvent,
     isAuthenticated,
+    refreshMessages,
     scheduleReconnect,
     setConnectionState,
     setLastCheckTime,

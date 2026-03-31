@@ -1,9 +1,10 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use reqwest::Client;
+use reqwest::{Client, StatusCode};
 use serde::Deserialize;
+use tokio::time::sleep;
 
 use crate::models::{Attachment, ImportedMessage, MessageAddress};
 
@@ -13,6 +14,14 @@ pub struct InbucketClient {
     username: Option<String>,
     password: Option<String>,
     http: Client,
+    request_retries: usize,
+    retry_backoff: Duration,
+}
+
+pub struct DownloadedAsset {
+    pub body: Vec<u8>,
+    pub content_type: Option<String>,
+    pub content_disposition: Option<String>,
 }
 
 impl InbucketClient {
@@ -20,8 +29,15 @@ impl InbucketClient {
         base_url: String,
         username: Option<String>,
         password: Option<String>,
+        request_timeout: Duration,
+        request_retries: usize,
+        retry_backoff: Duration,
     ) -> Result<Self> {
         let http = Client::builder()
+            .connect_timeout(Duration::from_secs(request_timeout.as_secs().clamp(2, 10)))
+            .timeout(request_timeout)
+            .pool_idle_timeout(Duration::from_secs(90))
+            .tcp_keepalive(Duration::from_secs(30))
             .build()
             .context("failed to build reqwest client")?;
 
@@ -30,6 +46,8 @@ impl InbucketClient {
             username,
             password,
             http,
+            request_retries,
+            retry_backoff: retry_backoff.max(Duration::from_millis(50)),
         })
     }
 
@@ -45,27 +63,128 @@ impl InbucketClient {
         detail.into_imported_message(&self.base_url, mailbox)
     }
 
+    pub async fn download_asset(&self, url: &str) -> Result<DownloadedAsset> {
+        let resolved_url = if url.starts_with("http://") || url.starts_with("https://") {
+            url.to_owned()
+        } else {
+            format!("{}{}", self.base_url, url)
+        };
+        let response = self
+            .send_get_with_retry(resolved_url, "asset download")
+            .await?;
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let content_disposition = response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let body = response
+            .bytes()
+            .await
+            .context("failed to read inbucket download body")?
+            .to_vec();
+
+        Ok(DownloadedAsset {
+            body,
+            content_type,
+            content_disposition,
+        })
+    }
+
     async fn get_json<T>(&self, path: &str) -> Result<T>
     where
         T: for<'de> Deserialize<'de>,
     {
         let url = format!("{}{}", self.base_url, path);
-        let mut request = self.http.get(url);
-
-        if let Some(username) = &self.username {
-            request = request.basic_auth(username, self.password.as_deref());
-        }
-
-        request
-            .send()
-            .await
-            .context("failed to send request to inbucket")?
-            .error_for_status()
-            .context("inbucket returned non-success status")?
+        self.send_get_with_retry(url, "json request")
+            .await?
             .json::<T>()
             .await
             .context("failed to decode inbucket response")
     }
+
+    async fn send_get_with_retry(&self, url: String, operation: &str) -> Result<reqwest::Response> {
+        for attempt in 0..=self.request_retries {
+            let mut request = self.http.get(url.clone());
+            if let Some(username) = &self.username {
+                request = request.basic_auth(username, self.password.as_deref());
+            }
+
+            match request.send().await {
+                Ok(response) => {
+                    if response.status().is_success() {
+                        return Ok(response);
+                    }
+
+                    let status = response.status();
+                    if attempt < self.request_retries && should_retry_status(status) {
+                        let delay = self.retry_delay(attempt);
+                        tracing::warn!(
+                            operation,
+                            %status,
+                            attempt = attempt + 1,
+                            max_attempts = self.request_retries + 1,
+                            backoff_ms = delay.as_millis(),
+                            "transient inbucket status; retrying request"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+
+                    return Err(anyhow!(
+                        "inbucket returned non-success status {} during {}",
+                        status,
+                        operation
+                    ));
+                }
+                Err(error) => {
+                    if attempt < self.request_retries && should_retry_request_error(&error) {
+                        let delay = self.retry_delay(attempt);
+                        tracing::warn!(
+                            operation,
+                            error = %error,
+                            attempt = attempt + 1,
+                            max_attempts = self.request_retries + 1,
+                            backoff_ms = delay.as_millis(),
+                            "transient inbucket request failure; retrying"
+                        );
+                        sleep(delay).await;
+                        continue;
+                    }
+
+                    return Err(error).with_context(|| {
+                        format!("failed to send {operation} request to inbucket")
+                    });
+                }
+            }
+        }
+
+        Err(anyhow!("exhausted inbucket retries for {operation}"))
+    }
+
+    fn retry_delay(&self, attempt: usize) -> Duration {
+        let exponent = (attempt as u32).min(6);
+        self.retry_backoff.saturating_mul(1_u32 << exponent)
+    }
+}
+
+fn should_retry_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::REQUEST_TIMEOUT
+            | StatusCode::TOO_MANY_REQUESTS
+            | StatusCode::BAD_GATEWAY
+            | StatusCode::SERVICE_UNAVAILABLE
+            | StatusCode::GATEWAY_TIMEOUT
+    ) || status.is_server_error()
+}
+
+fn should_retry_request_error(error: &reqwest::Error) -> bool {
+    error.is_timeout() || error.is_connect() || error.is_request() || error.is_body()
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,7 +417,17 @@ pub fn normalized_recipient_addresses(message: &ImportedMessage) -> Vec<String> 
 
 #[cfg(test)]
 mod tests {
-    use super::{mailbox_name_from_address, parse_address};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::time::Duration;
+
+    use axum::{
+        Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get,
+    };
+
+    use super::{InbucketClient, mailbox_name_from_address, parse_address};
 
     #[test]
     fn parses_named_address() {
@@ -313,5 +442,104 @@ mod tests {
             mailbox_name_from_address("Smoke@tmpmail.local"),
             Some("smoke".to_owned())
         );
+    }
+
+    #[tokio::test]
+    async fn list_mailbox_retries_transient_statuses() {
+        #[derive(Clone)]
+        struct TestState {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        async fn handler(State(state): State<TestState>) -> impl IntoResponse {
+            let attempt = state.attempts.fetch_add(1, Ordering::SeqCst);
+            if attempt < 2 {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+
+            Json(vec![serde_json::json!({ "id": "msg-1" })]).into_response()
+        }
+
+        let state = TestState {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/api/v1/mailbox/smoke", get(handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry test listener");
+        let address = listener.local_addr().expect("retry test listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("run retry test server");
+        });
+
+        let client = InbucketClient::new(
+            format!("http://{address}"),
+            None,
+            None,
+            Duration::from_secs(2),
+            2,
+            Duration::from_millis(10),
+        )
+        .expect("build inbucket client");
+
+        let messages = client.list_mailbox("smoke").await.expect("list mailbox");
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(state.attempts.load(Ordering::SeqCst), 3);
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_mailbox_does_not_retry_non_transient_statuses() {
+        #[derive(Clone)]
+        struct TestState {
+            attempts: Arc<AtomicUsize>,
+        }
+
+        async fn handler(State(state): State<TestState>) -> impl IntoResponse {
+            state.attempts.fetch_add(1, Ordering::SeqCst);
+            StatusCode::NOT_FOUND
+        }
+
+        let state = TestState {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        };
+        let app = Router::new()
+            .route("/api/v1/mailbox/smoke", get(handler))
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind non-retry test listener");
+        let address = listener.local_addr().expect("non-retry test listener addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("run non-retry test server");
+        });
+
+        let client = InbucketClient::new(
+            format!("http://{address}"),
+            None,
+            None,
+            Duration::from_secs(2),
+            3,
+            Duration::from_millis(10),
+        )
+        .expect("build inbucket client");
+
+        let error = client
+            .list_mailbox("smoke")
+            .await
+            .expect_err("404 should not be retried to success");
+
+        assert!(error.to_string().contains("non-success status 404"));
+        assert_eq!(state.attempts.load(Ordering::SeqCst), 1);
+
+        server.abort();
     }
 }

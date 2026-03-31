@@ -3,6 +3,7 @@ export interface Domain {
   domain: string
   isVerified?: boolean // 是否已验证（已验证才可用）
   status?: string
+  ownerUserId?: string
   verificationToken?: string
   verificationError?: string
   providerId?: string // 域名所属的API提供商ID
@@ -79,16 +80,4 @@ export interface AuthState {
   currentAccount: Account | null
   accounts: Account[]
   isAuthenticated: boolean
-}
-
-// API 提供商配置
-export interface ApiProvider {
-  id: string
-  name: string
-  baseUrl: string
-  isCustom?: boolean
-}
-
-export interface CustomApiProvider extends ApiProvider {
-  isCustom: true
 }

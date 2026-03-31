@@ -36,6 +36,7 @@ struct DomainRow {
     domain: String,
     is_verified: bool,
     status: String,
+    owner_user_id: Option<Uuid>,
     verification_token: Option<String>,
     verification_error: Option<String>,
     created_at: DateTime<Utc>,
@@ -174,7 +175,7 @@ impl PgStore {
     pub async fn list_domains(&self) -> AppResult<Vec<Domain>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE is_verified = TRUE AND status = 'active'
             ORDER BY domain
@@ -190,7 +191,7 @@ impl PgStore {
     pub async fn list_all_domains(&self) -> AppResult<Vec<Domain>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             ORDER BY domain
             "#,
@@ -202,20 +203,62 @@ impl PgStore {
         Ok(rows.into_iter().map(DomainRow::to_public).collect())
     }
 
-    pub async fn create_domain(&self, domain: &str) -> AppResult<Domain> {
+    pub async fn list_domains_for_owner(&self, owner_user_id: Uuid) -> AppResult<Vec<Domain>> {
+        let rows = sqlx::query_as::<_, DomainRow>(
+            r#"
+            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            FROM domains
+            WHERE owner_user_id = $1
+            ORDER BY domain
+            "#,
+        )
+        .bind(owner_user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        Ok(rows.into_iter().map(DomainRow::to_public).collect())
+    }
+
+    pub async fn count_domains_owned_by(&self, owner_user_id: Uuid) -> AppResult<usize> {
+        let count = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM domains
+            WHERE owner_user_id = $1
+            "#,
+        )
+        .bind(owner_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        i64_to_usize(count, "owned domains")
+    }
+
+    pub async fn domain_owner_user_id(&self, domain_id: Uuid) -> AppResult<Option<Uuid>> {
+        Ok(self.fetch_domain(domain_id).await?.owner_user_id)
+    }
+
+    pub async fn create_domain(
+        &self,
+        domain: &str,
+        owner_user_id: Option<Uuid>,
+    ) -> AppResult<Domain> {
         let normalized_domain = normalize_domain(domain)?;
         let now = Utc::now();
         let row = sqlx::query_as::<_, DomainRow>(
             r#"
             INSERT INTO domains (
-                id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+                id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             )
-            VALUES ($1, $2, FALSE, 'pending_verification', $3, NULL, $4, $4)
-            RETURNING id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            VALUES ($1, $2, FALSE, 'pending_verification', $3, $4, NULL, $5, $5)
+            RETURNING id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(&normalized_domain)
+        .bind(owner_user_id)
         .bind(format!("tmpmail-verify-{}", Uuid::new_v4().simple()))
         .bind(now)
         .fetch_one(&self.pool)
@@ -259,6 +302,108 @@ impl PgStore {
         Ok((row.domain, token))
     }
 
+    pub async fn delete_domain(&self, domain_id: Uuid) -> AppResult<()> {
+        let row = self.fetch_domain(domain_id).await?;
+        if row.verification_token.is_none() {
+            return Err(ApiError::validation("system domains cannot be deleted"));
+        }
+
+        let has_mailboxes = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                FROM accounts
+                WHERE is_deleted = FALSE
+                  AND split_part(address, '@', 2) = $1
+            )
+            "#,
+        )
+        .bind(&row.domain)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        let should_cleanup_mailboxes = !row.is_verified || row.status == "pending_verification";
+        if has_mailboxes && !should_cleanup_mailboxes {
+            return Err(ApiError::validation("domain still has mailbox accounts"));
+        }
+
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let deleted_accounts = if has_mailboxes {
+            let account_ids = sqlx::query_scalar::<_, Uuid>(
+                r#"
+                SELECT id
+                FROM accounts
+                WHERE is_deleted = FALSE
+                  AND split_part(address, '@', 2) = $1
+                "#,
+            )
+            .bind(&row.domain)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            if !account_ids.is_empty() {
+                sqlx::query(
+                    r#"
+                    UPDATE messages
+                    SET is_deleted = TRUE, updated_at = $2
+                    WHERE account_id = ANY($1)
+                      AND is_deleted = FALSE
+                    "#,
+                )
+                .bind(&account_ids)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+
+                sqlx::query(
+                    r#"
+                    UPDATE accounts
+                    SET is_deleted = TRUE, updated_at = $2
+                    WHERE id = ANY($1)
+                      AND is_deleted = FALSE
+                    "#,
+                )
+                .bind(&account_ids)
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            }
+
+            account_ids.len()
+        } else {
+            0
+        };
+
+        sqlx::query(
+            r#"
+            DELETE FROM domains
+            WHERE id = $1
+            "#,
+        )
+        .bind(domain_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        insert_audit_log_tx(
+            &mut tx,
+            "domain.delete",
+            "domain",
+            row.id.to_string(),
+            None,
+            format!("domain={} deleted_accounts={deleted_accounts}", row.domain),
+        )
+        .await?;
+        trim_audit_logs_tx(&mut tx).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
     pub async fn update_domain_verification_status(
         &self,
         domain_id: Uuid,
@@ -275,7 +420,7 @@ impl PgStore {
                 verification_error = $4,
                 updated_at = $5
             WHERE id = $1
-            RETURNING id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            RETURNING id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             "#,
         )
         .bind(domain_id)
@@ -311,7 +456,7 @@ impl PgStore {
     pub async fn pending_domain_checks(&self) -> AppResult<Vec<PendingDomainCheck>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE is_verified = FALSE
               AND status = 'pending_verification'
@@ -1076,13 +1221,14 @@ impl PgStore {
             sqlx::query(
                 r#"
                 INSERT INTO domains (
-                    id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+                    id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
                 )
-                VALUES ($1, $2, TRUE, 'active', NULL, NULL, $3, $3)
+                VALUES ($1, $2, TRUE, 'active', NULL, NULL, NULL, $3, $3)
                 ON CONFLICT (domain) DO UPDATE
                 SET
                     is_verified = TRUE,
                     status = 'active',
+                    owner_user_id = NULL,
                     verification_token = NULL,
                     verification_error = NULL,
                     updated_at = EXCLUDED.updated_at
@@ -1157,9 +1303,9 @@ impl PgStore {
             sqlx::query(
                 r#"
                 INSERT INTO domains (
-                    id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+                    id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 ON CONFLICT (domain) DO NOTHING
                 "#,
             )
@@ -1167,6 +1313,7 @@ impl PgStore {
             .bind(&domain.domain)
             .bind(domain.is_verified)
             .bind(&domain.status)
+            .bind(domain.owner_user_id)
             .bind(domain.verification_token.clone())
             .bind(domain.verification_error.clone())
             .bind(domain.created_at)
@@ -1274,7 +1421,7 @@ impl PgStore {
     async fn fetch_domain(&self, domain_id: Uuid) -> AppResult<DomainRow> {
         sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE id = $1
             "#,
@@ -1356,6 +1503,7 @@ impl DomainRow {
             domain: self.domain,
             is_verified: self.is_verified,
             status: self.status,
+            owner_user_id: self.owner_user_id.map(|value| value.to_string()),
             verification_token: self.verification_token,
             verification_error: self.verification_error,
             created_at: self.created_at,

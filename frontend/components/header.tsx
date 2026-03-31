@@ -4,11 +4,11 @@ import { Button } from "@heroui/button"
 import { Dropdown, DropdownTrigger, DropdownMenu, DropdownItem, DropdownSection } from "@heroui/dropdown"
 import { Avatar } from "@heroui/avatar"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
-import { Sun, Moon, Languages, User, UserPlus, LogOut, Trash2, Copy, Check, Wifi, Eye, EyeOff, KeyRound } from "lucide-react"
-import { useTheme } from "next-themes"
-import { useState, useEffect, useCallback } from "react"
+import { Languages, User, UserPlus, LogOut, Trash2, Copy, Check, Wifi, Eye, EyeOff, KeyRound } from "lucide-react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { useAuth } from "@/contexts/auth-context"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
+import { useHydrated } from "@/hooks/use-hydrated"
 import { useMailStatus } from "@/contexts/mail-status-context"
 import { useTranslations, useLocale } from "next-intl"
 import {
@@ -16,6 +16,8 @@ import {
   getProviderAccentClass,
   getProviderName,
 } from "@/lib/provider-config"
+import { copyTextToClipboard } from "@/lib/clipboard"
+import ThemeModeToggle from "@/components/theme-mode-toggle"
 
 interface HeaderProps {
   onCreateAccount: () => void
@@ -25,31 +27,47 @@ interface HeaderProps {
 }
 
 export default function Header({ onCreateAccount, onLocaleChange, onLogin, isMobile = false }: HeaderProps) {
-  const { theme, setTheme } = useTheme()
   const { isAuthenticated, currentAccount, accounts, logout, switchAccount, deleteAccount } = useAuth()
-  const [mounted, setMounted] = useState(false)
+  const hydrated = useHydrated()
   const [copiedEmail, setCopiedEmail] = useState(false)
   const [copiedPassword, setCopiedPassword] = useState(false)
   const [showPassword, setShowPassword] = useState(false)
+  const emailResetTimeoutRef = useRef<number | null>(null)
+  const passwordResetTimeoutRef = useRef<number | null>(null)
   const { toast } = useHeroUIToast()
   const { isEnabled, setIsEnabled } = useMailStatus()
   const t = useTranslations("header")
   const tc = useTranslations("common")
   const locale = useLocale()
+  const currentProviderName = currentAccount
+    ? getProviderName(currentAccount.providerId || DEFAULT_PROVIDER_ID)
+    : getProviderName(DEFAULT_PROVIDER_ID)
 
   useEffect(() => {
-    setMounted(true)
+    return () => {
+      if (emailResetTimeoutRef.current) {
+        window.clearTimeout(emailResetTimeoutRef.current)
+      }
+      if (passwordResetTimeoutRef.current) {
+        window.clearTimeout(passwordResetTimeoutRef.current)
+      }
+    }
   }, [])
 
   const handleCopyToClipboard = useCallback(
     async (text: string, type: string) => {
       try {
-        await navigator.clipboard.writeText(text)
-        if (type === "email") setCopiedEmail(true)
+        await copyTextToClipboard(text)
+        if (type === "email") {
+          setCopiedEmail(true)
+          if (emailResetTimeoutRef.current) {
+            window.clearTimeout(emailResetTimeoutRef.current)
+          }
+          emailResetTimeoutRef.current = window.setTimeout(() => {
+            setCopiedEmail(false)
+          }, 2000)
+        }
         toast({ title: type === "email" ? tc("emailCopied") : tc("contentCopied"), description: text })
-        setTimeout(() => {
-          if (type === "email") setCopiedEmail(false)
-        }, 2000)
       } catch (err) {
         toast({ title: tc("copyFailed"), description: tc("clipboardError"), color: "danger", variant: "flat" })
         console.error("Failed to copy: ", err)
@@ -58,7 +76,25 @@ export default function Header({ onCreateAccount, onLocaleChange, onLogin, isMob
     [toast, tc],
   )
 
-  if (!mounted) return null
+  const handleCopyPassword = useCallback(
+    async (password: string) => {
+      try {
+        await copyTextToClipboard(password)
+        setCopiedPassword(true)
+        toast({ title: t("passwordCopied") })
+        if (passwordResetTimeoutRef.current) {
+          window.clearTimeout(passwordResetTimeoutRef.current)
+        }
+        passwordResetTimeoutRef.current = window.setTimeout(() => setCopiedPassword(false), 2000)
+      } catch (error) {
+        toast({ title: tc("copyFailed"), description: tc("clipboardError"), color: "danger", variant: "flat" })
+        console.error("Failed to copy password:", error)
+      }
+    },
+    [t, tc, toast],
+  )
+
+  if (!hydrated) return null
 
   const getInitials = (email: string) => {
     return email ? email.substring(0, 2).toUpperCase() : "NA"
@@ -85,38 +121,74 @@ export default function Header({ onCreateAccount, onLocaleChange, onLogin, isMob
   }
 
   return (
-    <header className={`h-16 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 ${isMobile ? 'px-4' : 'px-6'} flex items-center justify-between`}>
-      <div className="flex items-center space-x-2 flex-1 min-w-0">
+    <header className={`sticky top-0 z-30 border-b border-slate-200/80 bg-white/75 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/70 ${isMobile ? "px-4" : "px-6"} flex h-16 items-center justify-between gap-3`}>
+      <div className="flex min-w-0 flex-1 items-center gap-2">
         {isAuthenticated && currentAccount ? (
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="light"
-                  className={`text-sm font-medium text-gray-800 dark:text-white p-2 h-auto bg-gray-100 dark:bg-gray-700 hover:bg-gray-200 dark:hover:bg-gray-600 border border-gray-200 dark:border-gray-600 ${isMobile ? 'max-w-[200px] truncate' : ''}`}
-                  onPress={() => handleCopyToClipboard(currentAccount.address, "email")}
-                  endContent={
-                    copiedEmail ? (
-                      <Check size={16} className="text-green-500" />
-                    ) : (
-                      <Copy size={16} className="text-gray-500 dark:text-gray-300" />
-                    )
-                  }
-                >
-                  <span className={isMobile ? 'truncate' : ''}>{currentAccount.address}</span>
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent side="bottom">
-                <p>{copiedEmail ? tc("copied") : tc("copyEmailTooltip")}</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+          <>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button
+                    variant="light"
+                    className={`h-auto rounded-full border border-slate-200 bg-white/80 px-3 py-2 text-sm font-medium text-slate-800 shadow-sm backdrop-blur dark:border-slate-700 dark:bg-slate-900/80 dark:text-white ${isMobile ? "max-w-[190px]" : "max-w-[24rem]"}`}
+                    onPress={() => handleCopyToClipboard(currentAccount.address, "email")}
+                    endContent={
+                      copiedEmail ? (
+                        <Check size={16} className="text-green-500" />
+                      ) : (
+                        <Copy size={16} className="text-slate-500 dark:text-slate-300" />
+                      )
+                    }
+                  >
+                    <span className="truncate">{currentAccount.address}</span>
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  <p>{copiedEmail ? tc("copied") : tc("copyEmailTooltip")}</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+
+            {!isMobile && (
+              <div className="hidden items-center gap-2 rounded-full border border-slate-200 bg-white/75 px-3 py-2 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-300 md:inline-flex">
+                <div className={`h-2 w-2 rounded-full ${getProviderAccentClass(currentAccount.providerId || DEFAULT_PROVIDER_ID, "soft")}`} />
+                {currentProviderName}
+              </div>
+            )}
+          </>
         ) : (
-          <div className="w-px h-6" />
+          !isMobile && (
+            <div className="hidden text-sm text-slate-500 dark:text-slate-400 md:block">
+              {currentProviderName}
+            </div>
+          )
         )}
       </div>
 
       <div className={`flex items-center ${isMobile ? 'space-x-1' : 'space-x-2'}`}>
+        {!isAuthenticated && !isMobile && (
+          <>
+            <Button
+              variant="flat"
+              size="sm"
+              onPress={onLogin || (() => {})}
+              className="rounded-full border border-slate-200 bg-white/75 px-4 text-slate-700 shadow-sm dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-200"
+              startContent={<User size={15} />}
+            >
+              {t("loginExisting")}
+            </Button>
+            <Button
+              color="primary"
+              size="sm"
+              onPress={onCreateAccount}
+              className="rounded-full bg-sky-600 px-4 font-semibold text-white shadow-lg shadow-sky-500/20 hover:bg-sky-700"
+              startContent={<UserPlus size={15} />}
+            >
+              {t("createNew")}
+            </Button>
+          </>
+        )}
+
         {/* 邮件检查切换按钮 */}
         {isAuthenticated && currentAccount && (
           <TooltipProvider>
@@ -150,16 +222,7 @@ export default function Header({ onCreateAccount, onLocaleChange, onLogin, isMob
           </TooltipProvider>
         )}
 
-        <Button
-          isIconOnly
-          variant="light"
-          size="sm"
-          onPress={() => setTheme(theme === "dark" ? "light" : "dark")}
-          className="text-gray-600 dark:text-gray-300"
-          aria-label={theme === "dark" ? t("switchToLight") : t("switchToDark")}
-        >
-          {theme === "dark" ? <Sun size={18} /> : <Moon size={18} />}
-        </Button>
+        <ThemeModeToggle buttonClassName="text-gray-600 dark:text-gray-300" />
 
         <Button
           isIconOnly
@@ -238,10 +301,7 @@ export default function Header({ onCreateAccount, onLocaleChange, onLogin, isMob
                           <button
                             onClick={(e) => {
                               e.stopPropagation()
-                              navigator.clipboard.writeText(currentAccount.password!)
-                              setCopiedPassword(true)
-                              toast({ title: t("passwordCopied") })
-                              setTimeout(() => setCopiedPassword(false), 2000)
+                              void handleCopyPassword(currentAccount.password!)
                             }}
                             className="p-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors"
                           >

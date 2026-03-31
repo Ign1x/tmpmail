@@ -48,10 +48,35 @@ impl AppStore {
         }
     }
 
-    pub async fn create_domain(&mut self, domain: &str) -> AppResult<Domain> {
+    pub async fn list_domains_for_owner(&mut self, owner_user_id: Uuid) -> AppResult<Vec<Domain>> {
         match self {
-            Self::Memory(store) => store.create_domain(domain),
-            Self::Postgres(store) => store.create_domain(domain).await,
+            Self::Memory(store) => Ok(store.list_domains_for_owner(owner_user_id)),
+            Self::Postgres(store) => store.list_domains_for_owner(owner_user_id).await,
+        }
+    }
+
+    pub async fn count_domains_owned_by(&mut self, owner_user_id: Uuid) -> AppResult<usize> {
+        match self {
+            Self::Memory(store) => Ok(store.count_domains_owned_by(owner_user_id)),
+            Self::Postgres(store) => store.count_domains_owned_by(owner_user_id).await,
+        }
+    }
+
+    pub async fn domain_owner_user_id(&mut self, domain_id: Uuid) -> AppResult<Option<Uuid>> {
+        match self {
+            Self::Memory(store) => store.domain_owner_user_id(domain_id),
+            Self::Postgres(store) => store.domain_owner_user_id(domain_id).await,
+        }
+    }
+
+    pub async fn create_domain(
+        &mut self,
+        domain: &str,
+        owner_user_id: Option<Uuid>,
+    ) -> AppResult<Domain> {
+        match self {
+            Self::Memory(store) => store.create_domain(domain, owner_user_id),
+            Self::Postgres(store) => store.create_domain(domain, owner_user_id).await,
         }
     }
 
@@ -73,6 +98,13 @@ impl AppStore {
         match self {
             Self::Memory(store) => store.domain_verification_context(domain_id),
             Self::Postgres(store) => store.domain_verification_context(domain_id).await,
+        }
+    }
+
+    pub async fn delete_domain(&mut self, domain_id: Uuid) -> AppResult<()> {
+        match self {
+            Self::Memory(store) => store.delete_domain(domain_id),
+            Self::Postgres(store) => store.delete_domain(domain_id).await,
         }
     }
 
@@ -113,7 +145,11 @@ impl AppStore {
         }
     }
 
-    pub async fn authenticate(&mut self, address: &str, password: &str) -> AppResult<(Uuid, String)> {
+    pub async fn authenticate(
+        &mut self,
+        address: &str,
+        password: &str,
+    ) -> AppResult<(Uuid, String)> {
         match self {
             Self::Memory(store) => store.authenticate(address, password),
             Self::Postgres(store) => store.authenticate(address, password).await,
@@ -156,7 +192,9 @@ impl AppStore {
         match self {
             Self::Memory(store) => store.import_message_for_recipients(recipients, imported),
             Self::Postgres(store) => {
-                store.import_message_for_recipients(recipients, imported).await
+                store
+                    .import_message_for_recipients(recipients, imported)
+                    .await
             }
         }
     }
@@ -224,10 +262,7 @@ impl AppStore {
         }
     }
 
-    pub async fn cleanup_stale_pending_domains(
-        &mut self,
-        max_age: Duration,
-    ) -> AppResult<usize> {
+    pub async fn cleanup_stale_pending_domains(&mut self, max_age: Duration) -> AppResult<usize> {
         match self {
             Self::Memory(store) => store.cleanup_stale_pending_domains(max_age),
             Self::Postgres(store) => store.cleanup_stale_pending_domains(max_age).await,
@@ -265,6 +300,20 @@ impl AppStore {
                     .append_audit_log(action, entity_type, entity_id, actor_id, detail)
                     .await
             }
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        match self {
+            Self::Memory(_) => "memory",
+            Self::Postgres(_) => "postgres",
+        }
+    }
+
+    pub async fn ready(&mut self) -> AppResult<()> {
+        match self {
+            Self::Memory(_) => Ok(()),
+            Self::Postgres(store) => store.ready().await,
         }
     }
 }

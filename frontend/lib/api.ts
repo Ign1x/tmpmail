@@ -6,36 +6,101 @@ import type {
   MessageDetail,
 } from "@/types";
 import {
-  DEFAULT_DOMAIN,
   DEFAULT_PROVIDER_ID,
-  PRESET_PROVIDERS,
-  getDefaultDisabledProviderIds,
-  getDefaultProviderConfig as getPresetDefaultProviderConfig,
 } from "@/lib/provider-config";
 import { normalizeEmailAddress } from "@/lib/account-validation";
 import { readStoredJson } from "@/lib/storage";
+
+const CLIENT_FETCH_TIMEOUT_MS = 15_000;
+const nativeFetch = globalThis.fetch.bind(globalThis);
 
 interface FetchDomainsFromProviderOptions {
   apiKeyOverride?: string;
 }
 
 export interface AdminStatus {
-  isPasswordConfigured: boolean;
-  hasGeneratedApiKey: boolean;
+  isBootstrapRequired: boolean;
+  usersTotal: number;
+  adminUsersTotal: number;
   isRecoveryEnabled: boolean;
+  systemEnabled: boolean;
+}
+
+export type ConsoleUserRole = "admin" | "user"
+
+export interface ConsoleUser {
+  id: string
+  username: string
+  role: ConsoleUserRole
+  domainLimit: number
+  isDisabled: boolean
+  apiKeyHint?: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface AdminSystemSettings {
+  systemEnabled: boolean
+  mailExchangeHost?: string
+  mailRouteTarget?: string
+  domainTxtPrefix?: string
+  updateNotice?: PublicUpdateNotice
+}
+
+export interface AdminSessionInfo {
+  user: ConsoleUser
+  systemSettings: AdminSystemSettings
 }
 
 export interface AdminSessionResponse {
   sessionToken: string;
+  session: AdminSessionInfo;
 }
 
 export interface AdminSetupResponse extends AdminSessionResponse {
   apiKey: string;
 }
 
+export interface AdminBootstrapRequest {
+  username: string
+  password: string
+}
+
+export interface AdminLoginRequest {
+  username: string
+  password: string
+}
+
 export interface AdminRecoveryRequest {
   recoveryToken: string;
+  username?: string;
   newPassword: string;
+}
+
+export interface AdminCreateUserRequest {
+  username: string
+  password: string
+  role: ConsoleUserRole
+  domainLimit: number
+}
+
+export interface AdminUpdateUserRequest {
+  username?: string
+  role?: ConsoleUserRole
+  domainLimit?: number
+  isDisabled?: boolean
+}
+
+export interface AdminResetUserPasswordRequest {
+  newPassword: string
+}
+
+export interface AdminUpdateSystemSettingsRequest {
+  systemEnabled?: boolean
+  mailExchangeHost?: string
+  mailRouteTarget?: string
+  domainTxtPrefix?: string
+  updateNotice?: PublicUpdateNotice
 }
 
 export interface AdminAccessKeyResponse {
@@ -55,6 +120,31 @@ export interface CleanupRunResponse {
 export interface ServiceStatusResponse {
   status: "ready" | "degraded" | "offline";
   storeBackend?: string;
+}
+
+export type PublicNoticeTone = "info" | "warning" | "success"
+
+export interface PublicUpdateNoticeSection {
+  tone: PublicNoticeTone
+  title: string
+  body?: string
+  bullets?: string[]
+}
+
+export interface LocalizedUpdateNoticeContent {
+  title: string
+  dateLabel: string
+  dismissLabel: string
+  sections: PublicUpdateNoticeSection[]
+  footer?: string
+}
+
+export interface PublicUpdateNotice {
+  enabled: boolean
+  autoOpen: boolean
+  version: string
+  zh: LocalizedUpdateNoticeContent
+  en: LocalizedUpdateNoticeContent
 }
 
 export interface AdminMetricsResponse {
@@ -84,25 +174,98 @@ export interface AdminMetricsResponse {
   lastCleanupAt?: string;
 }
 
-function getDefaultProviderConfig() {
-  return getPresetDefaultProviderConfig();
+type ApiViolation = {
+  propertyPath?: string;
+  message?: string;
+};
+
+type ApiErrorPayload = {
+  detail?: string;
+  message?: string;
+  details?: string;
+  error?: string;
+  violations?: ApiViolation[];
+  token?: string;
+};
+
+type StoredAuthAccount = {
+  address: string;
+  password: string;
+  token?: string;
+  providerId?: string;
+};
+
+type StoredAuthPayload = {
+  token?: string;
+  currentAccount?: unknown;
+  accounts?: unknown;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
-function createBaseHeaders(providerId?: string): Record<string, string> {
-  const provider = providerId
-    ? getProviderConfig(providerId)
-    : getDefaultProviderConfig();
-  const headers: Record<string, string> = {};
+function normalizeStoredAuthAccount(value: unknown): StoredAuthAccount | null {
+  if (
+    !isRecord(value) ||
+    typeof value.address !== "string" ||
+    typeof value.password !== "string"
+  ) {
+    return null;
+  }
 
-  if (provider) {
-    headers["X-API-Provider-ID"] = provider.id;
+  return {
+    address: value.address,
+    password: value.password,
+    token: typeof value.token === "string" ? value.token : undefined,
+    providerId: typeof value.providerId === "string" ? value.providerId : undefined,
+  };
+}
 
-    if (provider.isCustom) {
-      headers["X-API-Provider-Base-URL"] = provider.baseUrl;
+function getApiErrorPayload(value: unknown): ApiErrorPayload {
+  return isRecord(value) ? (value as ApiErrorPayload) : {};
+}
+
+async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), CLIENT_FETCH_TIMEOUT_MS);
+  const upstreamSignal = init.signal;
+  const abortFromUpstream = () => controller.abort();
+
+  if (upstreamSignal) {
+    if (upstreamSignal.aborted) {
+      controller.abort();
+    } else {
+      upstreamSignal.addEventListener("abort", abortFromUpstream, { once: true });
     }
   }
 
-  return headers;
+  try {
+    return await nativeFetch(input, {
+      ...init,
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError" && !upstreamSignal?.aborted) {
+      throw new Error("HTTP 504: 请求超时，请稍后重试");
+    }
+
+    throw error;
+  } finally {
+    globalThis.clearTimeout(timeoutId);
+    upstreamSignal?.removeEventListener("abort", abortFromUpstream);
+  }
+}
+
+const fetch = fetchWithTimeout;
+
+function createBaseHeaders(providerId?: string): Record<string, string> {
+  return {
+    "X-API-Provider-ID": providerId?.trim() || DEFAULT_PROVIDER_ID,
+  };
 }
 
 export function createProviderHeaders(
@@ -193,57 +356,9 @@ function parseDownloadFilename(contentDisposition: string | null): string | null
 
 // 从邮箱地址推断提供商ID
 function inferProviderFromEmail(email: string): string {
-  if (typeof window === "undefined") return DEFAULT_PROVIDER_ID;
-
-  try {
-    const domain = normalizeEmailAddress(email).split("@")[1];
-    if (!domain) return DEFAULT_PROVIDER_ID;
-
-    const knownDomainPatterns: Record<string, string> = {};
-    if (DEFAULT_DOMAIN) {
-      knownDomainPatterns[DEFAULT_DOMAIN] = DEFAULT_PROVIDER_ID;
-    }
-
-    // 检查是否是已知域名
-    if (knownDomainPatterns[domain]) {
-      return knownDomainPatterns[domain];
-    }
-
-    // 获取所有域名信息（从localStorage缓存中获取，避免API调用）
-    const domains = readStoredJson<unknown>("cached-domains", []);
-    if (Array.isArray(domains)) {
-      const matchedDomain = domains.find((d: any) => d.domain === domain);
-      if (matchedDomain && matchedDomain.providerId) {
-        return matchedDomain.providerId;
-      }
-    }
-
-    // 如果没有找到匹配的域名，返回默认提供商
-    return DEFAULT_PROVIDER_ID;
-  } catch (error) {
-    return DEFAULT_PROVIDER_ID;
-  }
-}
-
-function getProviderConfig(providerId: string) {
-  if (typeof window === "undefined") return null;
-
-  try {
-    let provider = PRESET_PROVIDERS.find(
-      (presetProvider) => presetProvider.id === providerId,
-    );
-
-    if (!provider) {
-      const parsed = readStoredJson<unknown>("custom-api-providers", []);
-      if (Array.isArray(parsed)) {
-        provider = parsed.find((p: any) => p.id === providerId);
-      }
-    }
-
-    return provider || getDefaultProviderConfig();
-  } catch (error) {
-    return getDefaultProviderConfig();
-  }
+  void email;
+  normalizeEmailAddress(email);
+  return DEFAULT_PROVIDER_ID;
 }
 
 // 将后端端点路径转换为本地代理 URL（解决 CORS 问题，仅用于客户端）
@@ -252,7 +367,8 @@ function buildProxyUrl(endpoint: string): string {
 }
 
 // 根据API文档改进错误处理
-function getErrorMessage(status: number, errorData: any): string {
+function getErrorMessage(status: number, errorData: unknown): string {
+  const payload = getApiErrorPayload(errorData);
   // 前缀添加HTTP状态码，便于retryFetch识别
   const prefix = `HTTP ${status}: `;
 
@@ -262,12 +378,12 @@ function getErrorMessage(status: number, errorData: any): string {
     case 401:
       return (
         prefix +
-        (errorData?.detail || errorData?.message || "认证失败，请检查登录状态")
+        (payload.detail || payload.message || "认证失败，请检查登录状态")
       );
     case 403:
       return (
         prefix +
-        (errorData?.detail || errorData?.message || "当前操作被拒绝")
+        (payload.detail || payload.message || "当前操作被拒绝")
       );
     case 404:
       return prefix + "请求的资源不存在";
@@ -277,8 +393,8 @@ function getErrorMessage(status: number, errorData: any): string {
       return prefix + "服务器暂时不可用";
     case 422:
       // 处理具体的422错误信息
-      if (errorData?.violations && Array.isArray(errorData.violations)) {
-        const violation = errorData.violations[0];
+      if (payload.violations && Array.isArray(payload.violations)) {
+        const violation = payload.violations[0];
         if (
           violation?.propertyPath === "address" &&
           violation?.message?.includes("already used")
@@ -289,7 +405,7 @@ function getErrorMessage(status: number, errorData: any): string {
       }
 
       // 处理不同API提供商的错误消息格式
-      const errorMessage = errorData?.detail || errorData?.message || "";
+      const errorMessage = payload.detail || payload.message || "";
 
       // 统一处理邮箱已存在的错误
       if (
@@ -309,9 +425,9 @@ function getErrorMessage(status: number, errorData: any): string {
     default:
       return (
         prefix +
-        (errorData?.message ||
-          errorData?.details ||
-          errorData?.error ||
+        (payload.message ||
+          payload.details ||
+          payload.error ||
           `请求失败`)
       );
   }
@@ -334,24 +450,19 @@ function getCurrentAccountFromStorage(): {
   if (typeof window === "undefined") return null;
 
   try {
-    const parsed = readStoredJson<any>("auth", null);
-    if (!parsed || typeof parsed !== "object") return null;
+    const parsed = readStoredJson<StoredAuthPayload | null>("auth", null);
+    if (!parsed || !isRecord(parsed)) return null;
 
-    const currentAccount = parsed.currentAccount;
-    if (!currentAccount || typeof currentAccount !== "object") return null;
-
-    if (
-      typeof currentAccount.address !== "string" ||
-      typeof currentAccount.password !== "string" ||
-      typeof (currentAccount.token || parsed.token) !== "string"
-    ) {
+    const currentAccount = normalizeStoredAuthAccount(parsed.currentAccount);
+    const effectiveToken = currentAccount?.token || parsed.token;
+    if (!currentAccount || typeof effectiveToken !== "string") {
       return null;
     }
 
     return {
       address: currentAccount.address,
       password: currentAccount.password,
-      token: currentAccount.token || parsed.token,
+      token: effectiveToken,
       providerId: currentAccount.providerId || DEFAULT_PROVIDER_ID,
     };
   } catch (error) {
@@ -364,18 +475,23 @@ function updateTokenInStorage(newToken: string): void {
   if (typeof window === "undefined") return;
 
   try {
-    const parsed = readStoredJson<any>("auth", null);
-    if (!parsed || typeof parsed !== "object") return;
+    const parsed = readStoredJson<StoredAuthPayload | null>("auth", null);
+    if (!parsed || !isRecord(parsed)) return;
 
-    if (parsed.currentAccount && typeof parsed.currentAccount === "object") {
-      parsed.currentAccount.token = newToken;
+    const currentAccount = normalizeStoredAuthAccount(parsed.currentAccount);
+    if (currentAccount) {
+      currentAccount.token = newToken;
+      parsed.currentAccount = currentAccount;
       // 同时更新accounts数组中对应账户的token
       if (parsed.accounts && Array.isArray(parsed.accounts)) {
-        parsed.accounts = parsed.accounts.map((acc: any) =>
-          acc.address === parsed.currentAccount.address
-            ? { ...acc, token: newToken }
-            : acc,
-        );
+        parsed.accounts = parsed.accounts
+          .map(normalizeStoredAuthAccount)
+          .filter((account): account is StoredAuthAccount => !!account)
+          .map((account) =>
+            account.address === currentAccount.address
+              ? { ...account, token: newToken }
+              : account,
+          );
       }
     }
     parsed.token = newToken;
@@ -479,17 +595,17 @@ async function fetchWithTokenRefresh(
 }
 
 // 重试函数，改进错误处理
-async function retryFetch(
-  fn: () => Promise<any>,
+async function retryFetch<T>(
+  fn: () => Promise<T>,
   retries = 3,
   delay = 1000,
-): Promise<any> {
+): Promise<T> {
   try {
     const response = await fn();
     return response;
-  } catch (error: any) {
+  } catch (error: unknown) {
     // 如果错误包含状态码信息，检查是否应该重试
-    if (error.message && typeof error.message === "string") {
+    if (error instanceof Error && typeof error.message === "string") {
       // 从错误消息中提取状态码
       const statusMatch = error.message.match(/HTTP (\d+)/);
       if (statusMatch) {
@@ -546,73 +662,22 @@ export async function fetchDomainsFromProvider(
 ): Promise<Domain[]> {
   try {
     const domainCollection = await requestDomainCollection(
-      providerId,
+      DEFAULT_PROVIDER_ID,
       options.apiKeyOverride,
     );
-    let availableDomains = domainCollection;
-
-    if (providerId === DEFAULT_PROVIDER_ID) {
-      availableDomains = domainCollection.filter((domain: any) => domain.isVerified);
-    }
+    const availableDomains = domainCollection.filter((domain: any) => domain.isVerified);
 
     return availableDomains.map((domain: any) => ({
       ...domain,
-      providerId,
+      providerId: providerId || DEFAULT_PROVIDER_ID,
     }));
   } catch {
-    return []; // 返回空数组而不是抛出错误，这样其他提供商仍然可以工作
+    return [];
   }
 }
 
-// 获取所有启用提供商的域名
 export async function fetchAllDomains(): Promise<Domain[]> {
-  if (typeof window === "undefined") return [];
-
-  try {
-    const disabledProvidersRaw = readStoredJson<unknown>(
-      "disabled-api-providers",
-      getDefaultDisabledProviderIds(),
-    );
-    const customProvidersRaw = readStoredJson<unknown>(
-      "custom-api-providers",
-      [],
-    );
-    const disabledProviders = Array.isArray(disabledProvidersRaw)
-      ? disabledProvidersRaw
-      : getDefaultDisabledProviderIds();
-    const customProviders = Array.isArray(customProvidersRaw)
-      ? customProvidersRaw
-      : [];
-
-    const allProviders = [...PRESET_PROVIDERS, ...customProviders];
-    const enabledProviders = allProviders.filter(
-      (p) => !disabledProviders.includes(p.id),
-    );
-
-    // 并行获取所有启用提供商的域名
-    const domainPromises = enabledProviders.map((provider) =>
-      fetchDomainsFromProvider(provider.id),
-    );
-
-    const domainResults = await Promise.all(domainPromises);
-
-    // 合并所有域名，并添加提供商名称信息
-    const allDomains: Domain[] = [];
-    domainResults.forEach((domains, index) => {
-      const provider = enabledProviders[index];
-      domains.forEach((domain) => {
-        allDomains.push({
-          ...domain,
-          providerId: provider.id,
-          providerName: provider.name, // 添加提供商名称用于显示
-        });
-      });
-    });
-
-    return allDomains;
-  } catch (error) {
-    throw error;
-  }
+  return fetchDomainsFromProvider(DEFAULT_PROVIDER_ID);
 }
 
 // 保持向后兼容的函数
@@ -665,6 +730,29 @@ export async function getServiceStatus(
   return { status: "offline" };
 }
 
+export const fetchServiceStatus = getServiceStatus
+
+export async function fetchPublicUpdateNotice(
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<PublicUpdateNotice | null> {
+  const headers = createBaseHeaders(providerId)
+  const res = await fetch(buildProxyUrl("/site/update-notice"), {
+    headers,
+    cache: "no-store",
+  })
+
+  if (res.status === 404 || res.status === 405) {
+    return null
+  }
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
+}
+
 export async function getAdminStatus(
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminStatus> {
@@ -683,7 +771,7 @@ export async function getAdminStatus(
 }
 
 export async function setupAdminPassword(
-  password: string,
+  payload: AdminBootstrapRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminSetupResponse> {
   const headers = {
@@ -693,7 +781,7 @@ export async function setupAdminPassword(
   const res = await fetch(buildProxyUrl("/admin/setup"), {
     method: "POST",
     headers,
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
@@ -705,7 +793,7 @@ export async function setupAdminPassword(
 }
 
 export async function loginAdmin(
-  password: string,
+  payload: AdminLoginRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminSessionResponse> {
   const headers = {
@@ -715,7 +803,7 @@ export async function loginAdmin(
   const res = await fetch(buildProxyUrl("/admin/login"), {
     method: "POST",
     headers,
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(payload),
   });
 
   if (!res.ok) {
@@ -746,6 +834,24 @@ export async function validateAdminSession(
 
   const error = await res.json().catch(() => ({}));
   throw new Error(getErrorMessage(res.status, error));
+}
+
+export async function getAdminSessionInfo(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminSessionInfo> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const res = await fetch(buildProxyUrl("/admin/session"), {
+    headers,
+    cache: "no-store",
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
 }
 
 export async function recoverAdmin(
@@ -832,6 +938,155 @@ export async function updateAdminPassword(
     const error = await res.json().catch(() => ({}));
     throw new Error(getErrorMessage(res.status, error));
   }
+}
+
+export async function fetchAdminUsers(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<ConsoleUser[]> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const res = await fetch(buildProxyUrl("/admin/users"), {
+    headers,
+    cache: "no-store",
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
+}
+
+export async function createAdminUser(
+  sessionToken: string,
+  payload: AdminCreateUserRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<ConsoleUser> {
+  const headers = createHeadersWithBearer(
+    sessionToken,
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl("/admin/users"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
+}
+
+export async function updateAdminUser(
+  sessionToken: string,
+  userId: string,
+  payload: AdminUpdateUserRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<ConsoleUser> {
+  const headers = createHeadersWithBearer(
+    sessionToken,
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl(`/admin/users/${userId}`), {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
+}
+
+export async function deleteAdminUser(
+  sessionToken: string,
+  userId: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<void> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const res = await fetch(buildProxyUrl(`/admin/users/${userId}`), {
+    method: "DELETE",
+    headers,
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+}
+
+export async function resetAdminUserPassword(
+  sessionToken: string,
+  userId: string,
+  payload: AdminResetUserPasswordRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<void> {
+  const headers = createHeadersWithBearer(
+    sessionToken,
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl(`/admin/users/${userId}/password`), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+}
+
+export async function fetchAdminSystemSettings(
+  sessionToken: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminSystemSettings> {
+  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const res = await fetch(buildProxyUrl("/admin/settings"), {
+    headers,
+    cache: "no-store",
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
+}
+
+export async function updateAdminSystemSettings(
+  sessionToken: string,
+  payload: AdminUpdateSystemSettingsRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminSystemSettings> {
+  const headers = createHeadersWithBearer(
+    sessionToken,
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl("/admin/settings"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}))
+    throw new Error(getErrorMessage(res.status, error))
+  }
+
+  return res.json()
 }
 
 export async function getAdminMetrics(
@@ -969,6 +1224,23 @@ export async function verifyManagedDomain(
     ...verifiedDomain,
     providerId,
   };
+}
+
+export async function deleteManagedDomain(
+  domainId: string,
+  providerId = DEFAULT_PROVIDER_ID,
+  apiKeyOverride?: string,
+): Promise<void> {
+  const headers = createHeadersWithApiKey({}, providerId, apiKeyOverride);
+  const res = await fetch(buildProxyUrl(`/domains/${domainId}`), {
+    method: "DELETE",
+    headers,
+  });
+
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({}));
+    throw new Error(getErrorMessage(res.status, error));
+  }
 }
 
 // 创建账户

@@ -1,5 +1,6 @@
 "use client"
 
+import { useCallback } from "react"
 import { addToast } from "@heroui/toast"
 
 interface ToastOptions {
@@ -14,7 +15,7 @@ interface ToastOptions {
 }
 
 export function useHeroUIToast() {
-  const toast = ({
+  const toast = useCallback(({
     title,
     description,
     variant = "flat",
@@ -34,7 +35,7 @@ export function useHeroUIToast() {
       hideIcon,
       hideCloseButton,
     })
-  }
+  }, [])
 
   return { toast }
 }

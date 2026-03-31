@@ -16,6 +16,14 @@ pub async fn create_account(
     State(state): State<AppState>,
     Json(payload): Json<CreateAccountRequest>,
 ) -> AppResult<(StatusCode, Json<Account>)> {
+    let system_enabled = {
+        let admin_state = state.admin_state.read().await;
+        admin_state.is_system_enabled()
+    };
+    if !system_enabled {
+        return Err(ApiError::forbidden("system is disabled by administrator"));
+    }
+
     let mut store = state.store.lock().await;
     let account = store
         .create_account(&payload.address, &payload.password, payload.expires_in)
@@ -29,7 +37,9 @@ pub async fn issue_token(
     Json(payload): Json<TokenRequest>,
 ) -> AppResult<Json<TokenResponse>> {
     let mut store = state.store.lock().await;
-    let (account_id, address) = store.authenticate(&payload.address, &payload.password).await?;
+    let (account_id, address) = store
+        .authenticate(&payload.address, &payload.password)
+        .await?;
     let token = auth::issue_token(account_id, &address, &state.config)?;
 
     Ok(Json(TokenResponse {
