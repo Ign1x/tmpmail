@@ -4,8 +4,7 @@ import { NextRequest, NextResponse } from "next/server"
 import {
   getAdminConsoleEntryPath,
   getAdminEntryPath,
-  getLocalizedAdminConsolePath,
-  getLocalizedAdminPath,
+  getLocalizedHomePath,
 } from "./lib/admin-entry"
 import { routing } from "./i18n/routing"
 
@@ -52,32 +51,20 @@ export default function proxy(request: NextRequest) {
   const localizedAdminConsoleLocale = routing.locales.find(
     (locale) => pathname === `/${locale}/admin/console`,
   )
+  const locale =
+    localizedAdminLocale ??
+    localizedAdminConsoleLocale ??
+    resolvePreferredLocale(request, pathname)
 
   if (
-    adminEntryPath !== "/admin" &&
-    (pathname === "/admin" || pathname === "/admin/console" || localizedAdminLocale || localizedAdminConsoleLocale)
+    pathname === "/admin" ||
+    pathname === "/admin/console" ||
+    pathname === adminEntryPath ||
+    pathname === adminConsoleEntryPath ||
+    Boolean(localizedAdminLocale) ||
+    Boolean(localizedAdminConsoleLocale)
   ) {
-    return redirectToPath(
-      request,
-      localizedAdminLocale ?? localizedAdminConsoleLocale ?? resolvePreferredLocale(request, pathname),
-      pathname === "/admin/console" || Boolean(localizedAdminConsoleLocale)
-        ? adminConsoleEntryPath
-        : adminEntryPath,
-    )
-  }
-
-  if (pathname === adminEntryPath) {
-    const locale = resolvePreferredLocale(request, pathname)
-    const url = request.nextUrl.clone()
-    url.pathname = getLocalizedAdminPath(locale)
-    return NextResponse.rewrite(url)
-  }
-
-  if (pathname === adminConsoleEntryPath) {
-    const locale = resolvePreferredLocale(request, pathname)
-    const url = request.nextUrl.clone()
-    url.pathname = getLocalizedAdminConsolePath(locale)
-    return NextResponse.rewrite(url)
+    return redirectToPath(request, locale, getLocalizedHomePath(locale))
   }
 
   return handleI18nRouting(request)

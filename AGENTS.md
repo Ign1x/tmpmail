@@ -59,7 +59,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Default persisten
 ## Conventions
 - Prefer `./scripts/dev-up.sh` and `./scripts/dev-down.sh`; `dev-up` auto-creates `.env` from `.env.example`.
 - `.env.example` is the source of truth for new settings. Update `README.md` when admin, JWT, transport, or deployment knobs change.
-- Env namespaces are deliberate: `TMPMAIL_*` backend/runtime, `NEXT_PUBLIC_TMPMAIL_*` browser-visible frontend, `INBUCKET_*` deploy-script inputs.
+- Env namespaces are deliberate: `TMPMAIL_*` backend/runtime plus Docker build overrides, `NEXT_PUBLIC_TMPMAIL_*` browser-visible frontend, `INBUCKET_*` deploy-script inputs.
 - Localized frontend entrypoints are `/zh` and `/en`; the default locale is `zh`.
 - Frontend page files stay thin. Heavy UI lives in `frontend/components/`; shared fetch/session/config logic lives in `frontend/lib/`.
 - There is no dedicated frontend test harness; lint/build/smoke are the expected safety net.
@@ -93,6 +93,7 @@ docker compose --profile postgres up -d postgres
 
 ## Notes
 - `frontend/Dockerfile` uses `npm ci --legacy-peer-deps`; local docs still use plain `npm ci`.
+- API Docker builds accept `TMPMAIL_CARGO_*` compose args for Cargo protocol / mirror / retry tuning. In slow or filtered networks, prefer `TMPMAIL_CARGO_MIRROR=sparse+https://rsproxy.cn/index/`.
 - If PostgreSQL starts with an empty database and snapshot state exists, backend startup may import JSON state automatically.
 - `scripts/dev-up.sh` always prints `/admin` even if `TMPMAIL_ADMIN_ENTRY_PATH` changes.
 - `deploy/inbucket/` and root-level generated `inbucket*` files are not the source of truth; `scripts/inbucket-deploy.sh` is.

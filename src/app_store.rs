@@ -145,6 +145,25 @@ impl AppStore {
         }
     }
 
+    pub async fn create_account_for_owner(
+        &mut self,
+        address: &str,
+        password: &str,
+        expires_in: Option<i64>,
+        owner_user_id: Option<Uuid>,
+    ) -> AppResult<Account> {
+        match self {
+            Self::Memory(store) => {
+                store.create_account_for_owner(address, password, expires_in, owner_user_id)
+            }
+            Self::Postgres(store) => {
+                store
+                    .create_account_for_owner(address, password, expires_in, owner_user_id)
+                    .await
+            }
+        }
+    }
+
     pub async fn authenticate(
         &mut self,
         address: &str,
@@ -160,6 +179,30 @@ impl AppStore {
         match self {
             Self::Memory(store) => store.get_account(account_id),
             Self::Postgres(store) => store.get_account(account_id).await,
+        }
+    }
+
+    pub async fn list_accounts_for_owner(
+        &mut self,
+        owner_user_id: Uuid,
+    ) -> AppResult<Vec<Account>> {
+        match self {
+            Self::Memory(store) => Ok(store.list_accounts_for_owner(owner_user_id)),
+            Self::Postgres(store) => store.list_accounts_for_owner(owner_user_id).await,
+        }
+    }
+
+    pub async fn count_accounts_owned_by(&mut self, owner_user_id: Uuid) -> AppResult<usize> {
+        match self {
+            Self::Memory(store) => Ok(store.count_accounts_owned_by(owner_user_id)),
+            Self::Postgres(store) => store.count_accounts_owned_by(owner_user_id).await,
+        }
+    }
+
+    pub async fn account_owner_user_id(&mut self, account_id: Uuid) -> AppResult<Option<Uuid>> {
+        match self {
+            Self::Memory(store) => store.account_owner_user_id(account_id),
+            Self::Postgres(store) => store.account_owner_user_id(account_id).await,
         }
     }
 
@@ -280,6 +323,13 @@ impl AppStore {
         match self {
             Self::Memory(store) => Ok(store.audit_logs(limit)),
             Self::Postgres(store) => store.audit_logs(limit).await,
+        }
+    }
+
+    pub async fn clear_audit_logs(&mut self) -> AppResult<()> {
+        match self {
+            Self::Memory(store) => store.clear_audit_logs(),
+            Self::Postgres(store) => store.clear_audit_logs().await,
         }
     }
 

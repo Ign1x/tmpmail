@@ -147,11 +147,22 @@ pub fn optional_bearer_token(headers: &HeaderMap) -> Option<String> {
         .get(AUTHORIZATION)
         .and_then(|value| value.to_str().ok())?;
 
-    let token = raw_header
-        .strip_prefix("Bearer ")
-        .or_else(|| raw_header.strip_prefix("bearer "))
-        .unwrap_or(raw_header)
-        .trim();
+    let trimmed = raw_header.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("bearer") {
+        return None;
+    }
+
+    let token = match trimmed.find(char::is_whitespace) {
+        Some(separator) => {
+            let (scheme, rest) = trimmed.split_at(separator);
+            if scheme.eq_ignore_ascii_case("bearer") {
+                rest.trim()
+            } else {
+                trimmed
+            }
+        }
+        None => trimmed,
+    };
 
     if token.is_empty() {
         return None;
@@ -180,32 +191,25 @@ pub fn require_secure_admin_transport(headers: &HeaderMap, config: &Config) -> A
 }
 
 fn is_secure_forwarded_request(headers: &HeaderMap) -> bool {
-    let forwarded_proto = headers
+    let x_forwarded_proto = headers
         .get("x-forwarded-proto")
         .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            value
-                .split(',')
-                .next()
-                .unwrap_or(value)
-                .trim()
-                .to_ascii_lowercase()
-        });
-    if forwarded_proto.as_deref() == Some("https") {
+        .and_then(first_header_value)
+        .map(str::to_ascii_lowercase);
+    if x_forwarded_proto.as_deref() == Some("https") {
         return true;
     }
 
     headers
         .get(FORWARDED)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.to_ascii_lowercase().contains("proto=https"))
-        .unwrap_or(false)
+        .and_then(forwarded_proto)
+        .is_some_and(|value| value.eq_ignore_ascii_case("https"))
 }
 
 fn is_local_request(headers: &HeaderMap) -> bool {
     let host = headers
-        .get("x-forwarded-host")
-        .or_else(|| headers.get(HOST))
+        .get(HOST)
         .and_then(|value| value.to_str().ok())
         .map(normalize_host)
         .unwrap_or_default();
@@ -214,7 +218,7 @@ fn is_local_request(headers: &HeaderMap) -> bool {
 }
 
 fn normalize_host(value: &str) -> String {
-    let trimmed = value.trim();
+    let trimmed = first_header_value(value).unwrap_or_default();
     if trimmed.is_empty() {
         return String::new();
     }
@@ -225,22 +229,58 @@ fn normalize_host(value: &str) -> String {
             .next()
             .unwrap_or_default()
             .trim()
+            .trim_end_matches('.')
             .to_ascii_lowercase();
     }
 
-    trimmed
-        .split(':')
+    let normalized = if let Some((host, port)) = trimmed.rsplit_once(':') {
+        if !host.contains(':') && !port.is_empty() && port.chars().all(|ch| ch.is_ascii_digit()) {
+            host
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+
+    normalized.trim().trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn first_header_value(value: &str) -> Option<&str> {
+    let first = value
+        .split(',')
         .next()
-        .unwrap_or_default()
+        .unwrap_or(value)
         .trim()
-        .to_ascii_lowercase()
+        .trim_matches('"');
+    if first.is_empty() { None } else { Some(first) }
+}
+
+fn forwarded_proto(value: &str) -> Option<String> {
+    let first = first_header_value(value)?;
+    for parameter in first.split(';') {
+        let Some((name, raw_value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("proto") {
+            let proto = raw_value.trim().trim_matches('"');
+            if !proto.is_empty() {
+                return Some(proto.to_ascii_lowercase());
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue, header::HOST};
+    use axum::http::{
+        HeaderMap, HeaderValue,
+        header::{AUTHORIZATION, HOST},
+    };
 
-    use super::require_secure_admin_transport;
+    use super::{optional_bearer_token, require_secure_admin_transport};
     use crate::config::Config;
 
     #[test]
@@ -261,5 +301,75 @@ mod tests {
         headers.insert(HOST, HeaderValue::from_static("127.0.0.1:18081"));
 
         assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn allows_localhost_hostnames_with_trailing_dot() {
+        let config = Config::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("app.localhost.:3000"));
+
+        assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn allows_secure_forwarded_proto_with_whitespace_and_case_variants() {
+        let config = Config::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("admin.example.com"));
+        headers.insert(
+            "x-forwarded-proto",
+            HeaderValue::from_static(" HTTPS , http "),
+        );
+
+        assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn allows_secure_forwarded_header_proto() {
+        let config = Config::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("admin.example.com"));
+        headers.insert(
+            "forwarded",
+            HeaderValue::from_static("for=192.0.2.60; proto=\"https\";host=\"admin.example.com\""),
+        );
+
+        assert!(require_secure_admin_transport(&headers, &config).is_ok());
+    }
+
+    #[test]
+    fn rejects_spoofed_forwarded_host_without_https() {
+        let config = Config::default();
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("admin.example.com"));
+        headers.insert("x-forwarded-host", HeaderValue::from_static("127.0.0.1"));
+
+        let error = require_secure_admin_transport(&headers, &config)
+            .expect_err("forwarded host alone should not bypass secure transport");
+
+        assert_eq!(
+            error.to_string(),
+            "admin credentials require HTTPS or a trusted local connection"
+        );
+    }
+
+    #[test]
+    fn bearer_token_accepts_uppercase_scheme() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("BEARER token-123"));
+
+        assert_eq!(
+            optional_bearer_token(&headers).as_deref(),
+            Some("token-123")
+        );
+    }
+
+    #[test]
+    fn bearer_token_rejects_empty_bearer_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, HeaderValue::from_static("Bearer   "));
+
+        assert!(optional_bearer_token(&headers).is_none());
     }
 }

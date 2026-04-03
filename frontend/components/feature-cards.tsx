@@ -12,47 +12,61 @@ export default function FeatureCards() {
       icon: Shield,
       titleKey: "secureTitle" as const,
       descKey: "secureDesc" as const,
-      accent: "from-sky-100 via-white to-cyan-50 dark:from-sky-950/50 dark:via-slate-950 dark:to-cyan-950/20",
+      accent:
+        "from-sky-100 via-white to-cyan-50 dark:from-sky-950/50 dark:via-slate-950 dark:to-cyan-950/20",
       iconTone: "bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200",
     },
     {
       icon: Zap,
       titleKey: "instantTitle" as const,
       descKey: "instantDesc" as const,
-      accent: "from-amber-100 via-white to-orange-50 dark:from-amber-950/40 dark:via-slate-950 dark:to-orange-950/20",
+      accent:
+        "from-amber-100 via-white to-orange-50 dark:from-amber-950/40 dark:via-slate-950 dark:to-orange-950/20",
       iconTone: "bg-amber-100 text-amber-700 dark:bg-amber-950/40 dark:text-amber-200",
     },
     {
       icon: Gauge,
       titleKey: "fastTitle" as const,
       descKey: "fastDesc" as const,
-      accent: "from-emerald-100 via-white to-teal-50 dark:from-emerald-950/40 dark:via-slate-950 dark:to-teal-950/20",
+      accent:
+        "from-emerald-100 via-white to-teal-50 dark:from-emerald-950/40 dark:via-slate-950 dark:to-teal-950/20",
       iconTone: "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200",
     },
   ]
 
   return (
-    <div className="mt-auto px-4 pb-8 sm:px-6 lg:px-8">
-      <div className="mx-auto grid max-w-5xl grid-cols-1 gap-3 md:grid-cols-3">
+    <div className="mt-10 px-4 pb-2 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-5xl items-end justify-between gap-4">
+        <div>
+          <div className="tm-section-label">Highlights</div>
+          <h3 className="mt-2 text-xl font-semibold text-slate-950 dark:text-white">
+            {t("poweredBy")}
+          </h3>
+        </div>
+      </div>
+
+      <div className="mx-auto mt-4 grid max-w-5xl grid-cols-1 gap-3 md:grid-cols-3">
         {features.map((feature, index) => {
           const Icon = feature.icon
           return (
             <Card
               key={index}
-              className={`overflow-hidden border border-white/70 bg-gradient-to-br ${feature.accent} shadow-sm backdrop-blur dark:border-slate-800 dark:shadow-none`}
+              className={`overflow-hidden border border-white/70 bg-gradient-to-br ${feature.accent} shadow-[0_18px_50px_rgba(15,23,42,0.06)] backdrop-blur transition-transform duration-200 hover:-translate-y-1 dark:border-slate-800 dark:shadow-none`}
             >
-              <CardBody className="flex items-start gap-4 p-5">
-                <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl shadow-sm ${feature.iconTone}`}>
+              <CardBody className="flex min-h-[11.5rem] items-start gap-4 p-5">
+                <div
+                  className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl shadow-sm ${feature.iconTone}`}
+                >
                   <Icon size={24} />
                 </div>
                 <div className="min-w-0">
                   <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
                     {String(index + 1).padStart(2, "0")}
                   </div>
-                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  <h3 className="mt-2 text-base font-semibold text-slate-900 dark:text-slate-100">
                     {t(feature.titleKey)}
                   </h3>
-                  <p className="mt-1 text-xs leading-6 text-slate-600 dark:text-slate-300">
+                  <p className="mt-2 text-sm leading-7 text-slate-600 dark:text-slate-300">
                     {t(feature.descKey)}
                   </p>
                 </div>

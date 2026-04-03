@@ -1,34 +1,50 @@
 "use client"
 
-import { useEffect, useEffectEvent, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
+import { motion } from "framer-motion"
 import { Button } from "@heroui/button"
-import { Card, CardBody } from "@heroui/card"
-import { Input } from "@heroui/input"
-import { ArrowLeft, CheckCircle2, ShieldAlert, ShieldCheck, UserRound, Users2 } from "lucide-react"
+import {
+  ChevronRight,
+  Globe2,
+  KeyRound,
+  Mail,
+  ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Users2,
+  UserPlus,
+} from "lucide-react"
 import { useTranslations } from "next-intl"
-import { useRouter } from "@/i18n/navigation"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import {
+  getLinuxDoAuthorizationUrl,
   getAdminStatus,
   loginAdmin,
+  registerConsole,
   recoverAdmin,
+  sendConsoleRegisterOtp,
   setupAdminPassword,
   validateAdminSession,
   type AdminStatus,
 } from "@/lib/api"
+import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
+import { Input } from "@/components/tm-form-fields"
 import {
   clearStoredAdminSession,
   getStoredAdminSession,
   setStoredAdminSession,
-  storeRevealedAdminKey,
+  storePendingRevealedAdminKey,
 } from "@/lib/admin-session"
-import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
-import ThemeModeToggle from "@/components/theme-mode-toggle"
+import { validateEmailAddress } from "@/lib/account-validation"
+import { BRAND_NAME, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { replaceBrowserPath } from "@/lib/admin-entry"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
+const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
+
+type EntryMode = "register" | "login"
 
 interface AdminEntryPageProps {
-  entryPath: string
   consolePath: string
   requireSecureTransport: boolean
 }
@@ -59,65 +75,61 @@ function getErrorDescription(error: unknown, fallback: string): string {
   return fallback
 }
 
+function generateLinuxDoState(): string {
+  const bytes = new Uint8Array(24)
+
+  if (typeof window !== "undefined" && window.crypto?.getRandomValues) {
+    window.crypto.getRandomValues(bytes)
+  } else {
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256)
+    }
+  }
+
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")
+}
+
 export default function AdminEntryPage({
-  entryPath,
   consolePath,
   requireSecureTransport,
 }: AdminEntryPageProps) {
-  const router = useRouter()
   const { toast } = useHeroUIToast()
   const ta = useTranslations("admin")
-  const tc = useTranslations("common")
 
   const [status, setStatus] = useState<AdminStatus | null>(null)
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [setupUsername, setSetupUsername] = useState("admin")
   const [setupPassword, setSetupPassword] = useState("")
   const [setupPasswordConfirm, setSetupPasswordConfirm] = useState("")
-  const [loginUsername, setLoginUsername] = useState("admin")
+  const [loginIdentifier, setLoginIdentifier] = useState("")
   const [loginPassword, setLoginPassword] = useState("")
+  const [registerEmail, setRegisterEmail] = useState("")
+  const [registerPassword, setRegisterPassword] = useState("")
+  const [registerOtpCode, setRegisterOtpCode] = useState("")
   const [recoveryToken, setRecoveryToken] = useState("")
   const [recoveryUsername, setRecoveryUsername] = useState("admin")
   const [recoveryPassword, setRecoveryPassword] = useState("")
   const [recoveryPasswordConfirm, setRecoveryPasswordConfirm] = useState("")
   const [isSubmittingSetup, setIsSubmittingSetup] = useState(false)
   const [isSubmittingLogin, setIsSubmittingLogin] = useState(false)
+  const [isSubmittingLinuxDo, setIsSubmittingLinuxDo] = useState(false)
+  const [isSubmittingRegister, setIsSubmittingRegister] = useState(false)
+  const [isSendingRegisterOtp, setIsSendingRegisterOtp] = useState(false)
   const [isSubmittingRecovery, setIsSubmittingRecovery] = useState(false)
+  const [registerOtpCooldown, setRegisterOtpCooldown] = useState(0)
   const [isSecureAdminContext, setIsSecureAdminContext] = useState(() => !requireSecureTransport)
+  const [entryMode, setEntryMode] = useState<EntryMode>("login")
   const [showRecovery, setShowRecovery] = useState(false)
+  const hasBootstrappedRef = useRef(false)
 
   const needsSetup = status?.isBootstrapRequired ?? true
+  const canRegister = status?.openRegistrationEnabled ?? false
+  const emailOtpEnabled = status?.emailOtpEnabled ?? false
+  const canUseLinuxDo = canRegister && (status?.linuxDoEnabled ?? false)
   const canUseSensitiveAdminActions = !requireSecureTransport || isSecureAdminContext
-  const statusCards = [
-    {
-      label: ta("statusSetupLabel"),
-      value: needsSetup ? ta("statusSetupPending") : ta("statusSetupReady"),
-      tone: needsSetup ? "text-amber-700 dark:text-amber-300" : "text-emerald-700 dark:text-emerald-300",
-      icon: needsSetup ? <ShieldAlert size={14} /> : <CheckCircle2 size={14} />,
-    },
-    {
-      label: ta("menuUsers"),
-      value: String(status?.usersTotal ?? 0),
-      tone: "text-slate-700 dark:text-slate-200",
-      icon: <Users2 size={14} />,
-    },
-    {
-      label: ta("statusAdminsLabel"),
-      value: String(status?.adminUsersTotal ?? 0),
-      tone: "text-slate-700 dark:text-slate-200",
-      icon: <ShieldCheck size={14} />,
-    },
-    {
-      label: ta("systemEnabledLabel"),
-      value: status?.systemEnabled ? ta("systemEnabledOn") : ta("systemEnabledOff"),
-      tone: status?.systemEnabled ? "text-emerald-700 dark:text-emerald-300" : "text-rose-700 dark:text-rose-300",
-      icon: <CheckCircle2 size={14} />,
-    },
-  ]
-
-  const redirectToConsole = useEffectEvent(() => {
-    router.replace(consolePath)
-  })
+  const redirectToConsole = useCallback(() => {
+    replaceBrowserPath(consolePath)
+  }, [consolePath])
 
   useEffect(() => {
     setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
@@ -130,6 +142,36 @@ export default function AdminEntryPage({
   }, [status?.isRecoveryEnabled])
 
   useEffect(() => {
+    if (!canRegister && entryMode === "register") {
+      setEntryMode("login")
+    }
+  }, [canRegister, entryMode])
+
+  useEffect(() => {
+    if (!emailOtpEnabled) {
+      setRegisterOtpCode("")
+      setRegisterOtpCooldown(0)
+    }
+  }, [emailOtpEnabled])
+
+  useEffect(() => {
+    if (registerOtpCooldown <= 0) {
+      return
+    }
+
+    const timer = window.setTimeout(() => {
+      setRegisterOtpCooldown((current) => Math.max(0, current - 1))
+    }, 1000)
+
+    return () => window.clearTimeout(timer)
+  }, [registerOtpCooldown])
+
+  useEffect(() => {
+    if (hasBootstrappedRef.current) {
+      return
+    }
+    hasBootstrappedRef.current = true
+
     const bootstrap = async () => {
       setIsBootstrapping(true)
 
@@ -142,6 +184,7 @@ export default function AdminEntryPage({
           try {
             const hasValidSession = await validateAdminSession(storedSession, DEFAULT_PROVIDER_ID)
             if (hasValidSession) {
+              setStoredAdminSession(storedSession)
               redirectToConsole()
               return
             }
@@ -164,14 +207,14 @@ export default function AdminEntryPage({
     }
 
     void bootstrap()
-  }, [requireSecureTransport])
+  }, [redirectToConsole, requireSecureTransport, ta, toast])
 
   const enterConsole = (sessionToken: string, apiKey?: string) => {
     setStoredAdminSession(sessionToken)
     if (apiKey?.trim()) {
-      storeRevealedAdminKey(apiKey, ADMIN_KEY_VISIBLE_MS)
+      storePendingRevealedAdminKey(apiKey, ADMIN_KEY_VISIBLE_MS)
     }
-    router.replace(consolePath)
+    redirectToConsole()
   }
 
   const handleSetupAdmin = async () => {
@@ -243,8 +286,8 @@ export default function AdminEntryPage({
       return
     }
 
-    if (!loginUsername.trim()) {
-      toast({ title: ta("consoleUsernameRequired"), color: "warning", variant: "flat" })
+    if (!loginIdentifier.trim()) {
+      toast({ title: ta("loginIdentityRequired"), color: "warning", variant: "flat" })
       return
     }
 
@@ -258,7 +301,7 @@ export default function AdminEntryPage({
     try {
       const response = await loginAdmin(
         {
-          username: loginUsername.trim(),
+          username: loginIdentifier.trim(),
           password: loginPassword,
         },
         DEFAULT_PROVIDER_ID,
@@ -279,6 +322,168 @@ export default function AdminEntryPage({
       })
     } finally {
       setIsSubmittingLogin(false)
+    }
+  }
+
+  const handleLinuxDoAuth = async () => {
+    if (!canUseSensitiveAdminActions) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (!canUseLinuxDo) {
+      toast({
+        title: ta("linuxDoUnavailable"),
+        description: ta("linuxDoUnavailableDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (typeof window === "undefined") {
+      return
+    }
+
+    setIsSubmittingLinuxDo(true)
+
+    try {
+      const state = generateLinuxDoState()
+      sessionStorage.setItem(LINUX_DO_STATE_STORAGE_KEY, state)
+      const redirectUri = new URL(`${consolePath}/auth/linux-do`, window.location.origin).toString()
+      const response = await getLinuxDoAuthorizationUrl(redirectUri, state, DEFAULT_PROVIDER_ID)
+      window.location.assign(response.authorizationUrl)
+    } catch (error) {
+      try {
+        sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+      } catch {}
+
+      toast({
+        title: ta("linuxDoUnavailable"),
+        description: getErrorDescription(error, ta("linuxDoUnavailableDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+      setIsSubmittingLinuxDo(false)
+    }
+  }
+
+  const handleRegisterConsole = async () => {
+    if (!canUseSensitiveAdminActions) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (!canRegister) {
+      toast({
+        title: ta("registrationClosed"),
+        description: ta("registrationClosedDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const normalizedEmail = registerEmail.trim().toLowerCase()
+    if (validateEmailAddress(normalizedEmail)) {
+      toast({ title: ta("registerEmailInvalid"), color: "warning", variant: "flat" })
+      return
+    }
+
+    if (emailOtpEnabled && !registerOtpCode.trim()) {
+      toast({ title: ta("registerOtpRequired"), color: "warning", variant: "flat" })
+      return
+    }
+
+    if (registerPassword.trim().length < 6) {
+      toast({ title: ta("passwordTooShort"), color: "warning", variant: "flat" })
+      return
+    }
+
+    setIsSubmittingRegister(true)
+
+    try {
+      const response = await registerConsole(
+        {
+          email: normalizedEmail,
+          password: registerPassword,
+          otpCode: emailOtpEnabled ? registerOtpCode.trim() : undefined,
+        },
+        DEFAULT_PROVIDER_ID,
+      )
+      setRegisterPassword("")
+      setRegisterOtpCode("")
+      setEntryMode("login")
+      toast({
+        title: ta("registerSuccess"),
+        description: ta("registerSuccessDescription"),
+        color: "success",
+        variant: "flat",
+      })
+      enterConsole(response.sessionToken)
+    } catch (error) {
+      toast({
+        title: ta("registerFailed"),
+        description: getErrorDescription(error, ta("registerFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsSubmittingRegister(false)
+    }
+  }
+
+  const handleSendRegisterOtp = async () => {
+    if (!canUseSensitiveAdminActions) {
+      toast({
+        title: ta("secureContextRequired"),
+        description: ta("secureContextRequiredDescription"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (!emailOtpEnabled) {
+      return
+    }
+
+    const normalizedEmail = registerEmail.trim().toLowerCase()
+    if (validateEmailAddress(normalizedEmail)) {
+      toast({ title: ta("registerEmailInvalid"), color: "warning", variant: "flat" })
+      return
+    }
+
+    setIsSendingRegisterOtp(true)
+
+    try {
+      const response = await sendConsoleRegisterOtp({ email: normalizedEmail }, DEFAULT_PROVIDER_ID)
+      setRegisterOtpCooldown(response.cooldownSeconds)
+      toast({
+        title: ta("registerOtpSent"),
+        description: ta("registerOtpSentDescription", { seconds: response.expiresInSeconds }),
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("registerOtpSendFailed"),
+        description: getErrorDescription(error, ta("registerOtpSendFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsSendingRegisterOtp(false)
     }
   }
 
@@ -347,6 +552,9 @@ export default function AdminEntryPage({
               adminUsersTotal: 1,
               isRecoveryEnabled: true,
               systemEnabled: true,
+              openRegistrationEnabled: false,
+              linuxDoEnabled: false,
+              emailOtpEnabled: false,
             },
       )
       toast({
@@ -368,212 +576,402 @@ export default function AdminEntryPage({
     }
   }
 
-  return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.14),transparent_32%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] px-4 py-8 text-slate-900 dark:bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] dark:text-slate-100 md:px-6">
-      <div className="mx-auto flex min-h-[calc(100vh-4rem)] max-w-[84rem] items-center">
-        <div className="w-full">
-          <Card className="border border-slate-200/80 bg-white/92 shadow-[0_24px_80px_rgba(15,23,42,0.08)] dark:border-slate-800 dark:bg-slate-950/70 dark:shadow-none">
-            <CardBody className="gap-6 p-6 sm:p-7">
-              <div className="flex items-start justify-between gap-4">
-                <div className="space-y-2">
-                  <div className="inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold tracking-[0.16em] text-amber-700 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-300">
-                    <ShieldCheck size={14} />
-                    {ta("accessTitle")}
-                  </div>
-                  <h1 className="text-3xl font-semibold tracking-tight text-slate-950 dark:text-white">
-                    {needsSetup ? ta("headline") : ta("title")}
-                  </h1>
-                </div>
+  const workspaceSignals = [
+    {
+      icon: ShieldCheck,
+      label: canUseSensitiveAdminActions ? ta("secureContextRequired") : ta("insecureContextTitle"),
+      description: canUseSensitiveAdminActions ? ta("secureContextReadyHint") : ta("insecureContextDescription"),
+      tone:
+        "border-sky-200/80 bg-sky-50/85 text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100",
+    },
+    {
+      icon: Globe2,
+      label: canRegister ? ta("openRegistrationOn") : ta("openRegistrationOff"),
+      description: ta("entryHint", { path: consolePath }),
+      tone:
+        canRegister
+          ? "border-emerald-200/80 bg-emerald-50/85 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+          : "border-slate-200/80 bg-white/80 text-slate-700 dark:border-slate-800 dark:bg-slate-950/55 dark:text-slate-200",
+    },
+    {
+      icon: KeyRound,
+      label: canUseLinuxDo ? ta("linuxDoEnabledOn") : ta("linuxDoEnabledOff"),
+      description: canUseLinuxDo ? ta("linuxDoSubmit") : ta("linuxDoUnavailableDescription"),
+      tone:
+        canUseLinuxDo
+          ? "border-emerald-200/80 bg-emerald-50/85 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
+          : "border-slate-200/80 bg-white/80 text-slate-700 dark:border-slate-800 dark:bg-slate-950/55 dark:text-slate-200",
+    },
+  ]
 
-                <div className="flex flex-wrap items-center justify-end gap-2">
-                  <ThemeModeToggle
-                    showLabel
-                    variant="flat"
-                    buttonClassName="rounded-full bg-white/80 px-4 text-slate-700 shadow-sm backdrop-blur dark:bg-slate-900/70 dark:text-slate-200"
-                  />
+  const workspaceFeatures = [
+    {
+      icon: Mail,
+      title: ta("consoleFeatureDomains"),
+      description: ta("consoleFeatureDomainsDesc"),
+    },
+    {
+      icon: Users2,
+      title: ta("consoleFeatureUsers"),
+      description: ta("consoleFeatureUsersDesc"),
+    },
+    {
+      icon: Sparkles,
+      title: ta("consoleFeatureSystem"),
+      description: ta("consoleFeatureSystemDesc"),
+    },
+  ]
+
+  const isRegisterMode = !needsSetup && canRegister && entryMode === "register"
+  const authTitle = needsSetup
+    ? ta("setupSubmit")
+    : isRegisterMode
+      ? ta("registerTab")
+      : ta("loginTab")
+  const authDescription = needsSetup
+    ? ta("setupDescription")
+    : isRegisterMode
+      ? ta("registerDescription")
+      : ta("loginDescription")
+
+  return (
+    <div className="tm-page-backdrop relative min-h-screen overflow-hidden px-4 text-slate-900 dark:text-slate-100 sm:px-6 lg:px-8">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_12%_16%,rgba(14,165,233,0.18),transparent_22%),radial-gradient(circle_at_82%_12%,rgba(251,191,36,0.12),transparent_20%),radial-gradient(circle_at_65%_70%,rgba(45,212,191,0.12),transparent_24%)] dark:bg-[radial-gradient(circle_at_12%_16%,rgba(56,189,248,0.15),transparent_22%),radial-gradient(circle_at_82%_12%,rgba(15,23,42,0.42),transparent_22%),radial-gradient(circle_at_65%_70%,rgba(20,184,166,0.12),transparent_26%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.16)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.16)_1px,transparent_1px)] bg-[size:40px_40px] opacity-[0.2] dark:bg-[linear-gradient(rgba(148,163,184,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.06)_1px,transparent_1px)]" />
+
+      <div className="relative flex min-h-[100svh] items-center py-6 sm:py-8">
+        <motion.div
+          initial={{ opacity: 0, y: 18 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.35, ease: [0.25, 0.46, 0.45, 0.94] }}
+          className="mx-auto grid w-full max-w-6xl gap-5 lg:grid-cols-[minmax(0,1.08fr)_minmax(22rem,30rem)] lg:items-center"
+        >
+          <section className="tm-glass-panel-strong overflow-hidden rounded-[2.4rem] p-6 sm:p-8 lg:p-10">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="tm-chip-strong">
+              <Sparkles size={14} />
+              {BRAND_NAME}
+            </span>
+            <span className="tm-chip">{ta("entryHint", { path: consolePath })}</span>
+          </div>
+
+          <div className="mt-8 grid gap-3 md:grid-cols-3">
+            {workspaceSignals.map((signal) => {
+              const Icon = signal.icon
+              return (
+                <div
+                  key={signal.label}
+                  className={`rounded-[1.6rem] border p-4 shadow-sm backdrop-blur ${signal.tone}`}
+                >
+                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                    <Icon size={14} />
+                    {signal.label}
+                  </div>
+                  <p className="mt-3 text-sm leading-6 opacity-90">{signal.description}</p>
+                </div>
+              )
+            })}
+          </div>
+
+          <div className="mt-8 grid gap-3 sm:grid-cols-3">
+            {workspaceFeatures.map((feature) => {
+              const Icon = feature.icon
+
+              return (
+                <div
+                  key={feature.title}
+                  className="rounded-[1.7rem] border border-white/70 bg-white/76 p-4 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/55"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                    <Icon size={20} />
+                  </div>
+                  <div className="mt-4 min-w-0">
+                    <div className="text-sm font-semibold text-slate-950 dark:text-white">{feature.title}</div>
+                    <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                      {feature.description}
+                    </p>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+          </section>
+
+          <section className="tm-glass-panel-strong overflow-hidden rounded-[2.4rem] p-5 sm:p-6 lg:p-7">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <div className="tm-section-label">{needsSetup ? ta("headline") : ta("workspaceEntry")}</div>
+              <div className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">
+                {authTitle}
+              </div>
+              <p className="mt-2 text-sm leading-7 text-slate-500 dark:text-slate-400">
+                {authDescription}
+              </p>
+            </div>
+            <div className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200 sm:flex">
+              {needsSetup ? <KeyRound size={20} /> : isRegisterMode ? <UserPlus size={20} /> : <Mail size={20} />}
+            </div>
+          </div>
+
+          {!canUseSensitiveAdminActions && (
+            <div className="mt-5 flex items-start gap-3 rounded-[1.4rem] border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/35 dark:text-amber-100">
+              <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+              <div className="min-w-0">
+                <div className="font-semibold">{ta("insecureContextTitle")}</div>
+                <p className="mt-1 leading-6 opacity-90">{ta("insecureContextDescription")}</p>
+              </div>
+            </div>
+          )}
+
+          {isBootstrapping ? (
+            <div className="flex h-64 items-center justify-center text-sm text-slate-400">{ta("loadingStatus")}</div>
+          ) : needsSetup ? (
+            <div className="mt-6 space-y-4">
+              <Input
+                label={ta("consoleUsernameLabel")}
+                value={setupUsername}
+                onValueChange={setSetupUsername}
+                variant="bordered"
+                autoComplete="username"
+                classNames={TM_INPUT_CLASSNAMES}
+              />
+              <Input
+                label={ta("setupPasswordLabel")}
+                type="password"
+                value={setupPassword}
+                onValueChange={setSetupPassword}
+                variant="bordered"
+                autoComplete="new-password"
+                classNames={TM_INPUT_CLASSNAMES}
+              />
+              <Input
+                label={ta("confirmPasswordLabel")}
+                type="password"
+                value={setupPasswordConfirm}
+                onValueChange={setSetupPasswordConfirm}
+                variant="bordered"
+                autoComplete="new-password"
+                classNames={TM_INPUT_CLASSNAMES}
+              />
+              <Button
+                color="primary"
+                className="mt-2 h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
+                onPress={handleSetupAdmin}
+                isLoading={isSubmittingSetup}
+                isDisabled={!canUseSensitiveAdminActions}
+                endContent={!isSubmittingSetup ? <ChevronRight size={16} /> : undefined}
+              >
+                {ta("setupSubmit")}
+              </Button>
+            </div>
+          ) : (
+            <div className="mt-6 space-y-4">
+              {canRegister && (
+                <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 p-1 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/45">
+                  <div className="grid grid-cols-2 gap-1">
+                    <button
+                      type="button"
+                      className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
+                        isRegisterMode
+                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                          : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                      }`}
+                      onClick={() => {
+                        setEntryMode("register")
+                        setShowRecovery(false)
+                      }}
+                    >
+                      {ta("registerTab")}
+                    </button>
+                    <button
+                      type="button"
+                      className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
+                        !isRegisterMode
+                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                          : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                      }`}
+                      onClick={() => setEntryMode("login")}
+                    >
+                      {ta("loginTab")}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="rounded-[1.7rem] border border-slate-200/80 bg-white/68 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/45">
+                {isRegisterMode ? (
+                  <div className="space-y-4">
+                    <Input
+                      label={ta("registerEmailLabel")}
+                      value={registerEmail}
+                      onValueChange={setRegisterEmail}
+                      variant="bordered"
+                      autoComplete="email"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    {emailOtpEnabled && (
+                      <div className="space-y-3">
+                        <div className="flex flex-col gap-3 sm:flex-row">
+                          <Input
+                            label={ta("registerOtpLabel")}
+                            value={registerOtpCode}
+                            onValueChange={setRegisterOtpCode}
+                            variant="bordered"
+                            autoComplete="one-time-code"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <Button
+                            variant="bordered"
+                            className="h-12 rounded-full px-5 sm:mt-7"
+                            onPress={handleSendRegisterOtp}
+                            isLoading={isSendingRegisterOtp}
+                            isDisabled={!canUseSensitiveAdminActions || registerOtpCooldown > 0}
+                          >
+                            {registerOtpCooldown > 0
+                              ? ta("registerOtpSendCooldown", { seconds: registerOtpCooldown })
+                              : ta("registerOtpSend")}
+                          </Button>
+                        </div>
+                        <p className="text-xs text-slate-500 dark:text-slate-400">{ta("registerOtpHint")}</p>
+                      </div>
+                    )}
+                    <Input
+                      label={ta("setupPasswordLabel")}
+                      type="password"
+                      value={registerPassword}
+                      onValueChange={setRegisterPassword}
+                      variant="bordered"
+                      autoComplete="new-password"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Button
+                      variant="flat"
+                      className="h-12 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                      onPress={handleRegisterConsole}
+                      isLoading={isSubmittingRegister}
+                      isDisabled={!canUseSensitiveAdminActions}
+                      endContent={!isSubmittingRegister ? <ChevronRight size={16} /> : undefined}
+                    >
+                      {ta("registerSubmit")}
+                    </Button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <Input
+                      label={ta("loginIdentityLabel")}
+                      value={loginIdentifier}
+                      onValueChange={setLoginIdentifier}
+                      variant="bordered"
+                      autoComplete="username"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Input
+                      label={ta("loginPasswordLabel")}
+                      type="password"
+                      value={loginPassword}
+                      onValueChange={setLoginPassword}
+                      variant="bordered"
+                      autoComplete="current-password"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Button
+                      color="primary"
+                      className="h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
+                      onPress={handleLoginAdmin}
+                      isLoading={isSubmittingLogin}
+                      isDisabled={!canUseSensitiveAdminActions}
+                      endContent={!isSubmittingLogin ? <ChevronRight size={16} /> : undefined}
+                    >
+                      {ta("loginSubmit")}
+                    </Button>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {canUseLinuxDo && (
                   <Button
                     variant="flat"
-                    className="rounded-full bg-white/80 px-4 text-slate-700 shadow-sm backdrop-blur dark:bg-slate-900/70 dark:text-slate-200"
-                    startContent={<ArrowLeft size={16} />}
-                    onPress={() => router.push("/")}
+                    className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                    onPress={handleLinuxDoAuth}
+                    isLoading={isSubmittingLinuxDo}
+                    isDisabled={!canUseSensitiveAdminActions}
+                    endContent={!isSubmittingLinuxDo ? <ChevronRight size={16} /> : undefined}
                   >
-                    {tc("back")}
+                    {ta("linuxDoSubmit")}
                   </Button>
-                </div>
+                )}
+
+                {status?.isRecoveryEnabled && (
+                  <button
+                    type="button"
+                    className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                      showRecovery
+                        ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                        : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                    }`}
+                    onClick={() => setShowRecovery((value) => !value)}
+                  >
+                    {showRecovery ? ta("recoveryToggleHide") : ta("recoveryToggleShow")}
+                  </button>
+                )}
               </div>
 
-              <div className="grid gap-6 xl:grid-cols-[minmax(18rem,0.9fr)_minmax(0,1.1fr)] xl:items-start">
-                <div className="space-y-4">
-                  {!canUseSensitiveAdminActions && (
-                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-200">
-                      {ta("insecureContextTitle")}
-                    </div>
-                  )}
-
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {statusCards.map((item) => (
-                      <div
-                        key={item.label}
-                        className="rounded-[1.2rem] border border-slate-200/80 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-900/50"
-                      >
-                        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-500 dark:text-slate-400">
-                          {item.icon}
-                          {item.label}
-                        </div>
-                        <div className={`mt-2 text-sm font-semibold ${item.tone}`}>
-                          {item.value}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  <div className="rounded-[1.2rem] border border-slate-200/80 bg-slate-50/80 px-4 py-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400">
-                    {ta("entryHint", { path: entryPath })}
+              {status?.isRecoveryEnabled && showRecovery && (
+                <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/55">
+                  <div className="space-y-4">
+                    <Input
+                      label={ta("recoveryTokenLabel")}
+                      type="password"
+                      value={recoveryToken}
+                      onValueChange={setRecoveryToken}
+                      variant="bordered"
+                      autoComplete="one-time-code"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Input
+                      label={ta("consoleUsernameLabel")}
+                      value={recoveryUsername}
+                      onValueChange={setRecoveryUsername}
+                      variant="bordered"
+                      autoComplete="username"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Input
+                      label={ta("recoveryPasswordLabel")}
+                      type="password"
+                      value={recoveryPassword}
+                      onValueChange={setRecoveryPassword}
+                      variant="bordered"
+                      autoComplete="new-password"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Input
+                      label={ta("recoveryConfirmPasswordLabel")}
+                      type="password"
+                      value={recoveryPasswordConfirm}
+                      onValueChange={setRecoveryPasswordConfirm}
+                      variant="bordered"
+                      autoComplete="new-password"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Button
+                      variant="flat"
+                      className="h-11 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                      onPress={handleRecoverAdmin}
+                      isLoading={isSubmittingRecovery}
+                      isDisabled={!canUseSensitiveAdminActions}
+                      endContent={!isSubmittingRecovery ? <ChevronRight size={16} /> : undefined}
+                    >
+                      {ta("recoverySubmit")}
+                    </Button>
                   </div>
                 </div>
-
-                <div>
-                  {isBootstrapping ? (
-                    <div className="rounded-2xl border border-dashed border-slate-300 bg-slate-50 p-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/50 dark:text-slate-300">
-                      {ta("loadingStatus")}
-                    </div>
-                  ) : needsSetup ? (
-                    <div className="space-y-4 rounded-[1.6rem] border border-slate-200/80 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/45">
-                      <Input
-                        label={ta("consoleUsernameLabel")}
-                        placeholder={ta("consoleUsernamePlaceholder")}
-                        value={setupUsername}
-                        onValueChange={setSetupUsername}
-                        variant="bordered"
-                        autoComplete="username"
-                      />
-                      <Input
-                        label={ta("setupPasswordLabel")}
-                        placeholder={ta("setupPasswordPlaceholder")}
-                        type="password"
-                        value={setupPassword}
-                        onValueChange={setSetupPassword}
-                        variant="bordered"
-                        autoComplete="new-password"
-                      />
-                      <Input
-                        label={ta("confirmPasswordLabel")}
-                        placeholder={ta("confirmPasswordPlaceholder")}
-                        type="password"
-                        value={setupPasswordConfirm}
-                        onValueChange={setSetupPasswordConfirm}
-                        variant="bordered"
-                        autoComplete="new-password"
-                      />
-                      <Button
-                        color="primary"
-                        className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
-                        onPress={handleSetupAdmin}
-                        isLoading={isSubmittingSetup}
-                        isDisabled={!canUseSensitiveAdminActions}
-                      >
-                        {ta("setupSubmit")}
-                      </Button>
-                    </div>
-                  ) : (
-                    <div className="space-y-4 rounded-[1.6rem] border border-slate-200/80 bg-slate-50/70 p-5 dark:border-slate-800 dark:bg-slate-900/45">
-                      <Input
-                        label={ta("consoleUsernameLabel")}
-                        placeholder={ta("consoleUsernamePlaceholder")}
-                        value={loginUsername}
-                        onValueChange={setLoginUsername}
-                        variant="bordered"
-                        autoComplete="username"
-                        startContent={<UserRound size={16} className="text-slate-400" />}
-                      />
-                      <Input
-                        label={ta("loginPasswordLabel")}
-                        placeholder={ta("loginPasswordPlaceholder")}
-                        type="password"
-                        value={loginPassword}
-                        onValueChange={setLoginPassword}
-                        variant="bordered"
-                        autoComplete="current-password"
-                      />
-                      <Button
-                        color="primary"
-                        className="h-11 rounded-xl bg-sky-600 text-white hover:bg-sky-700"
-                        onPress={handleLoginAdmin}
-                        isLoading={isSubmittingLogin}
-                        isDisabled={!canUseSensitiveAdminActions}
-                      >
-                        {ta("loginSubmit")}
-                      </Button>
-
-                      {status?.isRecoveryEnabled && (
-                        <div className="border-t border-slate-200 pt-1 dark:border-slate-800">
-                          <Button
-                            variant="light"
-                            className="h-auto px-0 text-sm text-slate-500 dark:text-slate-300"
-                            onPress={() => setShowRecovery((currentValue) => !currentValue)}
-                          >
-                            {showRecovery ? ta("recoveryToggleHide") : ta("recoveryToggleShow")}
-                          </Button>
-
-                          {showRecovery && (
-                            <div className="mt-3 rounded-2xl border border-dashed border-amber-300 bg-amber-50/70 p-4 dark:border-amber-900/70 dark:bg-amber-950/20">
-                              <div className="space-y-4">
-                                <Input
-                                  label={ta("recoveryTokenLabel")}
-                                  placeholder={ta("recoveryTokenPlaceholder")}
-                                  type="password"
-                                  value={recoveryToken}
-                                  onValueChange={setRecoveryToken}
-                                  variant="bordered"
-                                  autoComplete="one-time-code"
-                                />
-                                <Input
-                                  label={ta("consoleUsernameLabel")}
-                                  placeholder={ta("consoleUsernamePlaceholder")}
-                                  value={recoveryUsername}
-                                  onValueChange={setRecoveryUsername}
-                                  variant="bordered"
-                                  autoComplete="username"
-                                />
-                                <Input
-                                  label={ta("recoveryPasswordLabel")}
-                                  placeholder={ta("recoveryPasswordPlaceholder")}
-                                  type="password"
-                                  value={recoveryPassword}
-                                  onValueChange={setRecoveryPassword}
-                                  variant="bordered"
-                                  autoComplete="new-password"
-                                />
-                                <Input
-                                  label={ta("recoveryConfirmPasswordLabel")}
-                                  placeholder={ta("recoveryConfirmPasswordPlaceholder")}
-                                  type="password"
-                                  value={recoveryPasswordConfirm}
-                                  onValueChange={setRecoveryPasswordConfirm}
-                                  variant="bordered"
-                                  autoComplete="new-password"
-                                />
-                                <Button
-                                  variant="bordered"
-                                  className="rounded-xl"
-                                  onPress={handleRecoverAdmin}
-                                  isLoading={isSubmittingRecovery}
-                                  isDisabled={!canUseSensitiveAdminActions}
-                                >
-                                  {ta("recoverySubmit")}
-                                </Button>
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              </div>
-            </CardBody>
-          </Card>
-        </div>
+              )}
+            </div>
+          )}
+          </section>
+        </motion.div>
       </div>
     </div>
   )

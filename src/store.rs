@@ -17,6 +17,7 @@ use crate::{
         Account, Attachment, Domain, DomainDnsRecord, ImportedMessage, MessageAddress,
         MessageDetail, MessageSeenResponse, MessageSummary,
     },
+    persistence::write_file_atomically,
 };
 
 const PAGE_SIZE: usize = 30;
@@ -42,6 +43,8 @@ pub(crate) struct StoredDomain {
 pub(crate) struct StoredAccount {
     pub(crate) id: Uuid,
     pub(crate) address: String,
+    #[serde(default)]
+    pub(crate) owner_user_id: Option<Uuid>,
     pub(crate) password_hash: String,
     pub(crate) quota: u64,
     pub(crate) is_disabled: bool,
@@ -281,18 +284,6 @@ impl MemoryStore {
             return Ok(());
         };
 
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent).map_err(|error| {
-                ApiError::internal(format!(
-                    "failed to prepare store snapshot directory {}: {error}",
-                    parent.display()
-                ))
-            })?;
-        }
-
         let snapshot = StoreSnapshot {
             version: STORE_SNAPSHOT_VERSION,
             domains: self.domains.clone(),
@@ -307,16 +298,9 @@ impl MemoryStore {
                 path.display()
             ))
         })?;
-        let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, serialized).map_err(|error| {
+        write_file_atomically(path, &serialized).map_err(|error| {
             ApiError::internal(format!(
-                "failed to write store snapshot {}: {error}",
-                temp_path.display()
-            ))
-        })?;
-        fs::rename(&temp_path, path).map_err(|error| {
-            ApiError::internal(format!(
-                "failed to finalize store snapshot {}: {error}",
+                "failed to persist store snapshot {}: {error}",
                 path.display()
             ))
         })?;
@@ -439,27 +423,15 @@ impl MemoryStore {
     }
 
     pub fn delete_domain(&mut self, domain_id: Uuid) -> AppResult<()> {
-        let (domain_id, domain_name, should_cleanup_mailboxes) = {
+        let (domain_id, domain_name) = {
             let domain = self.domain_by_id(domain_id)?;
             if domain.verification_token.is_none() {
                 return Err(ApiError::validation("system domains cannot be deleted"));
             }
 
-            (
-                domain.id,
-                domain.domain.clone(),
-                !domain.is_verified || domain.status == "pending_verification",
-            )
+            (domain.id, domain.domain.clone())
         };
-        let deleted_accounts =
-            if self.domain_has_mailboxes(&domain_name) && should_cleanup_mailboxes {
-                self.soft_delete_accounts_for_domain(&domain_name)
-            } else {
-                0
-            };
-        if self.domain_has_mailboxes(&domain_name) {
-            return Err(ApiError::validation("domain still has mailbox accounts"));
-        }
+        let deleted_accounts = self.delete_accounts_for_domain(&domain_name);
 
         self.domains.retain(|domain| domain.id != domain_id);
         self.record_audit(
@@ -541,6 +513,16 @@ impl MemoryStore {
         password: &str,
         expires_in: Option<i64>,
     ) -> AppResult<Account> {
+        self.create_account_for_owner(address, password, expires_in, None)
+    }
+
+    pub fn create_account_for_owner(
+        &mut self,
+        address: &str,
+        password: &str,
+        expires_in: Option<i64>,
+        owner_user_id: Option<Uuid>,
+    ) -> AppResult<Account> {
         let normalized_address = normalize_address(address)?;
         if password.trim().is_empty() {
             return Err(ApiError::validation("password must not be empty"));
@@ -577,6 +559,7 @@ impl MemoryStore {
         let account = StoredAccount {
             id: Uuid::new_v4(),
             address: normalized_address.clone(),
+            owner_user_id,
             password_hash: auth::hash_password(password)?,
             quota: DEFAULT_QUOTA_BYTES,
             is_disabled: false,
@@ -636,6 +619,33 @@ impl MemoryStore {
         ensure_account_active(account)?;
 
         Ok(self.to_account(account))
+    }
+
+    pub fn list_accounts_for_owner(&self, owner_user_id: Uuid) -> Vec<Account> {
+        let mut accounts = self
+            .accounts
+            .values()
+            .filter(|account| account.owner_user_id == Some(owner_user_id))
+            .map(|account| self.to_account(account))
+            .collect::<Vec<_>>();
+
+        accounts.sort_by(|left, right| left.address.cmp(&right.address));
+        accounts
+    }
+
+    pub fn count_accounts_owned_by(&self, owner_user_id: Uuid) -> usize {
+        self.accounts
+            .values()
+            .filter(|account| account.owner_user_id == Some(owner_user_id))
+            .count()
+    }
+
+    pub fn account_owner_user_id(&self, account_id: Uuid) -> AppResult<Option<Uuid>> {
+        Ok(self
+            .accounts
+            .get(&account_id)
+            .ok_or_else(|| ApiError::not_found("account not found"))?
+            .owner_user_id)
     }
 
     pub fn delete_account(&mut self, account_id: Uuid) -> AppResult<()> {
@@ -1033,6 +1043,11 @@ impl MemoryStore {
         self.audit_logs.iter().rev().take(limit).cloned().collect()
     }
 
+    pub fn clear_audit_logs(&mut self) -> AppResult<()> {
+        self.audit_logs.clear();
+        self.persist()
+    }
+
     pub fn append_audit_log(
         &mut self,
         action: &str,
@@ -1049,6 +1064,7 @@ impl MemoryStore {
         Account {
             id: account.id.to_string(),
             address: account.address.clone(),
+            owner_user_id: account.owner_user_id.map(|value| value.to_string()),
             quota: account.quota,
             used: self
                 .messages
@@ -1075,16 +1091,7 @@ impl MemoryStore {
             .ok_or_else(|| ApiError::not_found("domain not found"))
     }
 
-    fn domain_has_mailboxes(&self, domain_name: &str) -> bool {
-        self.accounts.values().any(|account| {
-            !account.is_deleted
-                && split_address(&account.address)
-                    .map(|(_, domain)| domain == domain_name)
-                    .unwrap_or(false)
-        })
-    }
-
-    fn soft_delete_accounts_for_domain(&mut self, domain_name: &str) -> usize {
+    fn delete_accounts_for_domain(&mut self, domain_name: &str) -> usize {
         let now = Utc::now();
         let affected_accounts = self
             .accounts
@@ -1110,6 +1117,14 @@ impl MemoryStore {
                     message.updated_at = now;
                 }
             }
+
+            self.record_audit(
+                "account.delete",
+                "account",
+                account_id.to_string(),
+                None,
+                format!("address={address}"),
+            );
         }
 
         affected_accounts.len()
@@ -1539,7 +1554,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_domain_rejects_mailboxes_on_domain() {
+    fn delete_domain_cascades_mailboxes_on_domain() {
         let config = test_config();
         let mut store = MemoryStore::new(&config).expect("load store");
         let domain = store
@@ -1552,12 +1567,59 @@ mod tests {
         store
             .create_account("alice@team.example.com", "secret123", None)
             .expect("create account");
+        let account_address = "alice@team.example.com".to_owned();
+        store
+            .import_message_for_recipients(
+                std::slice::from_ref(&account_address),
+                ImportedMessage {
+                    source_key: "delete-domain-cascade".to_owned(),
+                    msgid: "<delete-domain-cascade@example.com>".to_owned(),
+                    from: MessageAddress {
+                        name: "Sender".to_owned(),
+                        address: "sender@example.com".to_owned(),
+                    },
+                    to: vec![MessageAddress {
+                        name: account_address.clone(),
+                        address: account_address.clone(),
+                    }],
+                    subject: "Cascade delete".to_owned(),
+                    intro: "test".to_owned(),
+                    size: 4,
+                    download_url: "/messages/raw".to_owned(),
+                    created_at: Utc::now(),
+                    text: "test".to_owned(),
+                    html: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            )
+            .expect("import message");
 
-        let error = store
+        let account_id = store
+            .accounts
+            .values()
+            .find(|account| account.address == account_address)
+            .map(|account| account.id)
+            .expect("account id");
+
+        store
             .delete_domain(domain_id)
-            .expect_err("domain with mailbox should not delete");
+            .expect("delete domain with mailbox");
 
-        assert_eq!(error.to_string(), "domain still has mailbox accounts");
+        assert!(
+            store
+                .list_all_domains()
+                .iter()
+                .all(|item| item.domain != "team.example.com")
+        );
+        assert!(store.accounts.get(&account_id).expect("account").is_deleted);
+        assert!(
+            store
+                .messages
+                .get(&account_id)
+                .expect("messages")
+                .iter()
+                .all(|message| message.is_deleted)
+        );
     }
 
     #[test]
@@ -1714,6 +1776,62 @@ mod tests {
     }
 
     #[test]
+    fn owner_account_queries_only_return_owned_mailboxes() {
+        let config = test_config();
+        let mut store = MemoryStore::new(&config).expect("load store");
+        let owner_a = Uuid::new_v4();
+        let owner_b = Uuid::new_v4();
+
+        let first = store
+            .create_account_for_owner(
+                "alpha@configured.example.com",
+                "secret123",
+                None,
+                Some(owner_a),
+            )
+            .expect("create owned account");
+        let second = store
+            .create_account_for_owner(
+                "beta@configured.example.com",
+                "secret123",
+                None,
+                Some(owner_b),
+            )
+            .expect("create second owned account");
+        let unowned = store
+            .create_account("gamma@configured.example.com", "secret123", None)
+            .expect("create public account");
+
+        let owner_a_accounts = store.list_accounts_for_owner(owner_a);
+        let owner_a_text = owner_a.to_string();
+
+        assert_eq!(owner_a_accounts.len(), 1);
+        assert_eq!(owner_a_accounts[0].id, first.id);
+        assert_eq!(
+            owner_a_accounts[0].owner_user_id.as_deref(),
+            Some(owner_a_text.as_str())
+        );
+        assert_eq!(store.count_accounts_owned_by(owner_a), 1);
+
+        let first_id = Uuid::parse_str(&first.id).expect("uuid");
+        let second_id = Uuid::parse_str(&second.id).expect("uuid");
+        let unowned_id = Uuid::parse_str(&unowned.id).expect("uuid");
+
+        assert_eq!(
+            store.account_owner_user_id(first_id).expect("owner"),
+            Some(owner_a)
+        );
+        assert_eq!(
+            store.account_owner_user_id(second_id).expect("owner"),
+            Some(owner_b)
+        );
+        assert_eq!(
+            store.account_owner_user_id(unowned_id).expect("owner"),
+            None
+        );
+    }
+
+    #[test]
     fn store_restores_snapshot_after_restart() {
         let snapshot_path = temp_snapshot_path("restart");
         let config = Config {
@@ -1808,6 +1926,32 @@ mod tests {
                 .iter()
                 .any(|item| item.domain == "new-public.example.com" && item.status == "active")
         );
+
+        let _ = fs::remove_file(snapshot_path);
+    }
+
+    #[test]
+    fn snapshot_persist_rewrites_existing_file() {
+        let snapshot_path = temp_snapshot_path("persist-rewrite");
+        fs::write(
+            &snapshot_path,
+            "{\"version\":1,\"domains\":[],\"audit_logs\":[],\"accounts\":{},\"imported_source_keys\":[],\"messages\":{}}",
+        )
+        .expect("seed snapshot");
+        let config = Config {
+            store_state_path: snapshot_path.clone(),
+            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
+            ..Config::default()
+        };
+        let mut store = MemoryStore::new(&config).expect("load store");
+
+        store
+            .create_account("demo@configured.example.com", "secret123", None)
+            .expect("create account");
+
+        let persisted = fs::read_to_string(&snapshot_path).expect("read snapshot");
+
+        assert!(persisted.contains("demo@configured.example.com"));
 
         let _ = fs::remove_file(snapshot_path);
     }

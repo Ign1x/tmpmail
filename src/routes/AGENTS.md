@@ -17,19 +17,21 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 |---|---|---|
 | Health/readiness | `health.rs` | Public liveness and backend-aware readiness |
 | Ops/public notice | `ops.rs` | Public `/metrics`, public update notice, admin metrics/audit/cleanup |
-| Admin console | `admin.rs` | Bootstrap, login, session, recovery, users, settings, access keys |
+| Admin console | `admin.rs` | Bootstrap, login, session, recovery, Linux Do auth, users, settings, access keys |
 | Managed domains | `domains.rs` | Public listing plus console-scoped create/verify/delete |
-| Accounts | `accounts.rs` | Create mailbox, issue token, self lookup, self delete |
+| Accounts | `accounts.rs` | Console-owned mailbox listing/create/token issuance plus legacy mailbox token login/self delete |
 | Messages | `messages.rs` | List/get/patch/delete plus raw/attachment download |
 | Events | `events.rs` | Account-scoped SSE stream |
 
 ## Auth matrix
 - `admin/status` is public.
+- `admin/linux-do/authorize` and `admin/linux-do/complete` are public-facing registration helpers, but still require secure admin transport and the Linux Do registration feature to be enabled.
 - `admin/setup`, `admin/login`, and `admin/recover` require secure admin transport.
 - Admin session, user, settings, metrics, audit-log, and cleanup flows use console credentials and admin guards where required.
 - `GET /domains` is public when unauthenticated; console auth scopes results by owner/admin.
 - Domain mutations require console access.
-- Accounts, tokens, `/me`, and `messages/*` use mailbox bearer tokens.
+- `GET /accounts`, console-auth `POST /accounts`, `POST /accounts/{id}/token`, and console-auth `DELETE /accounts/{id}` use console session and mailbox ownership checks.
+- Public `POST /accounts`, `/token`, `/accounts/me`, mailbox-token `DELETE /accounts/{id}`, and `messages/*` remain available for legacy mailbox-token flows.
 - `/events` uses mailbox bearer tokens and rejects `accountId` mismatches.
 
 ## Conventions

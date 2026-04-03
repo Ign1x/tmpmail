@@ -1,8 +1,9 @@
 "use client"
 
 import { useState, useEffect } from "react"
-import { Select, SelectItem } from "@heroui/select"
 import { Spinner } from "@heroui/spinner"
+import { TM_SELECT_CLASSNAMES } from "@/components/heroui-field-styles"
+import { Select, SelectItem } from "@/components/tm-form-fields"
 
 import type { Domain } from "@/types"
 import { useTranslations } from "next-intl"
@@ -95,8 +96,13 @@ export function DomainSelector({ value, onSelectionChange, isDisabled }: DomainS
         }
       }}
       isDisabled={isDisabled}
+      variant="bordered"
       className="w-full"
-      classNames={{ listbox: "p-0", popoverContent: "p-1" }}
+      classNames={{
+        ...TM_SELECT_CLASSNAMES,
+        listbox: "p-0",
+        popoverContent: `${TM_SELECT_CLASSNAMES.popoverContent} p-1`,
+      }}
     >
       {domains.map((domain) => (
         <SelectItem

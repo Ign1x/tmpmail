@@ -14,6 +14,10 @@ body {
   overflow-x: hidden;
 }
 
+html {
+  scroll-behavior: smooth;
+}
+
 body {
   --tmpmail-font-sans: var(--font-inter), system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --tmpmail-font-sans-zh: var(--font-noto-sans-sc), "Noto Sans CJK SC", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", var(--font-inter), system-ui, sans-serif;
@@ -21,6 +25,7 @@ body {
   color: rgb(var(--foreground-rgb));
   background: linear-gradient(to bottom, transparent, rgb(var(--background-end-rgb))) rgb(var(--background-start-rgb));
   font-family: var(--tmpmail-font-sans);
+  min-height: 100vh;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -66,6 +71,60 @@ a {
   text-decoration: none;
 }
 
+::selection {
+  background: rgba(14, 165, 233, 0.18);
+  color: inherit;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.7) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 9999px;
+  background-clip: padding-box;
+  background-color: rgba(148, 163, 184, 0.7);
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(100, 116, 139, 0.78);
+}
+
+button,
+a,
+input,
+textarea,
+select,
+[role="button"] {
+  transition:
+    color 180ms ease,
+    background-color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    transform 180ms ease,
+    opacity 180ms ease;
+}
+
+button:focus-visible,
+a:focus-visible,
+[role="button"]:focus-visible {
+  outline: none;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.92),
+    0 0 0 4px rgba(14, 165, 233, 0.25);
+}
+
 /* 移动端优化 */
 @media (max-width: 768px) {
   /* 防止移动端缩放 */
@@ -90,8 +149,128 @@ a {
   }
 }
 
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   html {
     color-scheme: dark;
+  }
+}
+
+/* HeroUI and local form controls add a bright focus offset that reads like a white inset on glassy cards. */
+[data-slot="base"][data-focus-visible="true"] [data-slot="input-wrapper"][data-focus-visible="true"],
+[data-slot="trigger"][data-focus-visible="true"],
+:where(input, textarea, select, button, [role="button"]).ring-offset-background:focus-visible {
+  --tw-ring-offset-width: 0px;
+  --tw-ring-offset-color: transparent;
+  outline-offset: 0;
+}
+
+/* Form controls should not add a second box or focus outline inside our glass panels. */
+[data-slot="input-wrapper"],
+[data-slot="trigger"] {
+  box-shadow: none;
+  background-image: none;
+  background-color: transparent !important;
+}
+
+.dark [data-slot="input-wrapper"],
+.dark [data-slot="trigger"] {
+  background-color: transparent !important;
+}
+
+:where(input, textarea, select):focus,
+:where(input, textarea, select):focus-visible,
+[data-slot="input-wrapper"]:focus-within,
+[data-slot="trigger"]:focus,
+[data-slot="trigger"]:focus-visible {
+  outline: none !important;
+  box-shadow: none !important;
+}
+
+.dark [data-slot="input"],
+.dark [data-slot="inner-wrapper"],
+.dark input,
+.dark textarea,
+.dark select {
+  color: rgb(241 245 249);
+}
+
+/* Browser autofill can repaint an opaque inset background even when the component itself is transparent. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus,
+textarea:-webkit-autofill,
+textarea:-webkit-autofill:hover,
+textarea:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px transparent inset !important;
+  box-shadow: 0 0 0 1000px transparent inset !important;
+  -webkit-text-fill-color: currentColor !important;
+  caret-color: currentColor;
+  transition: background-color 9999s ease-out 0s;
+}
+
+@layer utilities {
+  .tm-transition-base {
+    @apply transition-all duration-200 ease-out;
+  }
+
+  .tm-page-backdrop {
+    background:
+      radial-gradient(circle at top left, rgba(14, 165, 233, 0.15), transparent 26%),
+      radial-gradient(circle at top right, rgba(251, 191, 36, 0.12), transparent 24%),
+      linear-gradient(180deg, #f8fbff 0%, #eef4ff 45%, #f6f8fb 100%);
+  }
+
+  .dark .tm-page-backdrop {
+    background:
+      radial-gradient(circle at top left, rgba(56, 189, 248, 0.12), transparent 28%),
+      radial-gradient(circle at top right, rgba(15, 23, 42, 0.42), transparent 30%),
+      linear-gradient(180deg, #020617 0%, #0f172a 55%, #111827 100%);
+  }
+
+  .tm-glass-panel {
+    @apply border border-white/70 bg-white/80 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none;
+  }
+
+  .tm-glass-panel-strong {
+    @apply border border-white/75 bg-white/90 shadow-[0_28px_90px_rgba(15,23,42,0.1)] backdrop-blur-xl dark:border-slate-800/90 dark:bg-slate-950/80 dark:shadow-none;
+  }
+
+  .tm-glass-subtle {
+    @apply border border-slate-200/80 bg-white/70 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/60;
+  }
+
+  .tm-chip {
+    @apply inline-flex items-center gap-2 rounded-full border border-slate-200/80 bg-white/80 px-3 py-1.5 text-xs font-medium text-slate-600 shadow-sm backdrop-blur dark:border-slate-700/80 dark:bg-slate-900/80 dark:text-slate-300;
+  }
+
+  .tm-chip-strong {
+    @apply inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs font-semibold text-sky-700 shadow-sm dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200;
+  }
+
+  .tm-section-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500;
+  }
+
+  .tm-icon-button {
+    @apply rounded-full border border-slate-200/80 bg-white/80 text-slate-600 shadow-sm backdrop-blur hover:-translate-y-[1px] hover:border-slate-300 hover:bg-white active:scale-[0.98] dark:border-slate-700/80 dark:bg-slate-900/80 dark:text-slate-300 dark:hover:border-slate-600 dark:hover:bg-slate-900;
+  }
+
+  .tm-stat-card {
+    @apply rounded-[1.4rem] border border-slate-200/80 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/60;
+  }
+
+  .tm-card-grid {
+    @apply rounded-[1.6rem] border border-slate-200/80 bg-white/80 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/60;
   }
 }

@@ -8,7 +8,7 @@ use tokio::{
 
 use crate::{
     admin_state::AdminStateStore, app_store::AppStore, config::Config, inbucket::InbucketClient,
-    metrics::AppMetrics, realtime::RealtimeBroker,
+    mailer::MailSender, metrics::AppMetrics, otp::OtpStore, realtime::RealtimeBroker,
 };
 
 #[derive(Clone)]
@@ -17,6 +17,8 @@ pub struct AppState {
     pub inbucket_client: Option<Arc<InbucketClient>>,
     pub admin_state: Arc<RwLock<AdminStateStore>>,
     pub metrics: Arc<AppMetrics>,
+    pub mail_sender: Option<Arc<MailSender>>,
+    pub otp_store: Arc<Mutex<OtpStore>>,
     pub realtime: Arc<RealtimeBroker>,
     pub store: Arc<Mutex<AppStore>>,
 }
@@ -77,6 +79,8 @@ impl AppState {
             None
         };
         let metrics = Arc::new(AppMetrics::default());
+        let mail_sender = MailSender::from_config(&config).map(Arc::new);
+        let otp_store = Arc::new(Mutex::new(OtpStore::default()));
         let realtime = Arc::new(RealtimeBroker::new(256));
 
         Ok(Self {
@@ -84,6 +88,8 @@ impl AppState {
             inbucket_client,
             admin_state: Arc::new(RwLock::new(admin_state)),
             metrics,
+            mail_sender,
+            otp_store,
             realtime,
             store: Arc::new(Mutex::new(store)),
         })

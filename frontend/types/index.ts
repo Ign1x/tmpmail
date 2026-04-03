@@ -22,6 +22,7 @@ export interface DomainDnsRecord {
 export interface Account {
   id: string
   address: string
+  ownerUserId?: string
   quota: number
   used: number
   isDisabled: boolean

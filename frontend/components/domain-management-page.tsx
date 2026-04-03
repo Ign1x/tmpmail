@@ -1,48 +1,68 @@
 "use client"
 
-import { type ReactNode, useEffect, useMemo, useState } from "react"
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@heroui/button"
-import { Card, CardBody } from "@heroui/card"
-import { Input } from "@heroui/input"
 import {
   Activity,
-  ArrowLeft,
-  CheckCircle2,
+  Check,
+  Cloud,
   Copy,
   Globe2,
+  Inbox,
   KeyRound,
   LogOut,
+  Mail,
+  Menu,
+  Plus,
   ReceiptText,
   RefreshCw,
-  RotateCw,
+  SlidersHorizontal,
   Server,
   ShieldAlert,
+  Sparkles,
   Trash2,
   Users2,
+  X,
 } from "lucide-react"
 import { useTranslations } from "next-intl"
-import { useRouter } from "@/i18n/navigation"
+import { useAuth } from "@/contexts/auth-context"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import {
+  type AdminAccessKey,
+  createAdminAccessKey,
+  createAdminUser,
   type AdminMetricsResponse,
   type AdminSessionInfo,
   type AdminSystemSettings,
+  type AdminUpdateSystemSettingsRequest,
+  type ConsoleCloudflareSettings,
+  createOwnedAccount,
   type ConsoleUser,
-  createAdminUser,
+  clearAdminAuditLogs,
   createManagedDomain,
+  deleteAdminAccessKey,
   deleteAdminUser,
+  deleteOwnedAccount,
   deleteManagedDomain,
+  fetchAdminAccessKeys,
+  fetchConsoleCloudflareSettings,
+  fetchOwnedAccounts,
   fetchAdminUsers,
   fetchManagedDomains,
   fetchServiceStatus,
-  getAdminAccessKey,
   getAdminAuditLogs,
   getAdminMetrics,
   getAdminSessionInfo,
   getManagedDomainRecords,
-  regenerateAdminAccessKey,
+  getToken,
+  issueOwnedAccountToken,
   resetAdminUserPassword,
   runAdminCleanup,
+  syncManagedDomainCloudflare,
+  testConsoleCloudflareToken,
+  updateConsoleCloudflareSettings,
   updateAdminPassword,
   updateAdminSystemSettings,
   updateAdminUser,
@@ -50,23 +70,110 @@ import {
 } from "@/lib/api"
 import {
   clearStoredAdminSession,
+  clearStoredPendingRevealedAdminKey,
   clearStoredRevealedAdminKey,
   getStoredAdminSession,
-  getStoredRevealedAdminKey,
+  getStoredPendingRevealedAdminKey,
+  getStoredRevealedAdminKeys,
   storeRevealedAdminKey,
+  type StoredAdminKey,
+  type StoredAdminKeyMap,
 } from "@/lib/admin-session"
-import type { Domain, DomainDnsRecord } from "@/types"
-import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import MessageDetail from "@/components/message-detail"
+import MessageList from "@/components/message-list"
+import type { Account, Domain, DomainDnsRecord, Message } from "@/types"
+import { BRAND_LABEL, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import ThemeModeToggle from "@/components/theme-mode-toggle"
+import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
+import { Input, Select, SelectItem, Textarea } from "@/components/tm-form-fields"
+import { replaceBrowserPath } from "@/lib/admin-entry"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
+const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
+  enabled: false,
+  apiTokenConfigured: false,
+  autoSyncEnabled: true,
+}
+const DEFAULT_SETTINGS: AdminSystemSettings = {
+  systemEnabled: true,
+  registrationSettings: {
+    openRegistrationEnabled: true,
+    allowedEmailSuffixes: [],
+    emailOtp: {
+      enabled: false,
+      ttlSeconds: 600,
+      cooldownSeconds: 60,
+    },
+    linuxDo: {
+      enabled: false,
+      clientSecretConfigured: false,
+      minimumTrustLevel: 0,
+    },
+  },
+  userLimits: {
+    defaultDomainLimit: 3,
+    mailboxLimit: 5,
+    apiKeyLimit: 5,
+  },
+}
 
 interface DomainManagementPageProps {
   entryPath: string
   requireSecureTransport: boolean
 }
 
-type ConsoleView = "overview" | "domains" | "users" | "security" | "logs"
+type ConsoleView = "mailboxes" | "overview" | "settings" | "domains" | "users" | "security" | "logs"
+type SettingsSection = "core" | "registration" | "limits" | "integrations" | "cloudflare"
+
+function parseSuffixList(value: string): string[] {
+  return value
+    .split(/[,\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean)
+}
+
+function parseIntegerInput(value: string, fallback: number, min: number, max: number): number {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed)) {
+    return fallback
+  }
+
+  return Math.min(max, Math.max(min, Math.round(parsed)))
+}
+
+function formatPercent(value: number | undefined): string {
+  if (typeof value !== "number" || Number.isNaN(value)) {
+    return "0%"
+  }
+
+  return `${value.toFixed(1).replace(/\.0$/, "")}%`
+}
+
+function formatBytes(value: number | undefined): string {
+  if (!value || value <= 0) {
+    return "0 B"
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"]
+  let current = value
+  let unitIndex = 0
+
+  while (current >= 1024 && unitIndex < units.length - 1) {
+    current /= 1024
+    unitIndex += 1
+  }
+
+  const precision = current >= 10 || unitIndex === 0 ? 0 : 1
+  return `${current.toFixed(precision).replace(/\.0$/, "")} ${units[unitIndex]}`
+}
+
+function formatRatioPercent(part: number | undefined, total: number | undefined): number | undefined {
+  if (typeof part !== "number" || typeof total !== "number" || total <= 0) {
+    return undefined
+  }
+
+  return Math.max(0, Math.min(100, (part / total) * 100))
+}
 
 function isTrustedAdminContext(): boolean {
   if (typeof window === "undefined") {
@@ -122,6 +229,35 @@ function getErrorDescription(error: unknown, fallback: string): string {
   return fallback
 }
 
+function areSettingsEqual(left: unknown, right: unknown): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+function buildSettingsSavePayload(
+  draft: AdminSystemSettings,
+  saved: AdminSystemSettings,
+): AdminUpdateSystemSettingsRequest {
+  const payload: AdminUpdateSystemSettingsRequest = {}
+
+  if (draft.mailExchangeHost !== saved.mailExchangeHost) {
+    payload.mailExchangeHost = draft.mailExchangeHost
+  }
+  if (draft.mailRouteTarget !== saved.mailRouteTarget) {
+    payload.mailRouteTarget = draft.mailRouteTarget
+  }
+  if (draft.domainTxtPrefix !== saved.domainTxtPrefix) {
+    payload.domainTxtPrefix = draft.domainTxtPrefix
+  }
+  if (!areSettingsEqual(draft.registrationSettings, saved.registrationSettings)) {
+    payload.registrationSettings = draft.registrationSettings
+  }
+  if (!areSettingsEqual(draft.userLimits, saved.userLimits)) {
+    payload.userLimits = draft.userLimits
+  }
+
+  return payload
+}
+
 function sortManagedDomains(domains: Domain[]): Domain[] {
   return [...domains].sort((left, right) => {
     const leftPending = left.status !== "active"
@@ -134,6 +270,20 @@ function sortManagedDomains(domains: Domain[]): Domain[] {
   })
 }
 
+function sortMailboxAccounts(accounts: Account[]): Account[] {
+  return [...accounts].sort((left, right) => left.address.localeCompare(right.address))
+}
+
+function matchesMaskedAdminKey(apiKey: string, maskedKey: string): boolean {
+  const trimmedApiKey = apiKey.trim()
+  const trimmedMaskedKey = maskedKey.trim()
+  if (trimmedApiKey.length <= 8 || !trimmedMaskedKey) {
+    return false
+  }
+
+  return trimmedMaskedKey === `${trimmedApiKey.slice(0, 6)}...${trimmedApiKey.slice(-4)}`
+}
+
 function renderRecordValue(record: DomainDnsRecord) {
   return `${record.name} -> ${record.value}`
 }
@@ -143,13 +293,19 @@ export default function DomainManagementPage({
   requireSecureTransport,
 }: DomainManagementPageProps) {
   const { toast } = useHeroUIToast()
-  const router = useRouter()
+  const {
+    currentAccount,
+    accounts: storedMailboxAccounts,
+    token: mailboxToken,
+    activateAccount,
+    clearAccounts,
+    syncAccounts,
+  } = useAuth()
   const ta = useTranslations("admin")
   const ts = useTranslations("settings")
   const tc = useTranslations("common")
-  const tt = useTranslations("theme")
 
-  const [view, setView] = useState<ConsoleView>("overview")
+  const [view, setView] = useState<ConsoleView>("mailboxes")
   const [sessionToken, setSessionToken] = useState("")
   const [isBootstrapping, setIsBootstrapping] = useState(true)
   const [isRedirectingToEntry, setIsRedirectingToEntry] = useState(false)
@@ -158,6 +314,15 @@ export default function DomainManagementPage({
     status: "ready" | "degraded" | "offline"
     storeBackend?: string
   } | null>(null)
+  const [mailboxAccounts, setMailboxAccounts] = useState<Account[]>([])
+  const [mailboxAccountsLoading, setMailboxAccountsLoading] = useState(false)
+  const [mailboxLocalPartInput, setMailboxLocalPartInput] = useState("")
+  const [mailboxDomainInput, setMailboxDomainInput] = useState("")
+  const [isCreatingMailbox, setIsCreatingMailbox] = useState(false)
+  const [activatingMailboxId, setActivatingMailboxId] = useState<string | null>(null)
+  const [deletingMailboxId, setDeletingMailboxId] = useState<string | null>(null)
+  const [selectedMessage, setSelectedMessage] = useState<Message | null>(null)
+  const [mailboxRefreshKey, setMailboxRefreshKey] = useState(0)
   const [managedDomains, setManagedDomains] = useState<Domain[]>([])
   const [managedDomainsLoading, setManagedDomainsLoading] = useState(false)
   const [managedDomainInput, setManagedDomainInput] = useState("")
@@ -169,155 +334,226 @@ export default function DomainManagementPage({
   const [deletingDomainId, setDeletingDomainId] = useState<string | null>(null)
   const [adminUsers, setAdminUsers] = useState<ConsoleUser[]>([])
   const [usersLoading, setUsersLoading] = useState(false)
-  const [newUserUsername, setNewUserUsername] = useState("")
+  const [newUsername, setNewUsername] = useState("")
   const [newUserPassword, setNewUserPassword] = useState("")
-  const [newUserRole, setNewUserRole] = useState<"admin" | "user">("user")
+  const [newUserRole, setNewUserRole] = useState<ConsoleUser["role"]>("user")
   const [newUserDomainLimit, setNewUserDomainLimit] = useState("3")
-  const [creatingUser, setCreatingUser] = useState(false)
+  const [isCreatingUser, setIsCreatingUser] = useState(false)
   const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null)
   const [adminAuditLogs, setAdminAuditLogs] = useState<string[]>([])
   const [logsLoading, setLogsLoading] = useState(false)
+  const [isClearingLogs, setIsClearingLogs] = useState(false)
   const [isRunningCleanup, setIsRunningCleanup] = useState(false)
-  const [adminApiKey, setAdminApiKey] = useState("")
-  const [adminKeyHideAt, setAdminKeyHideAt] = useState<number | null>(null)
-  const [copiedKey, setCopiedKey] = useState(false)
+  const [adminAccessKeys, setAdminAccessKeys] = useState<AdminAccessKey[]>([])
+  const [accessKeysLoading, setAccessKeysLoading] = useState(false)
+  const [newAccessKeyName, setNewAccessKeyName] = useState("")
+  const [isCreatingAccessKey, setIsCreatingAccessKey] = useState(false)
+  const [deletingAccessKeyId, setDeletingAccessKeyId] = useState<string | null>(null)
+  const [revealedAdminKeys, setRevealedAdminKeys] = useState<StoredAdminKeyMap>({})
+  const [pendingRevealedAdminKey, setPendingRevealedAdminKey] = useState<StoredAdminKey | null>(
+    null,
+  )
+  const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
   const [copiedDnsTarget, setCopiedDnsTarget] = useState("")
   const [currentPassword, setCurrentPassword] = useState("")
   const [nextPassword, setNextPassword] = useState("")
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false)
-  const [isRefreshingKey, setIsRefreshingKey] = useState(false)
-  const [settingsDraft, setSettingsDraft] = useState<AdminSystemSettings>({
-    systemEnabled: true,
-  })
+  const [settingsDraft, setSettingsDraft] = useState<AdminSystemSettings>(DEFAULT_SETTINGS)
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>("core")
+  const [isUpdatingSystemEnabled, setIsUpdatingSystemEnabled] = useState(false)
   const [settingsSaving, setSettingsSaving] = useState(false)
+  const [cloudflareSettings, setCloudflareSettings] = useState<ConsoleCloudflareSettings>(
+    DEFAULT_CLOUDFLARE_SETTINGS,
+  )
+  const [cloudflareApiTokenInput, setCloudflareApiTokenInput] = useState("")
+  const [cloudflareSaving, setCloudflareSaving] = useState(false)
+  const [cloudflareTesting, setCloudflareTesting] = useState(false)
+  const [cloudflareSyncingDomainId, setCloudflareSyncingDomainId] = useState<string | null>(null)
   const [isSecureAdminContext, setIsSecureAdminContext] = useState(() => !requireSecureTransport)
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const currentMailboxAccountRef = useRef(currentAccount)
+  const mailboxTokenRef = useRef(mailboxToken)
+  const hasBootstrappedRef = useRef(false)
 
   const currentUser = sessionInfo?.user ?? null
   const isAdmin = currentUser?.role === "admin"
   const hasAdminSession = sessionToken.trim().length > 0
-  const hasVisibleAdminKey = adminApiKey.trim().length > 0
   const canUseSensitiveAdminActions = !requireSecureTransport || isSecureAdminContext
+  const hasReachedAccessKeyLimit = adminAccessKeys.length >= settingsDraft.userLimits.apiKeyLimit
   const usersById = useMemo(
     () => Object.fromEntries(adminUsers.map((user) => [user.id, user])),
     [adminUsers],
   )
+  const activeMailboxAccountsCount = mailboxAccounts.filter(
+    (account) => !account.isDeleted && !account.isDisabled,
+  ).length
+  const availableMailboxDomains = useMemo(
+    () => managedDomains.filter((domain) => domain.isVerified || domain.status === "active"),
+    [managedDomains],
+  )
+  const mailboxPreviewAddress =
+    mailboxLocalPartInput.trim() && mailboxDomainInput
+      ? `${mailboxLocalPartInput.trim()}@${mailboxDomainInput}`
+      : ""
   const activeDomainsCount = managedDomains.filter((domain) => domain.isVerified || domain.status === "active").length
   const pendingDomainsCount = managedDomains.length - activeDomainsCount
-  const sectionMeta =
-    view === "overview"
-      ? { title: ta("systemPanelTitle") }
-      : view === "domains"
-        ? { title: ta("domainPanelTitle") }
-        : view === "users"
-          ? { title: ta("userPanelTitle") }
-          : view === "security"
-            ? { title: ta("securityPanelTitle") }
-            : { title: ta("logsPanelTitle") }
+  const serviceTone =
+    serviceStatus?.status === "ready"
+      ? "success"
+      : serviceStatus?.status === "offline"
+        ? "danger"
+        : "warning"
+  const serviceStatusLabel =
+    serviceStatus?.status === "ready"
+      ? ta("serviceStatusGood")
+      : serviceStatus?.status === "offline"
+        ? ta("serviceStatusError")
+        : ta("serviceStatusWarning")
+  const totalDomainsMetric = isAdmin ? adminMetrics?.totalDomains ?? managedDomains.length : managedDomains.length
+  const activeDomainsMetric = isAdmin ? adminMetrics?.activeDomains ?? activeDomainsCount : activeDomainsCount
+  const pendingDomainsMetric = isAdmin ? adminMetrics?.pendingDomains ?? pendingDomainsCount : pendingDomainsCount
+  const totalAccountsMetric = adminMetrics?.totalAccounts ?? 0
+  const activeAccountsMetric = adminMetrics?.activeAccounts ?? 0
+  const totalMessagesMetric = adminMetrics?.totalMessages ?? 0
+  const activeMessagesMetric = adminMetrics?.activeMessages ?? 0
+  const deletedMessagesMetric = adminMetrics?.deletedMessages ?? 0
+
+  const syncRevealedAdminKeysFromStorage = useCallback(() => {
+    setRevealedAdminKeys(getStoredRevealedAdminKeys())
+    setPendingRevealedAdminKey(getStoredPendingRevealedAdminKey())
+  }, [])
+
+  const getVisibleAdminKeyValue = useCallback(
+    (key: AdminAccessKey): string => {
+      const revealedKey = revealedAdminKeys[key.id]
+      if (revealedKey?.apiKey.trim()) {
+        return revealedKey.apiKey
+      }
+
+      if (
+        pendingRevealedAdminKey?.apiKey &&
+        matchesMaskedAdminKey(pendingRevealedAdminKey.apiKey, key.maskedKey)
+      ) {
+        return pendingRevealedAdminKey.apiKey
+      }
+
+      return ""
+    },
+    [pendingRevealedAdminKey, revealedAdminKeys],
+  )
+
+  const normalizeSettings = useCallback((settings: AdminSystemSettings): AdminSystemSettings => {
+    return {
+      ...DEFAULT_SETTINGS,
+      ...settings,
+      registrationSettings: {
+        ...DEFAULT_SETTINGS.registrationSettings,
+        ...settings.registrationSettings,
+        allowedEmailSuffixes: settings.registrationSettings?.allowedEmailSuffixes ?? [],
+        emailOtp: {
+          ...DEFAULT_SETTINGS.registrationSettings.emailOtp,
+          ...settings.registrationSettings?.emailOtp,
+        },
+        linuxDo: {
+          ...DEFAULT_SETTINGS.registrationSettings.linuxDo,
+          ...settings.registrationSettings?.linuxDo,
+        },
+      },
+      userLimits: {
+        ...DEFAULT_SETTINGS.userLimits,
+        ...settings.userLimits,
+      },
+    }
+  }, [])
+
+  const applySavedSettings = useCallback((settings: AdminSystemSettings) => {
+    const normalizedSettings = normalizeSettings(settings)
+    setSettingsDraft(normalizedSettings)
+    setSessionInfo((current) => (current ? { ...current, systemSettings: normalizedSettings } : current))
+  }, [normalizeSettings])
+
+  const applyCloudflareSettings = useCallback((settings: ConsoleCloudflareSettings) => {
+    setCloudflareSettings({
+      ...DEFAULT_CLOUDFLARE_SETTINGS,
+      ...settings,
+    })
+    setCloudflareApiTokenInput("")
+  }, [])
+
+  useEffect(() => {
+    if (availableMailboxDomains.length === 0) {
+      setMailboxDomainInput("")
+      return
+    }
+
+    setMailboxDomainInput((current) =>
+      availableMailboxDomains.some((domain) => domain.domain === current)
+        ? current
+        : availableMailboxDomains[0]?.domain ?? "",
+    )
+  }, [availableMailboxDomains])
+
+  useEffect(() => {
+    currentMailboxAccountRef.current = currentAccount
+  }, [currentAccount])
+
+  useEffect(() => {
+    mailboxTokenRef.current = mailboxToken
+  }, [mailboxToken])
 
   useEffect(() => {
     setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
   }, [requireSecureTransport])
 
   useEffect(() => {
-    if (!hasVisibleAdminKey || !adminKeyHideAt) {
+    const expirationTimes = [
+      ...Object.values(revealedAdminKeys).map((item) => item.expiresAt),
+      pendingRevealedAdminKey?.expiresAt ?? Number.POSITIVE_INFINITY,
+    ].filter((value) => Number.isFinite(value))
+
+    if (expirationTimes.length === 0) {
       return
     }
 
-    const remainingMs = adminKeyHideAt - Date.now()
+    const remainingMs = Math.min(...expirationTimes) - Date.now()
     if (remainingMs <= 0) {
-      clearStoredRevealedAdminKey()
-      setAdminApiKey("")
-      setAdminKeyHideAt(null)
-      setCopiedKey(false)
+      syncRevealedAdminKeysFromStorage()
+      setCopiedKeyId(null)
       return
     }
 
     const timeoutId = window.setTimeout(() => {
-      clearStoredRevealedAdminKey()
-      setAdminApiKey("")
-      setAdminKeyHideAt(null)
-      setCopiedKey(false)
+      syncRevealedAdminKeysFromStorage()
+      setCopiedKeyId(null)
     }, remainingMs)
 
     return () => window.clearTimeout(timeoutId)
-  }, [adminApiKey, adminKeyHideAt, hasVisibleAdminKey])
+  }, [pendingRevealedAdminKey, revealedAdminKeys, syncRevealedAdminKeysFromStorage])
 
-  useEffect(() => {
-    const bootstrap = async () => {
-      setIsBootstrapping(true)
-
-      const storedToken = getStoredAdminSession()
-      const storedKey = getStoredRevealedAdminKey()
-      if (storedKey) {
-        setAdminApiKey(storedKey.apiKey)
-        setAdminKeyHideAt(storedKey.expiresAt)
-      }
-
-      if (!storedToken) {
-        setIsRedirectingToEntry(true)
-        setIsBootstrapping(false)
-        router.replace(entryPath)
-        return
-      }
-
-      if (requireSecureTransport && !isTrustedAdminContext()) {
-        clearAdminSession()
-        return
-      }
-
-      setSessionToken(storedToken)
-
-      try {
-        const [session, domains, status] = await Promise.all([
-          getAdminSessionInfo(storedToken, DEFAULT_PROVIDER_ID),
-          fetchManagedDomains(DEFAULT_PROVIDER_ID, storedToken),
-          fetchServiceStatus(DEFAULT_PROVIDER_ID),
-        ])
-
-        setSessionInfo(session)
-        setSettingsDraft(session.systemSettings)
-        setManagedDomains(sortManagedDomains(domains))
-        setServiceStatus(status)
-
-        if (session.user.role === "admin") {
-          const [users, metrics, logs] = await Promise.all([
-            fetchAdminUsers(storedToken, DEFAULT_PROVIDER_ID),
-            getAdminMetrics(storedToken, DEFAULT_PROVIDER_ID),
-            getAdminAuditLogs(storedToken, DEFAULT_PROVIDER_ID, 60),
-          ])
-          setAdminUsers(users)
-          setAdminMetrics(metrics)
-          setAdminAuditLogs(logs.entries)
-        } else {
-          setAdminUsers([])
-          setAdminMetrics(null)
-          setAdminAuditLogs([])
-        }
-      } catch (error) {
-        toast({
-          title: ta("sessionRestoreFailed"),
-          description: getErrorDescription(error, ta("sessionRestoreFailed")),
-          color: "danger",
-          variant: "flat",
-        })
-        clearAdminSession()
-        return
-      } finally {
-        setIsBootstrapping(false)
-      }
-    }
-
-    void bootstrap()
-  }, [entryPath, requireSecureTransport])
-
-  const clearAdminSession = () => {
+  const clearAdminSession = useCallback(() => {
     clearStoredAdminSession()
     clearStoredRevealedAdminKey()
+    clearAccounts()
     setSessionToken("")
     setSessionInfo(null)
+    setAdminAccessKeys([])
+    setRevealedAdminKeys({})
+    setPendingRevealedAdminKey(null)
+    setCopiedKeyId(null)
+    setCloudflareSettings(DEFAULT_CLOUDFLARE_SETTINGS)
+    setCloudflareApiTokenInput("")
+    setCloudflareTesting(false)
+    setMailboxAccounts([])
+    setSelectedMessage(null)
     setIsRedirectingToEntry(true)
-    router.replace(entryPath)
-  }
+    replaceBrowserPath(entryPath)
+  }, [clearAccounts, entryPath])
+
+  useEffect(() => {
+    if (!isAdmin && ["overview", "users", "logs"].includes(view)) {
+      setView("mailboxes")
+    }
+  }, [isAdmin, view])
 
   const loadManagedDomains = async (silent = false) => {
     if (!sessionToken.trim()) {
@@ -393,15 +629,314 @@ export default function DomainManagementPage({
     }
   }
 
-  const handleCopyAdminKey = async () => {
-    if (!hasVisibleAdminKey) {
+  const loadAccessKeys = useCallback(
+    async (silent = false, sessionTokenOverride = sessionToken) => {
+      const effectiveSessionToken = sessionTokenOverride.trim()
+      if (!effectiveSessionToken) {
+        return
+      }
+
+    setAccessKeysLoading(true)
+    try {
+      const response = await fetchAdminAccessKeys(effectiveSessionToken, DEFAULT_PROVIDER_ID)
+      setAdminAccessKeys(response.keys)
+      setCopiedKeyId((current) =>
+        current && response.keys.some((key) => key.id === current) ? current : null,
+      )
+    } catch (error) {
+      if (!silent) {
+        toast({
+            title: ta("keyListLoadFailed"),
+            description: getErrorDescription(error, ta("keyListLoadFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      } finally {
+        setAccessKeysLoading(false)
+      }
+    },
+    [sessionToken, ta, toast],
+  )
+
+  const loadCloudflareSettings = useCallback(
+    async (silent = false, sessionTokenOverride = sessionToken) => {
+      const effectiveSessionToken = sessionTokenOverride.trim()
+      if (!effectiveSessionToken) {
+        return
+      }
+
+      try {
+        applyCloudflareSettings(
+          await fetchConsoleCloudflareSettings(effectiveSessionToken, DEFAULT_PROVIDER_ID),
+        )
+      } catch (error) {
+        if (!silent) {
+          toast({
+            title: ta("cloudflareLoadFailed"),
+            description: getErrorDescription(error, ta("cloudflareLoadFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      }
+    },
+    [applyCloudflareSettings, sessionToken, ta, toast],
+  )
+
+  const syncMailboxAccountState = useCallback(
+    (accounts: Account[]) => {
+      const normalizedAccounts = sortMailboxAccounts(
+        accounts.map((account) => ({
+          ...account,
+          password:
+            storedMailboxAccounts.find((item) => item.id === account.id)?.password ||
+            storedMailboxAccounts.find((item) => item.address === account.address)?.password,
+          token:
+            storedMailboxAccounts.find((item) => item.id === account.id)?.token ||
+            storedMailboxAccounts.find((item) => item.address === account.address)?.token,
+          providerId:
+            account.providerId ||
+            storedMailboxAccounts.find((item) => item.id === account.id)?.providerId ||
+            storedMailboxAccounts.find((item) => item.address === account.address)?.providerId ||
+            DEFAULT_PROVIDER_ID,
+        })),
+      )
+
+      setMailboxAccounts(normalizedAccounts)
+
+      if (normalizedAccounts.length === 0) {
+        clearAccounts()
+        setSelectedMessage(null)
+        return normalizedAccounts
+      }
+
+      syncAccounts(normalizedAccounts)
+      return normalizedAccounts
+    },
+    [clearAccounts, storedMailboxAccounts, syncAccounts],
+  )
+
+  const activateMailbox = useCallback(
+    async (account: Account, silent = false, sessionTokenOverride = sessionToken) => {
+      const effectiveSessionToken = sessionTokenOverride.trim()
+      if (!effectiveSessionToken) {
+        return false
+      }
+
+      setActivatingMailboxId(account.id)
+      try {
+        const providerId = account.providerId || DEFAULT_PROVIDER_ID
+        let response: { token: string; id: string }
+
+        try {
+          response = await issueOwnedAccountToken(
+            effectiveSessionToken,
+            account.id,
+            providerId,
+          )
+        } catch (issueError) {
+          if (!account.password) {
+            throw issueError
+          }
+
+          response = await getToken(account.address, account.password, providerId)
+        }
+
+        activateAccount(
+          {
+            ...account,
+            providerId,
+          },
+          response.token,
+        )
+        setSelectedMessage(null)
+        setMailboxRefreshKey((current) => current + 1)
+
+        if (!silent) {
+          toast({
+            title: ta("mailboxActivated"),
+            description: account.address,
+            color: "success",
+            variant: "flat",
+          })
+        }
+        return true
+      } catch (error) {
+        if (!silent) {
+          toast({
+            title: ta("mailboxAccessFailed"),
+            description: getErrorDescription(error, ta("mailboxAccessFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+        return false
+      } finally {
+        setActivatingMailboxId((current) => (current === account.id ? null : current))
+      }
+    },
+    [activateAccount, sessionToken, ta, toast],
+  )
+
+  const loadMailboxAccounts = useCallback(
+    async (
+      silent = false,
+      sessionTokenOverride = sessionToken,
+      options?: { forceActivate?: boolean },
+    ) => {
+      const effectiveSessionToken = sessionTokenOverride.trim()
+      if (!effectiveSessionToken) {
+        return
+      }
+
+      setMailboxAccountsLoading(true)
+      try {
+        const accounts = await fetchOwnedAccounts(effectiveSessionToken, DEFAULT_PROVIDER_ID)
+        const normalizedAccounts = syncMailboxAccountState(accounts)
+        const preferredAccount =
+          (currentMailboxAccountRef.current &&
+            normalizedAccounts.find((account) => account.id === currentMailboxAccountRef.current?.id)) ||
+          normalizedAccounts[0]
+        const shouldActivatePreferredAccount =
+          Boolean(preferredAccount) &&
+          (
+            options?.forceActivate ||
+            !mailboxTokenRef.current ||
+            preferredAccount?.id !== currentMailboxAccountRef.current?.id ||
+            !preferredAccount?.token
+          )
+
+        if (preferredAccount && shouldActivatePreferredAccount) {
+          await activateMailbox(preferredAccount, true, effectiveSessionToken)
+        }
+      } catch (error) {
+        if (!silent) {
+          toast({
+            title: ta("mailboxLoadFailed"),
+            description: getErrorDescription(error, ta("mailboxLoadFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      } finally {
+        setMailboxAccountsLoading(false)
+      }
+    },
+    [
+      activateMailbox,
+      sessionToken,
+      syncMailboxAccountState,
+      ta,
+      toast,
+    ],
+  )
+
+  useEffect(() => {
+    if (hasBootstrappedRef.current) {
+      return
+    }
+    hasBootstrappedRef.current = true
+
+    const bootstrap = async () => {
+      setIsBootstrapping(true)
+
+      const storedToken = getStoredAdminSession()
+      syncRevealedAdminKeysFromStorage()
+
+      if (!storedToken) {
+        setIsRedirectingToEntry(true)
+        setIsBootstrapping(false)
+        replaceBrowserPath(entryPath)
+        return
+      }
+
+      if (requireSecureTransport && !isTrustedAdminContext()) {
+        clearAdminSession()
+        return
+      }
+
+      setSessionToken(storedToken)
+
+      try {
+        const [session, domains, status] = await Promise.all([
+          getAdminSessionInfo(storedToken, DEFAULT_PROVIDER_ID),
+          fetchManagedDomains(DEFAULT_PROVIDER_ID, storedToken),
+          fetchServiceStatus(DEFAULT_PROVIDER_ID),
+        ])
+
+        const normalizedSettings = normalizeSettings(session.systemSettings)
+        setSessionInfo({ ...session, systemSettings: normalizedSettings })
+        setSettingsDraft(normalizedSettings)
+        setNewUserDomainLimit(String(normalizedSettings.userLimits.defaultDomainLimit))
+        setManagedDomains(sortManagedDomains(domains))
+        setServiceStatus(status)
+        await Promise.all([
+          loadCloudflareSettings(true, storedToken),
+          loadMailboxAccounts(true, storedToken, { forceActivate: true }),
+          loadAccessKeys(true, storedToken),
+        ])
+
+        if (session.user.role === "admin") {
+          const [users, metrics, logs] = await Promise.all([
+            fetchAdminUsers(storedToken, DEFAULT_PROVIDER_ID),
+            getAdminMetrics(storedToken, DEFAULT_PROVIDER_ID),
+            getAdminAuditLogs(storedToken, DEFAULT_PROVIDER_ID, 60),
+          ])
+          setAdminUsers(users)
+          setAdminMetrics(metrics)
+          setAdminAuditLogs(logs.entries)
+        } else {
+          setAdminUsers([])
+          setAdminMetrics(null)
+          setAdminAuditLogs([])
+        }
+      } catch (error) {
+        toast({
+          title: ta("sessionRestoreFailed"),
+          description: getErrorDescription(error, ta("sessionRestoreFailed")),
+          color: "danger",
+          variant: "flat",
+        })
+        clearAdminSession()
+        return
+      } finally {
+        setIsBootstrapping(false)
+      }
+    }
+
+    void bootstrap()
+  }, [
+    clearAdminSession,
+    entryPath,
+    loadCloudflareSettings,
+    loadAccessKeys,
+    loadMailboxAccounts,
+    normalizeSettings,
+    requireSecureTransport,
+    syncRevealedAdminKeysFromStorage,
+    ta,
+    toast,
+  ])
+
+  const handleCopyAdminKey = async (key: AdminAccessKey) => {
+    const apiKey = getVisibleAdminKeyValue(key)
+    if (!apiKey) {
+      toast({
+        title: ta("keyCopyUnavailable"),
+        description: ta("keyCopyUnavailableDescription"),
+        color: "warning",
+        variant: "flat",
+      })
       return
     }
 
     try {
-      await copyTextToClipboard(adminApiKey)
-      setCopiedKey(true)
-      window.setTimeout(() => setCopiedKey(false), 1_500)
+      await copyTextToClipboard(apiKey)
+      setCopiedKeyId(key.id)
+      window.setTimeout(() => {
+        setCopiedKeyId((current) => (current === key.id ? null : current))
+      }, 1_500)
       toast({
         title: ta("keyCopied"),
         color: "success",
@@ -437,57 +972,94 @@ export default function DomainManagementPage({
     }
   }
 
-  const handleRevealAdminKey = async () => {
+  const handleGenerateAdminKey = async () => {
     if (!sessionToken.trim()) {
       return
     }
 
-    setIsRefreshingKey(true)
+    setIsCreatingAccessKey(true)
     try {
-      const response = await getAdminAccessKey(sessionToken, DEFAULT_PROVIDER_ID)
+      const response = await createAdminAccessKey(
+        sessionToken,
+        {
+          name: newAccessKeyName.trim() || undefined,
+        },
+        DEFAULT_PROVIDER_ID,
+      )
       const expiresAt = Date.now() + ADMIN_KEY_VISIBLE_MS
-      setAdminApiKey(response.apiKey)
-      setAdminKeyHideAt(expiresAt)
-      storeRevealedAdminKey(response.apiKey, ADMIN_KEY_VISIBLE_MS)
-    } catch (error) {
+      setRevealedAdminKeys((current) => ({
+        ...current,
+        [response.key.id]: {
+          apiKey: response.apiKey,
+          expiresAt,
+        },
+      }))
+      storeRevealedAdminKey(response.key.id, response.apiKey, ADMIN_KEY_VISIBLE_MS)
+      setAdminAccessKeys((current) =>
+        [response.key, ...current.filter((item) => item.id !== response.key.id)]
+          .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
+      )
+      setNewAccessKeyName("")
       toast({
-        title: ta("keyLoadFailed"),
-        description: getErrorDescription(error, ta("keyLoadFailedDescription")),
-        color: "danger",
-        variant: "flat",
-      })
-    } finally {
-      setIsRefreshingKey(false)
-    }
-  }
-
-  const handleRegenerateKey = async () => {
-    if (!sessionToken.trim()) {
-      return
-    }
-
-    setIsRefreshingKey(true)
-    try {
-      const response = await regenerateAdminAccessKey(sessionToken, DEFAULT_PROVIDER_ID)
-      const expiresAt = Date.now() + ADMIN_KEY_VISIBLE_MS
-      setAdminApiKey(response.apiKey)
-      setAdminKeyHideAt(expiresAt)
-      storeRevealedAdminKey(response.apiKey, ADMIN_KEY_VISIBLE_MS)
-      toast({
-        title: ta("keyRegenerated"),
-        description: ta("keyRegeneratedDescription"),
+        title: ta("keyCreated"),
+        description: ta("keyCreatedDescription", { name: response.key.name }),
         color: "success",
         variant: "flat",
       })
     } catch (error) {
       toast({
-        title: ta("keyRegenerateFailed"),
-        description: getErrorDescription(error, ta("keyRegenerateFailedDescription")),
+        title: ta("keyCreateFailed"),
+        description: getErrorDescription(error, ta("keyCreateFailedDescription")),
         color: "danger",
         variant: "flat",
       })
     } finally {
-      setIsRefreshingKey(false)
+      setIsCreatingAccessKey(false)
+    }
+  }
+
+  const handleDeleteAccessKey = async (key: AdminAccessKey) => {
+    if (!window.confirm(ta("keyDeleteConfirm", { name: key.name }))) {
+      return
+    }
+
+    setDeletingAccessKeyId(key.id)
+    try {
+      await deleteAdminAccessKey(sessionToken, key.id, DEFAULT_PROVIDER_ID)
+      setAdminAccessKeys((current) => current.filter((item) => item.id !== key.id))
+      setRevealedAdminKeys((current) => {
+        if (!(key.id in current)) {
+          return current
+        }
+
+        const next = { ...current }
+        delete next[key.id]
+        return next
+      })
+      if (
+        pendingRevealedAdminKey?.apiKey &&
+        matchesMaskedAdminKey(pendingRevealedAdminKey.apiKey, key.maskedKey)
+      ) {
+        clearStoredPendingRevealedAdminKey()
+        setPendingRevealedAdminKey(null)
+      }
+      clearStoredRevealedAdminKey(key.id)
+      setCopiedKeyId((current) => (current === key.id ? null : current))
+      toast({
+        title: ta("keyDeleted"),
+        description: key.name,
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("keyDeleteFailed"),
+        description: getErrorDescription(error, ta("keyDeleteFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setDeletingAccessKeyId(null)
     }
   }
 
@@ -534,6 +1106,115 @@ export default function DomainManagementPage({
     }
   }
 
+  const handleCreateMailbox = async () => {
+    if (!sessionToken.trim()) {
+      return
+    }
+
+    const mailboxLocalPart = mailboxLocalPartInput.trim()
+    if (!mailboxLocalPart || !mailboxDomainInput) {
+      toast({
+        title: ta("mailboxCreateRequired"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (mailboxLocalPart.includes("@")) {
+      toast({
+        title: ta("mailboxCreateLocalPartInvalid"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const mailboxAddress = `${mailboxLocalPart}@${mailboxDomainInput}`
+
+    setIsCreatingMailbox(true)
+    try {
+      const createdAccount = await createOwnedAccount(
+        sessionToken,
+        mailboxAddress,
+        DEFAULT_PROVIDER_ID,
+      )
+      const normalizedAccount: Account = {
+        ...createdAccount,
+        providerId: DEFAULT_PROVIDER_ID,
+      }
+      const nextAccounts = sortMailboxAccounts([
+        normalizedAccount,
+        ...mailboxAccounts.filter((account) => account.id !== normalizedAccount.id),
+      ])
+      setMailboxAccounts(nextAccounts)
+      syncAccounts(nextAccounts)
+      setMailboxLocalPartInput("")
+      const activated = await activateMailbox(normalizedAccount, true)
+      toast(
+        activated
+          ? {
+              title: ta("mailboxCreated"),
+              description: normalizedAccount.address,
+              color: "success",
+              variant: "flat",
+            }
+          : {
+              title: ta("mailboxCreateAutoOpenFailed"),
+              description: ta("mailboxCreateAutoOpenFailedDescription"),
+              color: "warning",
+              variant: "flat",
+            },
+      )
+    } catch (error) {
+      toast({
+        title: ta("mailboxCreateFailed"),
+        description: getErrorDescription(error, ta("mailboxCreateFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsCreatingMailbox(false)
+    }
+  }
+
+  const handleDeleteMailbox = async (account: Account) => {
+    if (!window.confirm(ta("mailboxDeleteConfirm", { address: account.address }))) {
+      return
+    }
+
+    setDeletingMailboxId(account.id)
+    try {
+      await deleteOwnedAccount(sessionToken, account.id, DEFAULT_PROVIDER_ID)
+      const nextAccounts = mailboxAccounts.filter((item) => item.id !== account.id)
+      setMailboxAccounts(nextAccounts)
+      syncAccounts(nextAccounts)
+      if (currentAccount?.id === account.id) {
+        setSelectedMessage(null)
+      }
+      if (nextAccounts.length === 0) {
+        clearAccounts()
+      } else if (currentAccount?.id === account.id) {
+        await activateMailbox(nextAccounts[0], true)
+      }
+      toast({
+        title: ta("mailboxDeleted"),
+        description: account.address,
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("mailboxDeleteFailed"),
+        description: getErrorDescription(error, ta("mailboxDeleteFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setDeletingMailboxId(null)
+    }
+  }
+
   const handleCreateDomain = async () => {
     if (!sessionToken.trim()) {
       return
@@ -555,12 +1236,43 @@ export default function DomainManagementPage({
         sortManagedDomains([createdDomain, ...current.filter((item) => item.id !== createdDomain.id)]),
       )
       setManagedDomainInput("")
-      toast({
-        title: ts("domainAdded"),
-        description: ts("dnsRecordsReady"),
-        color: "success",
-        variant: "flat",
-      })
+      if (
+        cloudflareSettings.enabled &&
+        cloudflareSettings.apiTokenConfigured &&
+        cloudflareSettings.autoSyncEnabled
+      ) {
+        const syncResult = await runCloudflareDomainSync(createdDomain, {
+          silentSuccess: true,
+          silentError: true,
+        })
+        toast(
+          syncResult
+            ? {
+                title: ts("domainAdded"),
+                description: ta("cloudflareSyncSuccessDescription", {
+                  zone: syncResult.zoneName,
+                  created: syncResult.createdRecords,
+                  updated: syncResult.updatedRecords,
+                  unchanged: syncResult.unchangedRecords,
+                }),
+                color: "success",
+                variant: "flat",
+              }
+            : {
+                title: ts("domainAdded"),
+                description: ta("cloudflareSyncDeferredDescription"),
+                color: "warning",
+                variant: "flat",
+              },
+        )
+      } else {
+        toast({
+          title: ts("domainAdded"),
+          description: ts("dnsRecordsReady"),
+          color: "success",
+          variant: "flat",
+        })
+      }
     } catch (error) {
       toast({
         title: ts("domainAddFailed"),
@@ -655,36 +1367,47 @@ export default function DomainManagementPage({
   }
 
   const handleCreateUser = async () => {
-    if (!sessionToken.trim()) {
+    if (!sessionToken.trim() || !isAdmin) {
       return
     }
 
-    const domainLimit = Number(newUserDomainLimit)
-    if (!newUserUsername.trim() || !newUserPassword.trim() || Number.isNaN(domainLimit)) {
-      toast({ title: ta("userCreateInvalid"), color: "warning", variant: "flat" })
+    const parsedDomainLimit = Number(newUserDomainLimit)
+    if (
+      !newUsername.trim() ||
+      !newUserPassword.trim() ||
+      !Number.isFinite(parsedDomainLimit) ||
+      parsedDomainLimit < 0
+    ) {
+      toast({
+        title: ta("userCreateInvalid"),
+        color: "warning",
+        variant: "flat",
+      })
       return
     }
 
-    setCreatingUser(true)
+    setIsCreatingUser(true)
     try {
-      const user = await createAdminUser(
+      const createdUser = await createAdminUser(
         sessionToken,
         {
-          username: newUserUsername.trim(),
+          username: newUsername.trim(),
           password: newUserPassword,
           role: newUserRole,
-          domainLimit,
+          domainLimit: Math.round(parsedDomainLimit),
         },
         DEFAULT_PROVIDER_ID,
       )
-      setAdminUsers((current) => [...current, user].sort((a, b) => a.username.localeCompare(b.username)))
-      setNewUserUsername("")
+      setAdminUsers((current) =>
+        [...current, createdUser].sort((left, right) => left.username.localeCompare(right.username)),
+      )
+      setNewUsername("")
       setNewUserPassword("")
       setNewUserRole("user")
       setNewUserDomainLimit("3")
       toast({
         title: ta("userCreated"),
-        description: user.username,
+        description: createdUser.username,
         color: "success",
         variant: "flat",
       })
@@ -696,7 +1419,7 @@ export default function DomainManagementPage({
         variant: "flat",
       })
     } finally {
-      setCreatingUser(false)
+      setIsCreatingUser(false)
     }
   }
 
@@ -808,26 +1531,74 @@ export default function DomainManagementPage({
     await handlePatchUser(user, { domainLimit: parsed })
   }
 
-  const handleSaveSettings = async () => {
+  const saveSettings = async (payload: AdminUpdateSystemSettingsRequest) => {
     if (!sessionToken.trim() || !isAdmin) {
+      return null
+    }
+
+    await updateAdminSystemSettings(
+      sessionToken,
+      payload,
+      DEFAULT_PROVIDER_ID,
+    )
+    const session = await getAdminSessionInfo(sessionToken, DEFAULT_PROVIDER_ID)
+    applySavedSettings(session.systemSettings)
+    setSessionInfo((current) => ({
+      ...(current ?? session),
+      ...session,
+      systemSettings: normalizeSettings(session.systemSettings),
+    }))
+    void loadOps(true)
+    return session.systemSettings
+  }
+
+  const handleToggleSystemEnabled = async (nextEnabled: boolean) => {
+    if (!sessionToken.trim() || !isAdmin || isUpdatingSystemEnabled) {
       return
     }
 
-    setSettingsSaving(true)
+    const previousEnabled = settingsDraft.systemEnabled
+    setSettingsDraft((current) => ({ ...current, systemEnabled: nextEnabled }))
+    setIsUpdatingSystemEnabled(true)
+
     try {
-      const settings = await updateAdminSystemSettings(
-        sessionToken,
-        settingsDraft,
-        DEFAULT_PROVIDER_ID,
-      )
-      setSettingsDraft(settings)
-      setSessionInfo((current) => (current ? { ...current, systemSettings: settings } : current))
+      await saveSettings({ systemEnabled: nextEnabled })
       toast({
         title: ta("settingsSaved"),
         color: "success",
         variant: "flat",
       })
-      await loadOps(true)
+    } catch (error) {
+      setSettingsDraft((current) => ({ ...current, systemEnabled: previousEnabled }))
+      toast({
+        title: ta("settingsSaveFailed"),
+        description: getErrorDescription(error, ta("settingsSaveFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsUpdatingSystemEnabled(false)
+    }
+  }
+
+  const handleSaveSettings = async () => {
+    if (!sessionToken.trim() || !isAdmin) {
+      return
+    }
+
+    const payload = buildSettingsSavePayload(normalizedSettingsDraft, savedSettings)
+    if (Object.keys(payload).length === 0) {
+      return
+    }
+
+    setSettingsSaving(true)
+    try {
+      await saveSettings(payload)
+      toast({
+        title: ta("settingsSaved"),
+        color: "success",
+        variant: "flat",
+      })
     } catch (error) {
       toast({
         title: ta("settingsSaveFailed"),
@@ -837,6 +1608,141 @@ export default function DomainManagementPage({
       })
     } finally {
       setSettingsSaving(false)
+    }
+  }
+
+  const runCloudflareDomainSync = useCallback(
+    async (domain: Domain, options?: { silentSuccess?: boolean; silentError?: boolean }) => {
+      if (!sessionToken.trim()) {
+        return null
+      }
+
+      setCloudflareSyncingDomainId(domain.id)
+      try {
+        const response = await syncManagedDomainCloudflare(
+          domain.id,
+          sessionToken,
+          DEFAULT_PROVIDER_ID,
+        )
+        if (!options?.silentSuccess) {
+          toast({
+            title: ta("cloudflareSyncSuccess"),
+            description: ta("cloudflareSyncSuccessDescription", {
+              zone: response.zoneName,
+              created: response.createdRecords,
+              updated: response.updatedRecords,
+              unchanged: response.unchangedRecords,
+            }),
+            color: "success",
+            variant: "flat",
+          })
+        }
+        return response
+      } catch (error) {
+        if (!options?.silentError) {
+          toast({
+            title: ta("cloudflareSyncFailed"),
+            description: getErrorDescription(error, ta("cloudflareSyncFailedDescription")),
+            color: "warning",
+            variant: "flat",
+          })
+        }
+        return null
+      } finally {
+        setCloudflareSyncingDomainId((current) => (current === domain.id ? null : current))
+      }
+    },
+    [sessionToken, ta, toast],
+  )
+
+  const handleSaveCloudflareSettings = async () => {
+    if (!sessionToken.trim()) {
+      return
+    }
+
+    if (
+      cloudflareSettings.enabled &&
+      !cloudflareSettings.apiTokenConfigured &&
+      !cloudflareApiTokenInput.trim()
+    ) {
+      toast({
+        title: ta("cloudflareTokenRequired"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    setCloudflareSaving(true)
+    try {
+      applyCloudflareSettings(
+        await updateConsoleCloudflareSettings(
+          sessionToken,
+          {
+            enabled: cloudflareSettings.enabled,
+            apiToken: cloudflareApiTokenInput.trim() || undefined,
+            autoSyncEnabled: cloudflareSettings.autoSyncEnabled,
+          },
+          DEFAULT_PROVIDER_ID,
+        ),
+      )
+      toast({
+        title: ta("cloudflareSaved"),
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("cloudflareSaveFailed"),
+        description: getErrorDescription(error, ta("cloudflareSaveFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setCloudflareSaving(false)
+    }
+  }
+
+  const handleTestCloudflareToken = async () => {
+    if (!sessionToken.trim()) {
+      return
+    }
+
+    if (!cloudflareApiTokenInput.trim() && !cloudflareSettings.apiTokenConfigured) {
+      toast({
+        title: ta("cloudflareTokenRequired"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    setCloudflareTesting(true)
+    try {
+      const response = await testConsoleCloudflareToken(
+        sessionToken,
+        cloudflareApiTokenInput.trim() || undefined,
+        DEFAULT_PROVIDER_ID,
+      )
+      toast({
+        title:
+          response.zoneCount > 0 ? ta("cloudflareTestSuccess") : ta("cloudflareTestNoZones"),
+        description:
+          response.zoneCount > 0
+            ? ta("cloudflareTestSuccessDescription", { count: response.zoneCount })
+            : ta("cloudflareTestNoZonesDescription"),
+        color: response.zoneCount > 0 ? "success" : "warning",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("cloudflareTestFailed"),
+        description: getErrorDescription(error, ta("cloudflareTestFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setCloudflareTesting(false)
     }
   }
 
@@ -871,19 +1777,150 @@ export default function DomainManagementPage({
     }
   }
 
+  const handleClearAuditLogs = async () => {
+    if (!sessionToken.trim() || !isAdmin || isClearingLogs || adminAuditLogs.length === 0) {
+      return
+    }
+
+    setIsClearingLogs(true)
+    try {
+      await clearAdminAuditLogs(sessionToken, DEFAULT_PROVIDER_ID)
+      await loadOps(true)
+      toast({
+        title: ta("clearLogsCompleted"),
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("clearLogsFailed"),
+        description: getErrorDescription(error, ta("clearLogsFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsClearingLogs(false)
+    }
+  }
+
   const menuItems = [
-    { id: "overview" as const, label: ta("menuOverview"), icon: Server },
+    { id: "mailboxes" as const, label: ta("menuMailboxes"), icon: Inbox },
+    ...(isAdmin ? [{ id: "overview" as const, label: ta("menuOverview"), icon: Server }] : []),
+    { id: "settings" as const, label: ta("menuSettings"), icon: SlidersHorizontal },
     { id: "domains" as const, label: ta("menuDomains"), icon: Globe2 },
     ...(isAdmin ? [{ id: "users" as const, label: ta("menuUsers"), icon: Users2 }] : []),
     { id: "security" as const, label: ta("menuSecurity"), icon: KeyRound },
     ...(isAdmin ? [{ id: "logs" as const, label: ta("menuLogs"), icon: ReceiptText }] : []),
   ]
+  const settingsSections = useMemo(
+    () =>
+      isAdmin
+        ? [
+            { id: "core" as const, label: ta("settingsTabCore") },
+            { id: "registration" as const, label: ta("settingsTabRegistration") },
+            { id: "limits" as const, label: ta("settingsTabLimits") },
+            { id: "integrations" as const, label: ta("settingsTabIntegrations") },
+            { id: "cloudflare" as const, label: ta("settingsTabCloudflare") },
+          ]
+        : [{ id: "cloudflare" as const, label: ta("settingsTabCloudflare") }],
+    [isAdmin, ta],
+  )
+  const currentMenuItem = menuItems.find((item) => item.id === view) ?? menuItems[0]
+  const isCloudflareSection = settingsSection === "cloudflare"
+  const canRunCloudflareSync =
+    cloudflareSettings.enabled && cloudflareSettings.apiTokenConfigured
+  const savedSettings = useMemo(
+    () => normalizeSettings(sessionInfo?.systemSettings ?? DEFAULT_SETTINGS),
+    [normalizeSettings, sessionInfo?.systemSettings],
+  )
+  const normalizedSettingsDraft = useMemo(
+    () => normalizeSettings(settingsDraft),
+    [normalizeSettings, settingsDraft],
+  )
+  const hasUnsavedChanges = useMemo(
+    () => !areSettingsEqual(normalizedSettingsDraft, savedSettings),
+    [normalizedSettingsDraft, savedSettings],
+  )
+  const saveSettingsLabel = hasUnsavedChanges ? ta("settingsSaveAction") : ta("settingsSavedState")
+
+  const discardUnsavedChanges = useCallback(() => {
+    setSettingsDraft(savedSettings)
+  }, [savedSettings])
+
+  const confirmDiscardUnsavedChanges = useCallback(() => {
+    if (!hasUnsavedChanges) {
+      return true
+    }
+
+    const shouldDiscard = window.confirm(ta("settingsUnsavedChangesConfirm"))
+    if (shouldDiscard) {
+      discardUnsavedChanges()
+    }
+
+    return shouldDiscard
+  }, [discardUnsavedChanges, hasUnsavedChanges, ta])
+
+  const handleSelectView = useCallback(
+    (nextView: ConsoleView) => {
+      if (nextView === view) {
+        return true
+      }
+
+      if (view === "settings" && !confirmDiscardUnsavedChanges()) {
+        return false
+      }
+
+      setView(nextView)
+      return true
+    },
+    [confirmDiscardUnsavedChanges, view],
+  )
+
+  const handleSelectSettingsSection = useCallback(
+    (nextSection: SettingsSection) => {
+      if (nextSection === settingsSection) {
+        return
+      }
+
+      if (!confirmDiscardUnsavedChanges()) {
+        return
+      }
+
+      setSettingsSection(nextSection)
+    },
+    [confirmDiscardUnsavedChanges, settingsSection],
+  )
+
+  useEffect(() => {
+    if (!settingsSections.some((section) => section.id === settingsSection)) {
+      setSettingsSection(settingsSections[0]?.id ?? "cloudflare")
+    }
+  }, [settingsSection, settingsSections])
+
+  useEffect(() => {
+    if (!hasUnsavedChanges) {
+      return
+    }
+
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault()
+      event.returnValue = ta("settingsUnsavedChangesConfirm")
+    }
+
+    window.addEventListener("beforeunload", handleBeforeUnload)
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload)
+  }, [hasUnsavedChanges, ta])
 
   if (isBootstrapping) {
     return (
-      <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.14),transparent_32%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] px-4 py-8 text-slate-900 dark:bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] dark:text-slate-100 md:px-6">
-        <div className="mx-auto max-w-4xl rounded-[2rem] border border-slate-200/80 bg-white/92 p-6 text-sm text-slate-500 shadow-sm dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-300">
-          {ta("loadingStatus")}
+      <div className="relative flex min-h-screen overflow-hidden bg-[linear-gradient(180deg,#f8fbff_0%,#eef4ff_45%,#f6f8fb_100%)] dark:bg-[linear-gradient(180deg,#020617_0%,#0f172a_55%,#111827_100%)]">
+        <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.18),transparent_28%),radial-gradient(circle_at_top_right,rgba(251,191,36,0.12),transparent_24%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_28%),radial-gradient(circle_at_top_right,rgba(15,23,42,0.42),transparent_30%)]" />
+        <div className="relative m-auto rounded-[2rem] border border-white/70 bg-white/80 px-8 py-7 text-center shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/75 dark:shadow-none">
+          <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
+            <Sparkles size={13} />
+            {BRAND_LABEL}
+          </div>
+          <div className="mt-4 text-sm text-slate-500 dark:text-slate-400">{ta("loadingStatus")}</div>
         </div>
       </div>
     )
@@ -894,342 +1931,1189 @@ export default function DomainManagementPage({
   }
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(14,165,233,0.14),transparent_32%),linear-gradient(180deg,#f8fafc_0%,#eef2ff_100%)] px-4 py-6 text-slate-900 dark:bg-[radial-gradient(circle_at_top,rgba(56,189,248,0.08),transparent_28%),linear-gradient(180deg,#020617_0%,#0f172a_100%)] dark:text-slate-100 md:px-6 lg:px-8">
-      <div className="mx-auto flex max-w-[96rem] flex-col gap-6 lg:flex-row">
-        <aside className="lg:sticky lg:top-6 lg:h-[calc(100vh-3rem)] lg:w-80 lg:flex-none">
-          <Card className="h-full border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-            <CardBody className="flex h-full flex-col gap-5 p-4">
-              <div className="space-y-2">
-                <div className="text-xs font-semibold uppercase tracking-[0.22em] text-sky-600 dark:text-sky-300">
-                  TmpMail Console
+    <div className="tm-page-backdrop relative flex min-h-screen overflow-hidden text-slate-900 dark:text-slate-100">
+      <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(14,165,233,0.18),transparent_28%),radial-gradient(circle_at_top_right,rgba(251,191,36,0.12),transparent_24%),radial-gradient(circle_at_65%_78%,rgba(45,212,191,0.12),transparent_24%)] dark:bg-[radial-gradient(circle_at_top_left,rgba(56,189,248,0.12),transparent_28%),radial-gradient(circle_at_top_right,rgba(15,23,42,0.42),transparent_30%),radial-gradient(circle_at_65%_78%,rgba(20,184,166,0.1),transparent_28%)]" />
+      <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.12)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.12)_1px,transparent_1px)] bg-[size:42px_42px] opacity-[0.18] dark:bg-[linear-gradient(rgba(148,163,184,0.06)_1px,transparent_1px),linear-gradient(90deg,rgba(148,163,184,0.06)_1px,transparent_1px)]" />
+
+      <div className="relative hidden h-screen px-4 py-4 xl:block">
+        <AdminConsoleSidebar
+          menuItems={menuItems}
+          activeView={view}
+          onSelectView={handleSelectView}
+          currentUser={currentUser}
+          serviceStatus={serviceStatus}
+          mailboxCount={activeMailboxAccountsCount}
+          managedDomainsCount={managedDomains.length}
+          activeDomainsCount={activeDomainsCount}
+          pendingDomainsCount={pendingDomainsCount}
+          statusLabels={{
+            active: ts("domainStatusActive"),
+            pending: ts("domainStatusPending"),
+          }}
+          canUseSensitiveAdminActions={canUseSensitiveAdminActions}
+          ta={ta}
+        />
+      </div>
+
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden xl:py-4 xl:pr-4">
+        <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden border border-white/65 bg-white/70 shadow-[0_30px_90px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none xl:rounded-[2rem]">
+          <div className="border-b border-slate-200/80 bg-white/80 px-4 py-3 backdrop-blur dark:border-slate-800 dark:bg-slate-950/80 xl:hidden">
+            <div className="flex items-center justify-between gap-2">
+              <Button
+                isIconOnly
+                variant="light"
+                size="sm"
+                className="text-slate-600 dark:text-slate-300"
+                onPress={() => setIsSidebarOpen(true)}
+                aria-label="Open navigation"
+              >
+                <Menu size={20} />
+              </Button>
+
+              <div className="min-w-0 flex-1 text-center">
+                <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
+                  <Sparkles size={12} />
+                  {BRAND_LABEL}
                 </div>
-                <div className="text-xl font-semibold text-slate-950 dark:text-white">
-                  {ta("inventoryTitle")}
-                </div>
-                <div className="text-sm text-slate-500 dark:text-slate-300">
-                  {currentUser.username} · {currentUser.role}
+                <div className="mt-2 truncate text-sm font-semibold text-slate-900 dark:text-white">
+                  {currentMenuItem.label}
                 </div>
               </div>
 
-              {!canUseSensitiveAdminActions && (
-                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900/70 dark:bg-amber-950/40 dark:text-amber-200">
-                  <div className="flex items-center gap-2 font-semibold">
-                    <ShieldAlert size={15} />
+              <ThemeModeToggle
+                showLabel={false}
+                variant="light"
+                buttonClassName="h-8 w-8 min-w-0 text-slate-600 dark:text-slate-300"
+              />
+            </div>
+          </div>
+
+          <header className="sticky top-0 z-20 border-b border-slate-200/80 bg-white/78 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/72">
+            <div className="flex flex-wrap items-center justify-between gap-4 px-4 py-4 sm:px-6">
+              <div className="min-w-0 max-w-2xl">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="tm-chip-strong">
+                    <Sparkles size={13} />
+                    {BRAND_LABEL}
+                  </span>
+                  <span className="tm-chip">
+                    <Activity size={13} />
+                    {currentMenuItem.label}
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {!canUseSensitiveAdminActions && (
+                  <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+                    <ShieldAlert size={13} />
                     {ta("insecureContextTitle")}
                   </div>
-                  <div className="mt-1">{ta("insecureContextDescription")}</div>
-                </div>
-              )}
+                )}
 
-              <div className="space-y-2">
-                {menuItems.map((item) => {
-                  const Icon = item.icon
-                  const active = view === item.id
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => setView(item.id)}
-                      className={`flex w-full items-center gap-3 rounded-2xl px-4 py-3 text-left text-sm transition ${
-                        active
-                          ? "bg-slate-950 text-white dark:bg-white dark:text-slate-950"
-                          : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-900/60 dark:text-slate-200 dark:hover:bg-slate-900"
-                      }`}
-                    >
-                      <Icon size={16} />
-                      <span>{item.label}</span>
-                    </button>
-                  )
-                })}
-              </div>
+                <span className="hidden rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300 sm:inline-flex">
+                  {currentUser.username}
+                </span>
+                <span className="hidden rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300 md:inline-flex">
+                  {currentUser.role === "admin" ? ta("roleAdmin") : ta("roleUser")}
+                </span>
 
-              <div className="mt-auto space-y-3">
-                <div className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-900/50">
-                  <div className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-400">
-                    {tt("label")}
-                  </div>
+                <div className="hidden xl:block">
                   <ThemeModeToggle
-                    showLabel
-                    fullWidth
-                    variant="flat"
-                    buttonClassName="mt-3 rounded-xl bg-white/90 px-3 text-slate-700 shadow-sm dark:bg-slate-950/80 dark:text-slate-200"
+                    showLabel={false}
+                    variant="light"
+                    buttonClassName="h-9 w-9 min-w-0 rounded-full text-slate-600 dark:text-slate-300"
                   />
                 </div>
 
-                <div className="flex flex-col gap-2">
-                  <Button
-                    variant="flat"
-                    startContent={<ArrowLeft size={16} />}
-                    onPress={() => router.push("/")}
-                  >
-                    {tc("back")}
-                  </Button>
-                  <Button
-                    color="danger"
-                    variant="flat"
-                    startContent={<LogOut size={16} />}
-                    onPress={clearAdminSession}
-                  >
-                    {ta("logout")}
-                  </Button>
-                </div>
+                <Button
+                  isIconOnly
+                  variant="light"
+                  size="sm"
+                  className="h-9 w-9 min-w-0 rounded-full border border-slate-200 bg-white/75 text-slate-700 shadow-sm hover:text-red-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:text-red-400"
+                  aria-label={ta("logout")}
+                  title={ta("logout")}
+                  onPress={clearAdminSession}
+                >
+                  <LogOut size={15} />
+                </Button>
               </div>
-            </CardBody>
-          </Card>
-        </aside>
+            </div>
+          </header>
 
-        <main className="min-w-0 flex-1 space-y-6">
-          <ConsoleSectionHeader
-            title={sectionMeta.title}
-            badge={currentUser.role === "admin" ? ta("roleAdmin") : ta("roleUser")}
-            meta={[
-              {
-                label: ta("serviceStatus"),
-                value: serviceStatus?.status || "loading",
-              },
-              {
-                label: ta("managedDomainCount"),
-                value: String(managedDomains.length),
-              },
-              {
-                label: ta("menuUsers"),
-                value: isAdmin ? String(adminUsers.length) : currentUser.username,
-              },
-            ]}
-          />
+          <main className="flex-1 overflow-y-auto px-4 py-6 sm:px-6 lg:px-8">
+            <div className="mx-auto max-w-6xl space-y-6">
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={view}
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="space-y-6"
+                >
 
-          {view === "overview" && (
-            <>
-              <section className="grid gap-4 md:grid-cols-3">
-                <StatCard
-                  icon={<Activity size={18} />}
-                  label={ta("serviceStatus")}
-                  value={serviceStatus?.status || "loading"}
-                  tone={serviceStatus?.status === "ready" ? "success" : serviceStatus?.status === "offline" ? "danger" : "warning"}
+            {/* ====== MAILBOXES ====== */}
+            {view === "mailboxes" && (
+              <>
+                <SectionHeader
+                  title={ta("mailboxPanelTitle")}
+                  description={ta("mailboxPanelDescription")}
+                  action={
+                    <IconActionButton
+                      icon={<RefreshCw size={14} />}
+                      label={ta("refreshMailboxes")}
+                      onPress={() => void loadMailboxAccounts()}
+                      isLoading={mailboxAccountsLoading}
+                    />
+                  }
                 />
-                <StatCard
-                  icon={<Server size={18} />}
-                  label={ta("storeBackend")}
-                  value={serviceStatus?.storeBackend || "unknown"}
-                  tone="neutral"
-                />
-                <StatCard
-                  icon={<Globe2 size={18} />}
-                  label={ta("managedDomainCount")}
-                  value={String(managedDomains.length)}
-                  tone="neutral"
-                />
-              </section>
 
-              <Card className="border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-                <CardBody className="gap-5 p-5">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="text-lg font-semibold">{ta("overviewSettingsTitle")}</div>
+                <motion.div
+                  className="grid gap-4 sm:grid-cols-3"
+                  initial="hidden"
+                  animate="visible"
+                  variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.06 } } }}
+                >
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard
+                      label={ta("runtimeMailboxLabel")}
+                      value={String(mailboxAccounts.length)}
+                      tone="neutral"
+                    />
+                  </motion.div>
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard
+                      label={ta("overviewActiveMailboxes")}
+                      value={String(activeMailboxAccountsCount)}
+                      tone="success"
+                    />
+                  </motion.div>
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard
+                      label={ta("mailboxCurrentLabel")}
+                      value={currentAccount?.address || ta("mailboxCurrentEmpty")}
+                      tone="neutral"
+                    />
+                  </motion.div>
+                </motion.div>
+
+                <Panel>
+                  <PanelHeader
+                    title={ta("mailboxCreateTitle")}
+                    icon={<Mail size={16} />}
+                  />
+                  <div className="grid gap-4 p-5 lg:grid-cols-[minmax(0,1.05fr)_minmax(14rem,0.95fr)_auto] lg:items-end">
+                    <Input
+                      label={ta("mailboxCreateLocalPartLabel")}
+                      value={mailboxLocalPartInput}
+                      onValueChange={setMailboxLocalPartInput}
+                      placeholder={ta("mailboxCreateLocalPartPlaceholder")}
+                      variant="bordered"
+                      size="sm"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Select
+                      label={ta("mailboxCreateDomainLabel")}
+                      placeholder={ta("mailboxCreateDomainPlaceholder")}
+                      selectedKeys={mailboxDomainInput ? [mailboxDomainInput] : []}
+                      onSelectionChange={(keys) => {
+                        const value = Array.from(keys)[0] as string
+                        if (value) {
+                          setMailboxDomainInput(value)
+                        }
+                      }}
+                      isDisabled={isCreatingMailbox || availableMailboxDomains.length === 0}
+                      size="sm"
+                    >
+                      {availableMailboxDomains.map((domain) => (
+                        <SelectItem key={domain.domain} textValue={domain.domain}>
+                          {domain.domain}
+                        </SelectItem>
+                      ))}
+                    </Select>
+                    <IconActionButton
+                      icon={<Plus size={14} />}
+                      label={ta("mailboxCreateSubmit")}
+                      className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                      onPress={handleCreateMailbox}
+                      isLoading={isCreatingMailbox}
+                      disabled={availableMailboxDomains.length === 0}
+                    />
+                  </div>
+                  <div className="px-5 pb-5">
+                    <div className="tm-chip">
+                      <Mail size={12} />
+                      {mailboxPreviewAddress || ta("mailboxCreatePreviewPlaceholder")}
                     </div>
-                    {isAdmin && (
-                      <Button
-                        color="primary"
-                        onPress={handleSaveSettings}
-                        isLoading={settingsSaving}
-                      >
-                        {tc("save")}
-                      </Button>
+                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+                      {ta("mailboxCreateSecretHint")}
+                    </p>
+                    {availableMailboxDomains.length === 0 && (
+                      <p className="mt-3 text-sm text-amber-600 dark:text-amber-300">
+                        {ta("mailboxCreateNoDomainAvailable")}
+                      </p>
                     )}
                   </div>
+                </Panel>
 
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <label className="rounded-2xl border border-slate-200 p-4 dark:border-slate-800">
-                      <div className="text-sm font-medium">{ta("systemEnabledLabel")}</div>
-                      <div className="mt-3 flex items-center gap-3">
-                        <input
-                          type="checkbox"
-                          checked={settingsDraft.systemEnabled}
-                          disabled={!isAdmin}
-                          onChange={(event) =>
+                {mailboxAccounts.length === 0 ? (
+                  <EmptyState
+                    title={ta("mailboxEmptyTitle")}
+                    description={ta("mailboxEmptyDescription")}
+                  />
+                ) : (
+                  <div className="grid gap-6 xl:grid-cols-[19rem_minmax(0,1fr)]">
+                    <Panel className="h-fit">
+                      <PanelHeader
+                        title={ta("mailboxListTitle")}
+                        icon={<Inbox size={16} />}
+                      />
+                      <div className="divide-y divide-slate-100/80 dark:divide-slate-800/60">
+                        {mailboxAccounts.map((account) => {
+                          const isCurrentMailbox = currentAccount?.id === account.id
+
+                          return (
+                            <div key={account.id} className="px-5 py-4">
+                              <div className="flex items-start gap-2">
+                                <button
+                                  type="button"
+                                  className={`flex min-w-0 flex-1 items-start justify-between gap-3 rounded-[1.2rem] border px-4 py-3 text-left transition-all duration-150 ${
+                                    isCurrentMailbox
+                                      ? "border-sky-200 bg-sky-50/80 text-sky-900 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100"
+                                      : "border-slate-200/80 bg-white/70 text-slate-900 hover:border-slate-300 hover:bg-white dark:border-slate-800/80 dark:bg-slate-950/45 dark:text-white dark:hover:border-slate-700 dark:hover:bg-slate-950/65"
+                                  } ${account.isDeleted ? "cursor-not-allowed opacity-60" : ""}`}
+                                  onClick={() => void activateMailbox(account)}
+                                  disabled={account.isDeleted || activatingMailboxId === account.id}
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-medium">{account.address}</div>
+                                    <div className="mt-1 flex flex-wrap gap-1.5">
+                                      {isCurrentMailbox && (
+                                        <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[11px] font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+                                          {ta("mailboxCurrentBadge")}
+                                        </span>
+                                      )}
+                                      {account.isDisabled && (
+                                        <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                                          {ta("mailboxDisabledBadge")}
+                                        </span>
+                                      )}
+                                      {account.isDeleted && (
+                                        <span className="rounded-full bg-red-50 px-2 py-0.5 text-[11px] font-medium text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                                          {ta("mailboxDeletedBadge")}
+                                        </span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/80 text-slate-500 dark:bg-slate-900/80 dark:text-slate-300">
+                                    {activatingMailboxId === account.id ? (
+                                      <RefreshCw size={15} className="animate-spin" />
+                                    ) : (
+                                      <Mail size={15} />
+                                    )}
+                                  </div>
+                                </button>
+                                <IconActionButton
+                                  danger
+                                  icon={<Trash2 size={13} />}
+                                  label={tc("delete")}
+                                  onPress={() => void handleDeleteMailbox(account)}
+                                  isLoading={deletingMailboxId === account.id}
+                                />
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </Panel>
+
+                    <Panel className="min-h-[38rem]">
+                      <PanelHeader
+                        title={currentAccount?.address || ta("mailboxViewerTitle")}
+                        icon={<Mail size={16} />}
+                      />
+                      <div className="h-[38rem] overflow-hidden">
+                        {currentAccount ? (
+                          selectedMessage ? (
+                            <MessageDetail
+                              message={selectedMessage}
+                              onBack={() => setSelectedMessage(null)}
+                              onDelete={() => {
+                                setSelectedMessage(null)
+                                setMailboxRefreshKey((current) => current + 1)
+                              }}
+                            />
+                          ) : (
+                            <MessageList
+                              onSelectMessage={setSelectedMessage}
+                              refreshKey={mailboxRefreshKey}
+                            />
+                          )
+                        ) : (
+                          <div className="p-5">
+                            <EmptyState
+                              title={ta("mailboxMessagesEmptyTitle")}
+                              description={ta("mailboxMessagesEmptyDescription")}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </Panel>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* ====== OVERVIEW ====== */}
+            {view === "overview" && (
+              <>
+                <SectionHeader
+                  title={ta("systemPanelTitle")}
+                  description={ta("systemPanelDescription")}
+                  action={
+                    isAdmin ? (
+                      <IconActionButton
+                        icon={<RefreshCw size={14} />}
+                        label={ta("refreshOps")}
+                        onPress={() => void loadOps()}
+                        isLoading={logsLoading}
+                      />
+                    ) : undefined
+                  }
+                />
+
+                <motion.div
+                  className="grid auto-rows-fr gap-4 sm:grid-cols-2 xl:grid-cols-3"
+                  initial="hidden"
+                  animate="visible"
+                  variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.06 } } }}
+                >
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard
+                      label={ta("serviceStatus")}
+                      value={serviceStatusLabel}
+                      tone={serviceTone}
+                    />
+                  </motion.div>
+                  {isAdmin ? (
+                    <>
+                      <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                        <MetricCard
+                          label={ta("runtimeCpuLabel")}
+                          value={formatPercent(adminMetrics?.runtime.cpuUsagePercent)}
+                          detail={ta("overviewRealtimeSample")}
+                          progressPercent={adminMetrics?.runtime.cpuUsagePercent}
+                          tone={(adminMetrics?.runtime.cpuUsagePercent ?? 0) >= 85 ? "danger" : (adminMetrics?.runtime.cpuUsagePercent ?? 0) >= 60 ? "warning" : "success"}
+                        />
+                      </motion.div>
+                      <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                        <MetricCard
+                          label={ta("runtimeMemoryLabel")}
+                          value={formatPercent(adminMetrics?.runtime.memoryUsagePercent)}
+                          detail={`${formatBytes(adminMetrics?.runtime.memoryUsedBytes)} / ${formatBytes(adminMetrics?.runtime.memoryTotalBytes)}`}
+                          progressPercent={adminMetrics?.runtime.memoryUsagePercent}
+                          tone={(adminMetrics?.runtime.memoryUsagePercent ?? 0) >= 90 ? "danger" : (adminMetrics?.runtime.memoryUsagePercent ?? 0) >= 70 ? "warning" : "success"}
+                        />
+                      </motion.div>
+                      <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                        <MetricCard
+                          label={ta("managedDomainCount")}
+                          value={String(totalDomainsMetric)}
+                          detail={`${ta("overviewActiveDomains")} ${activeDomainsMetric} · ${ta("overviewPendingDomains")} ${pendingDomainsMetric}`}
+                          progressPercent={formatRatioPercent(activeDomainsMetric, totalDomainsMetric)}
+                          tone="neutral"
+                        />
+                      </motion.div>
+                      <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                        <MetricCard
+                          label={ta("runtimeMailboxLabel")}
+                          value={String(totalAccountsMetric)}
+                          detail={`${ta("overviewActiveMailboxes")} ${activeAccountsMetric}`}
+                          progressPercent={formatRatioPercent(activeAccountsMetric, totalAccountsMetric)}
+                          tone="neutral"
+                        />
+                      </motion.div>
+                      <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                        <MetricCard
+                          label={ta("runtimeMessageLabel")}
+                          value={String(totalMessagesMetric)}
+                          detail={`${ta("overviewActiveMessages")} ${activeMessagesMetric} · ${ta("overviewDeletedMessages")} ${deletedMessagesMetric}`}
+                          progressPercent={formatRatioPercent(activeMessagesMetric, totalMessagesMetric)}
+                          tone="neutral"
+                        />
+                      </motion.div>
+                    </>
+                  ) : (
+                    <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                      <MetricCard
+                        label={ta("managedDomainCount")}
+                        value={String(managedDomains.length)}
+                        tone="neutral"
+                      />
+                    </motion.div>
+                  )}
+                </motion.div>
+              </>
+            )}
+
+            {/* ====== SETTINGS ====== */}
+            {view === "settings" && (
+              <>
+                <SectionHeader
+                  title={ta("settingsPanelTitle")}
+                  description={isCloudflareSection ? undefined : ta("settingsPanelDescription")}
+                  action={
+                    isCloudflareSection ? undefined : (
+                        <IconActionButton
+                          icon={<Check size={14} />}
+                          label={saveSettingsLabel}
+                          tooltip={saveSettingsLabel}
+                          className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                          onPress={handleSaveSettings}
+                          isLoading={settingsSaving}
+                          disabled={!hasUnsavedChanges || settingsSaving}
+                        />
+                    )
+                  }
+                />
+
+                <Panel className="p-1">
+                  <div className="flex flex-wrap gap-2">
+                    {settingsSections.map((section) => {
+                      const active = settingsSection === section.id
+                      return (
+                        <Button
+                          key={section.id}
+                          size="sm"
+                          variant={active ? "flat" : "light"}
+                          className={`rounded-2xl px-4 ${active ? "bg-sky-100 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100" : "text-slate-600 dark:text-slate-300"}`}
+                          onPress={() => handleSelectSettingsSection(section.id)}
+                        >
+                          {section.label}
+                        </Button>
+                      )
+                    })}
+                  </div>
+                </Panel>
+
+                {settingsSection === "cloudflare" && (
+                  <div className="max-w-3xl">
+                    <Panel>
+                      <PanelHeader title={ta("cloudflareTitle")} icon={<Cloud size={16} />} />
+                      <div className="space-y-4 p-5">
+                        <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                            {cloudflareSettings.enabled
+                              ? ta("cloudflareEnabledOn")
+                              : ta("cloudflareEnabledOff")}
+                          </div>
+                          <label className="inline-flex cursor-pointer items-center">
+                            <input
+                              type="checkbox"
+                              checked={cloudflareSettings.enabled}
+                              onChange={(event) =>
+                                setCloudflareSettings((current) => ({
+                                  ...current,
+                                  enabled: event.target.checked,
+                                }))
+                              }
+                              className="peer sr-only"
+                            />
+                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                          </label>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <Input
+                            label={ta("cloudflareTokenLabel")}
+                            type="password"
+                            placeholder={
+                              cloudflareSettings.apiTokenConfigured
+                                ? ta("cloudflareTokenPlaceholderConfigured")
+                                : ta("cloudflareTokenPlaceholder")
+                            }
+                            value={cloudflareApiTokenInput}
+                            onValueChange={setCloudflareApiTokenInput}
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
+                            {ta("cloudflareTokenHint")}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                            {cloudflareSettings.autoSyncEnabled
+                              ? ta("cloudflareAutoSyncOn")
+                              : ta("cloudflareAutoSyncOff")}
+                          </div>
+                          <label className="inline-flex cursor-pointer items-center">
+                            <input
+                              type="checkbox"
+                              checked={cloudflareSettings.autoSyncEnabled}
+                              onChange={(event) =>
+                                setCloudflareSettings((current) => ({
+                                  ...current,
+                                  autoSyncEnabled: event.target.checked,
+                                }))
+                              }
+                              className="peer sr-only"
+                            />
+                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                          </label>
+                        </div>
+
+                        <div className="flex flex-wrap gap-2 pt-1">
+                          <Button
+                            size="sm"
+                            variant="flat"
+                            startContent={<RefreshCw size={14} />}
+                            className="h-10 rounded-2xl bg-slate-100/80 px-4 text-slate-700 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:text-slate-100 dark:hover:bg-slate-700/70"
+                            onPress={() => void handleTestCloudflareToken()}
+                            isLoading={cloudflareTesting}
+                          >
+                            {ta("cloudflareTestAction")}
+                          </Button>
+                          <Button
+                            size="sm"
+                            startContent={<Check size={14} />}
+                            className="h-10 rounded-2xl bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
+                            onPress={() => void handleSaveCloudflareSettings()}
+                            isLoading={cloudflareSaving}
+                          >
+                            {tc("save")}
+                          </Button>
+                        </div>
+                      </div>
+                    </Panel>
+                  </div>
+                )}
+
+                {settingsSection === "core" && (
+                  <div className="space-y-6">
+                    <Panel>
+                      <PanelHeader title={ta("systemEnabledLabel")} />
+                      <div className="p-5">
+                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                              {settingsDraft.systemEnabled ? ta("systemEnabledOn") : ta("systemEnabledOff")}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                              {ta("systemEnabledDescription")}
+                            </p>
+                          </div>
+
+                          <label className={`inline-flex items-center ${isUpdatingSystemEnabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
+                            <input
+                              type="checkbox"
+                              checked={settingsDraft.systemEnabled}
+                              disabled={isUpdatingSystemEnabled}
+                              onChange={(event) => void handleToggleSystemEnabled(event.target.checked)}
+                              className="peer sr-only"
+                            />
+                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                          </label>
+                        </div>
+                      </div>
+                    </Panel>
+
+                    <Panel>
+                      <PanelHeader title={ta("overviewSettingsTitle")} />
+                      <div className="grid gap-4 p-5 md:grid-cols-3">
+                        <Input
+                          label={ta("mailExchangeHostLabel")}
+                          placeholder="mail.example.com"
+                          value={settingsDraft.mailExchangeHost || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({ ...current, mailExchangeHost: value || undefined }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("mailRouteTargetLabel")}
+                          placeholder="23.165.200.136"
+                          value={settingsDraft.mailRouteTarget || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({ ...current, mailRouteTarget: value || undefined }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("domainTxtPrefixLabel")}
+                          placeholder="@"
+                          value={settingsDraft.domainTxtPrefix || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({ ...current, domainTxtPrefix: value || undefined }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                      </div>
+                    </Panel>
+                  </div>
+                )}
+
+                {settingsSection === "registration" && (
+                  <div className="grid gap-6 xl:grid-cols-2">
+                    <Panel>
+                      <PanelHeader title={ta("registrationSettingsTitle")} />
+                      <div className="space-y-4 p-5">
+                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                              {settingsDraft.registrationSettings.openRegistrationEnabled ? ta("openRegistrationOn") : ta("openRegistrationOff")}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                              {ta("openRegistrationDescription")}
+                            </p>
+                          </div>
+
+                          <label className="inline-flex cursor-pointer items-center">
+                            <input
+                              type="checkbox"
+                              checked={settingsDraft.registrationSettings.openRegistrationEnabled}
+                              onChange={(event) =>
+                                setSettingsDraft((current) => ({
+                                  ...current,
+                                  registrationSettings: {
+                                    ...current.registrationSettings,
+                                    openRegistrationEnabled: event.target.checked,
+                                  },
+                                }))
+                              }
+                              className="peer sr-only"
+                            />
+                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                          </label>
+                        </div>
+
+                        <Input
+                          label={ta("allowedEmailSuffixesLabel")}
+                          placeholder={ta("allowedEmailSuffixesPlaceholder")}
+                          value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
+                          onValueChange={(value) =>
                             setSettingsDraft((current) => ({
                               ...current,
-                              systemEnabled: event.target.checked,
+                              registrationSettings: {
+                                ...current.registrationSettings,
+                                allowedEmailSuffixes: parseSuffixList(value),
+                              },
                             }))
                           }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
                         />
-                        <span className="text-sm">
-                          {settingsDraft.systemEnabled ? ta("systemEnabledOn") : ta("systemEnabledOff")}
-                        </span>
                       </div>
-                    </label>
+                    </Panel>
 
-                    <Input
-                      label={ta("mailExchangeHostLabel")}
-                      placeholder="mail.example.com"
-                      value={settingsDraft.mailExchangeHost || ""}
-                      isDisabled={!isAdmin}
-                      onValueChange={(value) =>
-                        setSettingsDraft((current) => ({ ...current, mailExchangeHost: value }))
-                      }
-                      variant="bordered"
-                    />
-                    <Input
-                      label={ta("mailRouteTargetLabel")}
-                      placeholder="23.165.200.136"
-                      value={settingsDraft.mailRouteTarget || ""}
-                      isDisabled={!isAdmin}
-                      onValueChange={(value) =>
-                        setSettingsDraft((current) => ({ ...current, mailRouteTarget: value }))
-                      }
-                      variant="bordered"
-                    />
-                    <Input
-                      label={ta("domainTxtPrefixLabel")}
-                      placeholder="@"
-                      value={settingsDraft.domainTxtPrefix || ""}
-                      isDisabled={!isAdmin}
-                      onValueChange={(value) =>
-                        setSettingsDraft((current) => ({ ...current, domainTxtPrefix: value }))
-                      }
-                      variant="bordered"
-                    />
+                    <Panel>
+                      <PanelHeader title={ta("emailOtpTitle")} />
+                      <div className="space-y-4 p-5">
+                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                              {settingsDraft.registrationSettings.emailOtp.enabled ? ta("emailOtpEnabledOn") : ta("emailOtpEnabledOff")}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                              {ta("emailOtpDescription")}
+                            </p>
+                          </div>
+
+                          <label className="inline-flex cursor-pointer items-center">
+                            <input
+                              type="checkbox"
+                              checked={settingsDraft.registrationSettings.emailOtp.enabled}
+                              onChange={(event) =>
+                                setSettingsDraft((current) => ({
+                                  ...current,
+                                  registrationSettings: {
+                                    ...current.registrationSettings,
+                                    emailOtp: {
+                                      ...current.registrationSettings.emailOtp,
+                                      enabled: event.target.checked,
+                                      subject:
+                                        event.target.checked &&
+                                        !(current.registrationSettings.emailOtp.subject || "").trim()
+                                          ? ta("emailOtpDefaultSubject")
+                                          : current.registrationSettings.emailOtp.subject,
+                                      body:
+                                        event.target.checked &&
+                                        !(current.registrationSettings.emailOtp.body || "").trim()
+                                          ? ta("emailOtpDefaultBody", {
+                                              code: "{{code}}",
+                                              ttlSeconds: "{{ttlSeconds}}",
+                                            })
+                                          : current.registrationSettings.emailOtp.body,
+                                    },
+                                  },
+                                }))
+                              }
+                              className="peer sr-only"
+                            />
+                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                          </label>
+                        </div>
+
+                        {settingsDraft.registrationSettings.emailOtp.enabled && (
+                          <>
+                            <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
+                              {ta("emailOtpAutoTemplateHint")}
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-2">
+                              <Input
+                                label={ta("emailOtpTtlLabel")}
+                                type="number"
+                                value={String(settingsDraft.registrationSettings.emailOtp.ttlSeconds)}
+                                onValueChange={(value) =>
+                                  setSettingsDraft((current) => ({
+                                    ...current,
+                                    registrationSettings: {
+                                      ...current.registrationSettings,
+                                      emailOtp: {
+                                        ...current.registrationSettings.emailOtp,
+                                        ttlSeconds: parseIntegerInput(
+                                          value,
+                                          current.registrationSettings.emailOtp.ttlSeconds,
+                                          60,
+                                          3600,
+                                        ),
+                                      },
+                                    },
+                                  }))
+                                }
+                                variant="bordered"
+                                size="sm"
+                                classNames={TM_INPUT_CLASSNAMES}
+                              />
+                              <Input
+                                label={ta("emailOtpCooldownLabel")}
+                                type="number"
+                                value={String(settingsDraft.registrationSettings.emailOtp.cooldownSeconds)}
+                                onValueChange={(value) =>
+                                  setSettingsDraft((current) => ({
+                                    ...current,
+                                    registrationSettings: {
+                                      ...current.registrationSettings,
+                                      emailOtp: {
+                                        ...current.registrationSettings.emailOtp,
+                                        cooldownSeconds: parseIntegerInput(
+                                          value,
+                                          current.registrationSettings.emailOtp.cooldownSeconds,
+                                          0,
+                                          3600,
+                                        ),
+                                      },
+                                    },
+                                  }))
+                                }
+                                variant="bordered"
+                                size="sm"
+                                classNames={TM_INPUT_CLASSNAMES}
+                              />
+                            </div>
+
+                            <Input
+                              label={ta("emailOtpSubjectLabel")}
+                              value={settingsDraft.registrationSettings.emailOtp.subject || ""}
+                              onValueChange={(value) =>
+                                setSettingsDraft((current) => ({
+                                  ...current,
+                                  registrationSettings: {
+                                    ...current.registrationSettings,
+                                    emailOtp: {
+                                      ...current.registrationSettings.emailOtp,
+                                      subject: value || undefined,
+                                    },
+                                  },
+                                }))
+                              }
+                              variant="bordered"
+                              size="sm"
+                              classNames={TM_INPUT_CLASSNAMES}
+                            />
+                            <Textarea
+                              label={ta("emailOtpBodyLabel")}
+                              minRows={4}
+                              value={settingsDraft.registrationSettings.emailOtp.body || ""}
+                              onValueChange={(value) =>
+                                setSettingsDraft((current) => ({
+                                  ...current,
+                                  registrationSettings: {
+                                    ...current.registrationSettings,
+                                    emailOtp: {
+                                      ...current.registrationSettings.emailOtp,
+                                      body: value || undefined,
+                                    },
+                                  },
+                                }))
+                              }
+                              variant="bordered"
+                              size="sm"
+                              classNames={TM_INPUT_CLASSNAMES}
+                            />
+                          </>
+                        )}
+                      </div>
+                    </Panel>
                   </div>
-                </CardBody>
-              </Card>
-            </>
-          )}
+                )}
 
-          {view === "domains" && (
-            <Card className="border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-              <CardBody className="gap-5 p-5">
-                <section className="grid gap-3 md:grid-cols-3">
-                  <StatCard
-                    icon={<Globe2 size={18} />}
-                    label={ta("managedDomainCount")}
-                    value={String(managedDomains.length)}
-                    tone="neutral"
-                  />
-                  <StatCard
-                    icon={<CheckCircle2 size={18} />}
-                    label={ts("domainStatusActive")}
-                    value={String(activeDomainsCount)}
-                    tone="success"
-                  />
-                  <StatCard
-                    icon={<Activity size={18} />}
-                    label={ts("domainStatusPending")}
-                    value={String(pendingDomainsCount)}
-                    tone="warning"
-                  />
-                </section>
+                {settingsSection === "limits" && (
+                  <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.75fr)]">
+                    <Panel>
+                      <PanelHeader title={ta("userLimitsTitle")} />
+                      <div className="grid gap-4 p-5 md:grid-cols-3">
+                        <Input
+                          label={ta("defaultDomainLimitLabel")}
+                          type="number"
+                          value={String(settingsDraft.userLimits.defaultDomainLimit)}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              userLimits: {
+                                ...current.userLimits,
+                                defaultDomainLimit: parseIntegerInput(value, current.userLimits.defaultDomainLimit, 0, 500),
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("mailboxLimitLabel")}
+                          type="number"
+                          value={String(settingsDraft.userLimits.mailboxLimit)}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              userLimits: {
+                                ...current.userLimits,
+                                mailboxLimit: parseIntegerInput(value, current.userLimits.mailboxLimit, 0, 200),
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("apiKeyLimitLabel")}
+                          type="number"
+                          value={String(settingsDraft.userLimits.apiKeyLimit)}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              userLimits: {
+                                ...current.userLimits,
+                                apiKeyLimit: parseIntegerInput(value, current.userLimits.apiKeyLimit, 0, 50),
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                      </div>
+                    </Panel>
 
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <div className="text-lg font-semibold">{ta("domainPanelTitle")}</div>
+                    <Panel>
+                      <PanelHeader title={ta("userLimitsSummaryTitle")} />
+                      <div className="space-y-3 p-5">
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
+                          {ta("userLimitsSummaryDescription")}
+                        </div>
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="tm-section-label">{ta("defaultDomainLimitLabel")}</div>
+                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
+                            {settingsDraft.userLimits.defaultDomainLimit}
+                          </div>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="tm-section-label">{ta("mailboxLimitLabel")}</div>
+                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
+                            {settingsDraft.userLimits.mailboxLimit}
+                          </div>
+                        </div>
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="tm-section-label">{ta("apiKeyLimitLabel")}</div>
+                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
+                            {settingsDraft.userLimits.apiKeyLimit}
+                          </div>
+                        </div>
+                      </div>
+                    </Panel>
                   </div>
-                  <Button
-                    variant="flat"
-                    startContent={<RefreshCw size={16} />}
-                    onPress={() => void loadManagedDomains()}
-                    isLoading={managedDomainsLoading}
-                  >
-                    {ts("refreshDomains")}
-                  </Button>
-                </div>
+                )}
 
-                <div className="rounded-[1.6rem] border border-slate-200/80 bg-slate-50/80 p-4 dark:border-slate-800 dark:bg-slate-900/45">
-                  <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto]">
-                    <Input
-                      label={ts("domainInputLabel")}
-                      placeholder={ts("domainInputPlaceholder")}
-                      value={managedDomainInput}
-                      onValueChange={setManagedDomainInput}
-                      variant="bordered"
+                {settingsSection === "integrations" && (
+                  <Panel>
+                    <PanelHeader title={ta("linuxDoTitle")} />
+                    <div className="space-y-4 p-5">
+                      <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="min-w-0">
+                          <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                            {settingsDraft.registrationSettings.linuxDo.enabled ? ta("linuxDoEnabledOn") : ta("linuxDoEnabledOff")}
+                          </div>
+                          <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                            {ta("linuxDoDescription")}
+                          </p>
+                        </div>
+
+                        <label className="inline-flex cursor-pointer items-center">
+                          <input
+                            type="checkbox"
+                            checked={settingsDraft.registrationSettings.linuxDo.enabled}
+                            onChange={(event) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                registrationSettings: {
+                                  ...current.registrationSettings,
+                                  linuxDo: {
+                                    ...current.registrationSettings.linuxDo,
+                                    enabled: event.target.checked,
+                                  },
+                                },
+                              }))
+                            }
+                            className="peer sr-only"
+                          />
+                          <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                        </label>
+                      </div>
+
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="space-y-1.5">
+                          <Input
+                            label={ta("linuxDoClientIdLabel")}
+                            value={settingsDraft.registrationSettings.linuxDo.clientId || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                registrationSettings: {
+                                  ...current.registrationSettings,
+                                  linuxDo: {
+                                    ...current.registrationSettings.linuxDo,
+                                    clientId: value || undefined,
+                                  },
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
+                            {ta("linuxDoClientIdHint")}
+                          </p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Input
+                            label={ta("linuxDoClientSecretLabel")}
+                            type="password"
+                            placeholder={
+                              settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
+                                ? ta("linuxDoClientSecretPlaceholderConfigured")
+                                : ta("linuxDoClientSecretPlaceholder")
+                            }
+                            value={settingsDraft.registrationSettings.linuxDo.clientSecret || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                registrationSettings: {
+                                  ...current.registrationSettings,
+                                  linuxDo: {
+                                    ...current.registrationSettings.linuxDo,
+                                    clientSecret: value || undefined,
+                                  },
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
+                            {settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
+                              ? ta("linuxDoClientSecretConfiguredHint")
+                              : ta("linuxDoClientSecretHint")}
+                          </p>
+                        </div>
+                        <div className="space-y-1.5">
+                          <Input
+                            label={ta("linuxDoMinimumTrustLevelLabel")}
+                            type="number"
+                            value={String(settingsDraft.registrationSettings.linuxDo.minimumTrustLevel)}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                registrationSettings: {
+                                  ...current.registrationSettings,
+                                  linuxDo: {
+                                    ...current.registrationSettings.linuxDo,
+                                    minimumTrustLevel: parseIntegerInput(
+                                      value,
+                                      current.registrationSettings.linuxDo.minimumTrustLevel,
+                                      0,
+                                      4,
+                                    ),
+                                  },
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
+                            {ta("linuxDoMinimumTrustLevelHint")}
+                          </p>
+                        </div>
+                      </div>
+                    </div>
+                  </Panel>
+                )}
+              </>
+            )}
+
+            {/* ====== DOMAINS ====== */}
+            {view === "domains" && (
+              <>
+                <SectionHeader
+                  title={ta("domainPanelTitle")}
+                  description={ta("domainPanelDescription")}
+                  action={
+                    <IconActionButton
+                      icon={<RefreshCw size={14} />}
+                      label={ts("refreshDomains")}
+                      onPress={() => void loadManagedDomains()}
+                      isLoading={managedDomainsLoading}
                     />
-                    <Button
-                      color="primary"
-                      className="md:self-start"
-                      startContent={<Globe2 size={16} />}
+                  }
+                />
+
+                <motion.div
+                  className="grid gap-4 sm:grid-cols-3"
+                  initial="hidden"
+                  animate="visible"
+                  variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.06 } } }}
+                >
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard label={ta("managedDomainCount")} value={String(managedDomains.length)} tone="neutral" />
+                  </motion.div>
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard label={ts("domainStatusActive")} value={String(activeDomainsCount)} tone="success" />
+                  </motion.div>
+                  <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
+                    <MetricCard label={ts("domainStatusPending")} value={String(pendingDomainsCount)} tone="warning" />
+                  </motion.div>
+                </motion.div>
+
+                {/* Add domain */}
+                <Panel>
+                  <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-end">
+                    <div className="min-w-0 flex-1">
+                      <Input
+                        label={ts("domainInputLabel")}
+                        placeholder={ts("domainInputPlaceholder")}
+                        value={managedDomainInput}
+                        onValueChange={setManagedDomainInput}
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                    </div>
+                    <IconActionButton
+                      icon={<Plus size={14} />}
+                      label={ts("addDomain")}
+                      className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
                       onPress={handleCreateDomain}
                       isLoading={isCreatingDomain}
-                    >
-                      {ts("addDomain")}
-                    </Button>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  {managedDomains.length === 0 && (
-                    <EmptyPanel
-                      title={ts("noManagedDomains")}
                     />
-                  )}
+                  </div>
+                </Panel>
 
-                  {managedDomains.map((domain) => (
-                    <Card
-                      key={domain.id}
-                      className="border border-amber-200/70 bg-white/90 dark:border-amber-900/60 dark:bg-slate-950/40"
-                    >
-                      <CardBody className="gap-4 p-4">
-                        <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                          <div className="space-y-2">
+                {/* Domain list */}
+                {managedDomains.length === 0 ? (
+                  <EmptyState title={ts("noManagedDomains")} />
+                ) : (
+                  <div className="space-y-3">
+                    {managedDomains.map((domain) => (
+                      <Panel key={domain.id}>
+                        <div className="p-5">
+                          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-base">{domain.domain}</span>
-                              <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${
-                                domain.isVerified || domain.status === "active"
-                                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-200"
-                                  : "bg-amber-100 text-amber-700 dark:bg-amber-950/50 dark:text-amber-200"
-                              }`}>
-                                {domain.isVerified || domain.status === "active" ? ts("domainStatusActive") : ts("domainStatusPending")}
+                              <span className="font-mono text-sm font-medium text-slate-900 dark:text-white">
+                                {domain.domain}
                               </span>
+                              <StatusBadge
+                                active={domain.isVerified || domain.status === "active"}
+                                activeLabel={ts("domainStatusActive")}
+                                pendingLabel={ts("domainStatusPending")}
+                              />
                               {isAdmin && domain.ownerUserId && usersById[domain.ownerUserId] && (
-                                <span className="rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+                                <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
                                   {usersById[domain.ownerUserId].username}
                                 </span>
                               )}
                             </div>
-                            {domain.verificationError && (
-                              <div className="text-sm text-red-600 dark:text-red-300">
-                                {ts("lastVerificationError")}: {domain.verificationError}
-                              </div>
-                            )}
+                            <div className="flex flex-wrap gap-1.5">
+                              <IconActionButton
+                                icon={<Globe2 size={13} />}
+                                label={expandedDomainIds[domain.id] ? ts("hideDnsRecords") : ts("showDnsRecords")}
+                                onPress={() => void handleToggleDomainRecords(domain.id)}
+                                isLoading={!!recordsLoadingById[domain.id]}
+                              />
+                              <IconActionButton
+                                icon={<Check size={13} />}
+                                label={domain.isVerified ? ts("recheckDomain") : ts("verifyDomain")}
+                                onPress={() => void handleVerifyDomain(domain.id)}
+                                isLoading={verifyingDomainId === domain.id}
+                              />
+                              {canRunCloudflareSync && (
+                                <IconActionButton
+                                  icon={<Cloud size={13} />}
+                                  label={ta("cloudflareSyncAction")}
+                                  onPress={() => void runCloudflareDomainSync(domain)}
+                                  isLoading={cloudflareSyncingDomainId === domain.id}
+                                />
+                              )}
+                              {domain.verificationToken && (
+                                <IconActionButton
+                                  danger
+                                  icon={<Trash2 size={13} />}
+                                  label={ts("deleteDomain")}
+                                  onPress={() => void handleDeleteDomain(domain)}
+                                  isLoading={deletingDomainId === domain.id}
+                                />
+                              )}
+                            </div>
                           </div>
-                          <div className="flex flex-wrap gap-2">
-                            <Button
-                              size="sm"
-                              variant="flat"
-                              onPress={() => void handleToggleDomainRecords(domain.id)}
-                              isLoading={!!recordsLoadingById[domain.id]}
-                            >
-                              {expandedDomainIds[domain.id] ? ts("hideDnsRecords") : ts("showDnsRecords")}
-                            </Button>
-                            <Button
-                              size="sm"
-                              color={domain.isVerified ? "success" : "secondary"}
-                              variant="flat"
-                              onPress={() => void handleVerifyDomain(domain.id)}
-                              isLoading={verifyingDomainId === domain.id}
-                            >
-                              {domain.isVerified ? ts("recheckDomain") : ts("verifyDomain")}
-                            </Button>
-                            {domain.verificationToken && (
-                              <Button
-                                size="sm"
-                                color="danger"
-                                variant="flat"
-                                startContent={<Trash2 size={15} />}
-                                onPress={() => void handleDeleteDomain(domain)}
-                                isLoading={deletingDomainId === domain.id}
-                              >
-                                {ts("deleteDomain")}
-                              </Button>
-                            )}
-                          </div>
-                        </div>
 
-                        {expandedDomainIds[domain.id] && recordsByDomainId[domain.id] && (
-                          <div className="space-y-3 rounded-[1.4rem] border border-dashed border-amber-300 bg-amber-50/50 p-4 dark:border-amber-800 dark:bg-amber-950/10">
-                            <div className="grid gap-3 md:grid-cols-3">
+                          {domain.verificationError && (
+                            <div className="mt-2 text-xs text-red-600 dark:text-red-400">
+                              {ts("lastVerificationError")}: {domain.verificationError}
+                            </div>
+                          )}
+
+                          {/* DNS records */}
+                          {expandedDomainIds[domain.id] && recordsByDomainId[domain.id] && (
+                            <div className="mt-4 grid gap-3 sm:grid-cols-3">
                               {recordsByDomainId[domain.id].map((record) => {
                                 const baseKey = `${domain.id}-${record.kind}-${record.name}`
                                 return (
-                                  <DomainRecordCard
+                                  <DnsRecordCard
                                     key={baseKey}
                                     record={record}
                                     copyStatePrefix={baseKey}
@@ -1247,94 +3131,117 @@ export default function DomainManagementPage({
                                 )
                               })}
                             </div>
-                          </div>
-                        )}
-                      </CardBody>
-                    </Card>
-                  ))}
-                </div>
-              </CardBody>
-            </Card>
-          )}
-
-          {view === "users" && isAdmin && (
-            <Card className="border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-              <CardBody className="gap-5 p-5">
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <div className="text-lg font-semibold">{ta("userPanelTitle")}</div>
+                          )}
+                        </div>
+                      </Panel>
+                    ))}
                   </div>
-                  <Button
-                    variant="flat"
-                    startContent={<RefreshCw size={16} />}
-                    onPress={() => void loadUsers()}
-                    isLoading={usersLoading}
-                  >
-                    {ta("refreshUsers")}
-                  </Button>
-                </div>
+                )}
+              </>
+            )}
 
-                <div className="grid gap-3 md:grid-cols-4">
-                  <Input
-                    label={ta("consoleUsernameLabel")}
-                    value={newUserUsername}
-                    onValueChange={setNewUserUsername}
-                    variant="bordered"
-                  />
-                  <Input
-                    label={ta("newUserPasswordLabel")}
-                    type="password"
-                    value={newUserPassword}
-                    onValueChange={setNewUserPassword}
-                    variant="bordered"
-                  />
-                  <label className="rounded-2xl border border-slate-200 p-3 text-sm dark:border-slate-800">
-                    <div className="font-medium">{ta("userRoleLabel")}</div>
-                    <select
-                      className="mt-3 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 dark:border-slate-800 dark:bg-slate-950"
-                      value={newUserRole}
-                      onChange={(event) => setNewUserRole(event.target.value as "admin" | "user")}
-                    >
-                      <option value="user">{ta("roleUser")}</option>
-                      <option value="admin">{ta("roleAdmin")}</option>
-                    </select>
-                  </label>
-                  <Input
-                    label={ta("domainLimitLabel")}
-                    value={newUserDomainLimit}
-                    onValueChange={setNewUserDomainLimit}
-                    variant="bordered"
-                  />
-                </div>
-
-                <Button
-                  color="primary"
-                  onPress={handleCreateUser}
-                  isLoading={creatingUser}
-                  className="self-start"
-                >
-                  {ta("createUser")}
-                </Button>
-
-                <div className="space-y-3">
-                  {adminUsers.length === 0 && (
-                    <EmptyPanel
-                      title={ta("userEmptyTitle")}
+            {/* ====== USERS ====== */}
+            {view === "users" && isAdmin && (
+              <>
+                <SectionHeader
+                  title={ta("userPanelTitle")}
+                  description={ta("userPanelDescription")}
+                  action={
+                    <IconActionButton
+                      icon={<RefreshCw size={14} />}
+                      label={ta("refreshUsers")}
+                      onPress={() => void loadUsers()}
+                      isLoading={usersLoading}
                     />
-                  )}
-                  {adminUsers.map((user) => (
-                    <Card key={user.id} className="border border-slate-200/80 dark:border-slate-800">
-                      <CardBody className="gap-4 p-4">
-                        <div className="flex flex-wrap items-center justify-between gap-3">
+                  }
+                />
+
+                <Panel>
+                  <PanelHeader title={ta("createUser")} icon={<Users2 size={16} />} />
+                  <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-4">
+                    <Input
+                      label={ta("consoleUsernameLabel")}
+                      value={newUsername}
+                      onValueChange={setNewUsername}
+                      variant="bordered"
+                      size="sm"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <Input
+                      label={ta("newUserPasswordLabel")}
+                      type="password"
+                      value={newUserPassword}
+                      onValueChange={setNewUserPassword}
+                      variant="bordered"
+                      size="sm"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                    <label className="space-y-2 text-sm text-slate-600 dark:text-slate-300">
+                      <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">
+                        {ta("userRoleLabel")}
+                      </span>
+                      <select
+                        className="h-10 w-full rounded-xl border border-slate-200 bg-white/80 px-3 text-sm text-slate-700 outline-none transition-colors focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-200"
+                        value={newUserRole}
+                        onChange={(event) => setNewUserRole(event.target.value as ConsoleUser["role"])}
+                      >
+                        <option value="user">{ta("roleUser")}</option>
+                        <option value="admin">{ta("roleAdmin")}</option>
+                      </select>
+                    </label>
+                    <Input
+                      label={ta("domainLimitLabel")}
+                      type="number"
+                      value={newUserDomainLimit}
+                      onValueChange={setNewUserDomainLimit}
+                      variant="bordered"
+                      size="sm"
+                      classNames={TM_INPUT_CLASSNAMES}
+                    />
+                  </div>
+                  <div className="px-5 pb-5">
+                    <IconActionButton
+                      icon={<Plus size={14} />}
+                      label={ta("createUser")}
+                      className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                      onPress={handleCreateUser}
+                      isLoading={isCreatingUser}
+                    />
+                  </div>
+                </Panel>
+
+                {/* User list */}
+                {adminUsers.length === 0 ? (
+                  <EmptyState
+                    title={ta("userEmptyTitle")}
+                    description={ta("userEmptyDescription")}
+                  />
+                ) : (
+                  <Panel>
+                    <div className="divide-y divide-slate-100/80 dark:divide-slate-800/60">
+                      {adminUsers.map((user) => (
+                        <div key={user.id} className="flex flex-col gap-3 px-5 py-4 lg:flex-row lg:items-center lg:justify-between">
                           <div>
-                            <div className="font-semibold">{user.username}</div>
-                            <div className="text-sm text-slate-500 dark:text-slate-300">
-                              {user.role} · {ta("domainLimitValue", { count: user.domainLimit })}
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-slate-900 dark:text-white">
+                                {user.username}
+                              </span>
+                              <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[11px] font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                                {user.role}
+                              </span>
+                              {user.isDisabled && (
+                                <span className="rounded bg-red-50 px-1.5 py-0.5 text-[11px] font-medium text-red-600 dark:bg-red-950/40 dark:text-red-400">
+                                  disabled
+                                </span>
+                              )}
+                            </div>
+                            <div className="mt-0.5 text-xs text-slate-400">
+                              {ta("domainLimitValue", { count: user.domainLimit })}
                             </div>
                           </div>
-                          <div className="flex flex-wrap gap-2">
+                          <div className="flex flex-wrap gap-1.5">
                             <select
-                              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-800 dark:bg-slate-950"
+                              className="rounded-xl border border-slate-200 bg-white/70 px-2.5 py-1 text-xs text-slate-600 backdrop-blur-sm dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-300"
                               value={user.role}
                               onChange={(event) =>
                                 void handlePatchUser(user, { role: event.target.value as ConsoleUser["role"] })
@@ -1343,309 +3250,751 @@ export default function DomainManagementPage({
                               <option value="user">{ta("roleUser")}</option>
                               <option value="admin">{ta("roleAdmin")}</option>
                             </select>
-                            <Button
-                              size="sm"
-                              variant="flat"
+                            <IconActionButton
+                              icon={<SlidersHorizontal size={13} />}
+                              label={ta("editDomainLimit")}
                               onPress={() => void handleEditUserLimit(user)}
-                            >
-                              {ta("editDomainLimit")}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="flat"
-                              onPress={() =>
-                                void handlePatchUser(user, { isDisabled: !user.isDisabled })
-                              }
-                            >
-                              {user.isDisabled ? ta("enableUser") : ta("disableUser")}
-                            </Button>
-                            <Button
-                              size="sm"
-                              variant="flat"
+                            />
+                            <IconActionButton
+                              icon={<ShieldAlert size={13} />}
+                              label={user.isDisabled ? ta("enableUser") : ta("disableUser")}
+                              onPress={() => void handlePatchUser(user, { isDisabled: !user.isDisabled })}
+                            />
+                            <IconActionButton
+                              icon={<KeyRound size={13} />}
+                              label={ta("resetUserPassword")}
                               onPress={() => void handleResetUserPassword(user)}
-                            >
-                              {ta("resetUserPassword")}
-                            </Button>
+                            />
+                            <IconActionButton
+                              danger
+                              icon={<Trash2 size={13} />}
+                              label={tc("delete")}
+                              onPress={() => void handleDeleteUser(user)}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </Panel>
+                )}
+              </>
+            )}
+
+            {/* ====== SECURITY ====== */}
+            {view === "security" && (
+              <>
+                <SectionHeader
+                  title={ta("securityPanelTitle")}
+                  description={ta("securityPanelDescription")}
+                />
+
+                <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(18rem,0.9fr)]">
+                  <div className="space-y-6">
+                    <Panel>
+                      <PanelHeader
+                        title={ta("apiKeySettings")}
+                        icon={<KeyRound size={16} />}
+                        action={
+                          <IconActionButton
+                            icon={<RefreshCw size={13} />}
+                            label={ta("refreshKeys")}
+                            onPress={() => void loadAccessKeys()}
+                            isLoading={accessKeysLoading}
+                          />
+                        }
+                      />
+                      <div className="space-y-4 p-5">
+                        <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto]">
+                          <Input
+                            label={ta("apiKeyNameLabel")}
+                            placeholder={ta("apiKeyNamePlaceholder")}
+                            value={newAccessKeyName}
+                            onValueChange={setNewAccessKeyName}
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <div className="flex items-end">
                             <Button
                               size="sm"
-                              color="danger"
-                              variant="flat"
-                              onPress={() => void handleDeleteUser(user)}
+                              className="h-10 rounded-2xl bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
+                              onPress={() => void handleGenerateAdminKey()}
+                              isLoading={isCreatingAccessKey}
+                              isDisabled={hasReachedAccessKeyLimit}
                             >
-                              {tc("delete")}
+                              {ta("apiKeyGenerate")}
                             </Button>
                           </div>
                         </div>
-                      </CardBody>
-                    </Card>
-                  ))}
-                </div>
-              </CardBody>
-            </Card>
-          )}
 
-          {view === "security" && (
-            <Card className="border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-              <CardBody className="gap-6 p-5">
-                <div>
-                  <div className="text-lg font-semibold">{ta("securityPanelTitle")}</div>
-                </div>
-
-                <div className="grid gap-4 xl:grid-cols-2">
-                  <Card className="border border-slate-200/80 dark:border-slate-800">
-                    <CardBody className="gap-4 p-4">
-                      <div className="flex items-center gap-2 text-lg font-semibold">
-                        <KeyRound size={18} />
-                        {ta("apiKeySettings")}
-                      </div>
-                      <div className="rounded-2xl border border-dashed border-slate-300 p-4 dark:border-slate-700">
-                        <div className="text-xs uppercase tracking-[0.2em] text-slate-500">
-                          {ta("apiKeyGeneratedLabel")}
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
+                          <div className="font-medium text-slate-900 dark:text-white">
+                            {ta("apiKeyUsageSummary", {
+                              count: adminAccessKeys.length,
+                              limit: settingsDraft.userLimits.apiKeyLimit,
+                            })}
+                          </div>
+                          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                            {ta("apiKeyVisibilityHint")}
+                          </div>
                         </div>
-                        <div className="mt-2 break-all font-mono text-sm">
-                          {hasVisibleAdminKey ? adminApiKey : ta("apiKeyEmptyState")}
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="flat"
-                          startContent={<RefreshCw size={16} />}
-                          onPress={handleRevealAdminKey}
-                          isLoading={isRefreshingKey}
-                        >
-                          {ta("apiKeyGenerate")}
-                        </Button>
-                        <Button
-                          variant="flat"
-                          startContent={<RotateCw size={16} />}
-                          onPress={handleRegenerateKey}
-                          isLoading={isRefreshingKey}
-                        >
-                          {ta("apiKeyKeepUsing")}
-                        </Button>
-                        <Button
-                          variant="flat"
-                          startContent={<Copy size={16} />}
-                          onPress={handleCopyAdminKey}
-                          isDisabled={!hasVisibleAdminKey}
-                        >
-                          {copiedKey ? tc("copied") : ta("apiKeyCopy")}
-                        </Button>
-                      </div>
-                    </CardBody>
-                  </Card>
 
-                  <Card className="border border-slate-200/80 dark:border-slate-800">
-                    <CardBody className="gap-4 p-4">
-                      <div className="text-lg font-semibold">{ta("passwordPanelTitle")}</div>
-                      <Input
-                        label={ta("currentPasswordLabel")}
-                        type="password"
-                        value={currentPassword}
-                        onValueChange={setCurrentPassword}
-                        variant="bordered"
-                      />
-                      <Input
-                        label={ta("newPasswordLabel")}
-                        type="password"
-                        value={nextPassword}
-                        onValueChange={setNextPassword}
-                        variant="bordered"
-                      />
-                      <Button
-                        color="primary"
-                        onPress={handleUpdatePassword}
-                        isLoading={isUpdatingPassword}
-                      >
-                        {ta("updatePasswordSubmit")}
-                      </Button>
-                    </CardBody>
-                  </Card>
+                        {adminAccessKeys.length === 0 ? (
+                          <EmptyState title={ta("apiKeyListEmpty")} compact />
+                        ) : (
+                          <div className="space-y-3">
+                            {adminAccessKeys.map((key) => {
+                              const hasCopyableKey = Boolean(getVisibleAdminKeyValue(key))
+
+                              return (
+                                <div
+                                  key={key.id}
+                                  className="flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate text-sm font-medium text-slate-900 dark:text-white">
+                                      {key.name}
+                                    </div>
+                                    <div className="mt-1 break-all font-mono text-xs text-slate-500 dark:text-slate-400">
+                                      {key.maskedKey}
+                                    </div>
+                                    <div className="mt-1 text-[11px] text-slate-400">
+                                      {ta("keyCreatedAt", {
+                                        date: new Date(key.createdAt).toLocaleString(),
+                                      })}
+                                    </div>
+                                  </div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <Button
+                                      size="sm"
+                                      variant="flat"
+                                      startContent={<Copy size={13} />}
+                                      className={`h-8 rounded-xl px-3 text-xs font-medium ${
+                                        hasCopyableKey
+                                          ? "bg-slate-100/70 text-slate-700 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:text-slate-100 dark:hover:bg-slate-700/70"
+                                          : "bg-slate-100/70 text-slate-500 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:text-slate-300 dark:hover:bg-slate-700/70"
+                                      }`}
+                                      onPress={() => void handleCopyAdminKey(key)}
+                                    >
+                                      {copiedKeyId === key.id ? tc("copied") : ta("apiKeyCopy")}
+                                    </Button>
+                                    <IconActionButton
+                                      danger
+                                      icon={<Trash2 size={13} />}
+                                      label={ta("deleteKey")}
+                                      onPress={() => void handleDeleteAccessKey(key)}
+                                      isLoading={deletingAccessKeyId === key.id}
+                                    />
+                                  </div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </Panel>
+                  </div>
+
+                  <div className="space-y-6">
+                    <Panel>
+                      <PanelHeader title={ta("passwordPanelTitle")} />
+                      <div className="space-y-4 p-5">
+                        <Input
+                          label={ta("currentPasswordLabel")}
+                          type="password"
+                          value={currentPassword}
+                          onValueChange={setCurrentPassword}
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("newPasswordLabel")}
+                          type="password"
+                          value={nextPassword}
+                          onValueChange={setNextPassword}
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Button
+                          size="sm"
+                          className="h-10 rounded-2xl bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
+                          onPress={() => void handleUpdatePassword()}
+                          isLoading={isUpdatingPassword}
+                        >
+                          {ta("updatePasswordSubmit")}
+                        </Button>
+                      </div>
+                    </Panel>
+                  </div>
                 </div>
-              </CardBody>
-            </Card>
-          )}
+              </>
+            )}
 
-          {view === "logs" && isAdmin && (
-            <>
-              <section className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-                <StatCard
-                  icon={<Globe2 size={18} />}
-                  label={ta("opsDomains")}
-                  value={String(adminMetrics?.totalDomains ?? 0)}
-                  tone="neutral"
-                />
-                <StatCard
-                  icon={<CheckCircle2 size={18} />}
-                  label={ta("opsPendingDomains")}
-                  value={String(adminMetrics?.pendingDomains ?? 0)}
-                  tone="warning"
-                />
-                <StatCard
-                  icon={<Users2 size={18} />}
-                  label={ta("opsAccounts")}
-                  value={String(adminMetrics?.totalAccounts ?? 0)}
-                  tone="neutral"
-                />
-                <StatCard
-                  icon={<ReceiptText size={18} />}
-                  label={ta("opsMessages")}
-                  value={String(adminMetrics?.totalMessages ?? 0)}
-                  tone="neutral"
-                />
-                <StatCard
-                  icon={<Activity size={18} />}
-                  label={ta("opsSyncFailures")}
-                  value={String(adminMetrics?.inbucketSyncFailuresTotal ?? 0)}
-                  tone="danger"
-                />
-                <StatCard
-                  icon={<Trash2 size={18} />}
-                  label={ta("opsCleanupRuns")}
-                  value={String(adminMetrics?.cleanupRunsTotal ?? 0)}
-                  tone="neutral"
-                />
-              </section>
-
-              <Card className="border border-slate-200/80 bg-white/92 dark:border-slate-800 dark:bg-slate-950/70">
-                <CardBody className="gap-5 p-5">
-                  <div className="flex flex-wrap items-center justify-between gap-4">
-                    <div>
-                      <div className="text-lg font-semibold">{ta("logsPanelTitle")}</div>
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      <Button
-                        variant="flat"
-                        startContent={<RefreshCw size={16} />}
+            {/* ====== LOGS ====== */}
+            {view === "logs" && isAdmin && (
+              <>
+                <SectionHeader
+                  title={ta("logsPanelTitle")}
+                  description={ta("logsPanelDescription")}
+                  action={
+                    <div className="flex gap-2">
+                      <IconActionButton
+                        icon={<RefreshCw size={14} />}
+                        label={ta("refreshOps")}
                         onPress={() => void loadOps()}
                         isLoading={logsLoading}
-                      >
-                        {ta("refreshOps")}
-                      </Button>
-                      <Button
-                        color="danger"
-                        variant="flat"
+                      />
+                      <IconActionButton
+                        danger
+                        icon={<Trash2 size={14} />}
+                        label={ta("clearLogs")}
+                        onPress={handleClearAuditLogs}
+                        isLoading={isClearingLogs}
+                        disabled={adminAuditLogs.length === 0}
+                      />
+                      <IconActionButton
+                        icon={<Sparkles size={14} />}
+                        label={ta("runCleanup")}
+                        className="bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:hover:bg-red-950/50"
                         onPress={handleRunCleanup}
                         isLoading={isRunningCleanup}
-                      >
-                        {ta("runCleanup")}
-                      </Button>
-                    </div>
-                  </div>
-
-                  <div className="space-y-2 rounded-2xl border border-dashed border-slate-300 bg-slate-50/80 p-4 text-sm dark:border-slate-700 dark:bg-slate-900/40">
-                    {adminAuditLogs.length === 0 ? (
-                      <EmptyPanel
-                        title={ta("logsEmptyTitle")}
-                        compact
                       />
+                    </div>
+                  }
+                />
+                <Panel>
+                  <PanelHeader title={ta("logsPanelTitle")} />
+                  <div className="max-h-[32rem] overflow-y-auto p-5">
+                    {adminAuditLogs.length === 0 ? (
+                      <EmptyState title={ta("logsEmptyTitle")} compact />
                     ) : (
-                      adminAuditLogs.map((entry) => (
-                        <div key={entry} className="font-mono text-xs leading-6">
-                          {entry}
-                        </div>
-                      ))
+                      <div className="space-y-1">
+                        {adminAuditLogs.map((entry) => (
+                          <div key={entry} className="font-mono text-xs leading-6 text-slate-600 dark:text-slate-400">
+                            {entry}
+                          </div>
+                        ))}
+                      </div>
                     )}
                   </div>
-                </CardBody>
-              </Card>
-            </>
+                </Panel>
+              </>
+            )}
+
+                </motion.div>
+              </AnimatePresence>
+            </div>
+          </main>
+        </div>
+      </div>
+
+      {isSidebarOpen && (
+        <div className="fixed inset-0 z-50 xl:hidden">
+          <div
+            className="absolute inset-0 bg-slate-950/45 backdrop-blur-[2px]"
+            onClick={() => setIsSidebarOpen(false)}
+          />
+          <div className="absolute left-0 top-0 h-full w-[18rem] max-w-[85vw] bg-transparent p-3">
+            <AdminConsoleSidebar
+              mobile
+              menuItems={menuItems}
+              activeView={view}
+              onSelectView={(nextView) => {
+                const didNavigate = handleSelectView(nextView)
+                if (didNavigate) {
+                  setIsSidebarOpen(false)
+                }
+              }}
+              currentUser={currentUser}
+              serviceStatus={serviceStatus}
+              mailboxCount={activeMailboxAccountsCount}
+              managedDomainsCount={managedDomains.length}
+              activeDomainsCount={activeDomainsCount}
+              pendingDomainsCount={pendingDomainsCount}
+              statusLabels={{
+                active: ts("domainStatusActive"),
+                pending: ts("domainStatusPending"),
+              }}
+              canUseSensitiveAdminActions={canUseSensitiveAdminActions}
+              ta={ta}
+              trailingAction={
+                <Button
+                  isIconOnly
+                  variant="light"
+                  size="sm"
+                  className="text-slate-600 dark:text-slate-300"
+                  onPress={() => setIsSidebarOpen(false)}
+                  aria-label="Close navigation"
+                >
+                  <X size={18} />
+                </Button>
+              }
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ================================================================
+   Shared UI primitives
+   ================================================================ */
+
+function AdminConsoleSidebar({
+  mobile,
+  menuItems,
+  activeView,
+  onSelectView,
+  currentUser,
+  serviceStatus,
+  mailboxCount,
+  managedDomainsCount,
+  activeDomainsCount,
+  pendingDomainsCount,
+  statusLabels,
+  canUseSensitiveAdminActions,
+  ta,
+  trailingAction,
+}: {
+  mobile?: boolean
+  menuItems: Array<{
+    id: ConsoleView
+    label: string
+    icon: typeof Server
+  }>
+  activeView: ConsoleView
+  onSelectView: (view: ConsoleView) => void
+  currentUser: NonNullable<AdminSessionInfo["user"]>
+  serviceStatus: {
+    status: "ready" | "degraded" | "offline"
+    storeBackend?: string
+  } | null
+  mailboxCount: number
+  managedDomainsCount: number
+  activeDomainsCount: number
+  pendingDomainsCount: number
+  statusLabels: {
+    active: string
+    pending: string
+  }
+  canUseSensitiveAdminActions: boolean
+  ta: ReturnType<typeof useTranslations>
+  trailingAction?: ReactNode
+}) {
+  const serviceStatusLabel =
+    serviceStatus?.status === "ready"
+      ? ta("serviceStatusGood")
+      : serviceStatus?.status === "offline"
+        ? ta("serviceStatusError")
+        : ta("serviceStatusWarning")
+  const serviceTone =
+    serviceStatus?.status === "ready"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/35 dark:text-emerald-200"
+      : serviceStatus?.status === "offline"
+        ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/35 dark:text-rose-200"
+        : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/35 dark:text-amber-200"
+  const sidebarStats = [
+    {
+      key: "mailboxes",
+      icon: Inbox,
+      label: ta("menuMailboxes"),
+      value: mailboxCount,
+    },
+    {
+      key: "active",
+      icon: Check,
+      label: statusLabels.active,
+      value: activeDomainsCount,
+    },
+    {
+      key: "pending",
+      icon: Globe2,
+      label: statusLabels.pending,
+      value: pendingDomainsCount,
+    },
+  ]
+
+  return (
+    <div
+      className={`flex h-full ${mobile ? "w-full" : "w-72"} flex-col overflow-hidden rounded-[2rem] border border-white/65 bg-white/80 shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/70 dark:shadow-none`}
+    >
+      <div className="border-b border-slate-200/80 px-5 py-5 dark:border-slate-800">
+        <div className="flex items-center justify-between gap-3">
+          <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
+            <Sparkles size={13} />
+            {BRAND_LABEL}
+          </div>
+          {trailingAction}
+        </div>
+
+        <div className="mt-4 rounded-[1.6rem] border border-slate-200/80 bg-gradient-to-br from-slate-50 via-white to-sky-50/70 p-4 shadow-sm dark:border-slate-800 dark:from-slate-900 dark:via-slate-950 dark:to-sky-950/20">
+          <div className="tm-section-label">{ta("serviceStatus")}</div>
+          <div className="mt-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="truncate text-sm font-semibold text-slate-950 dark:text-white">
+                {currentUser.username}
+              </div>
+              <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+                {ta("consolePanelTitle")}
+              </div>
+            </div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
+              <Users2 size={12} />
+              {currentUser.role === "admin" ? ta("roleAdmin") : ta("roleUser")}
+            </div>
+          </div>
+
+          <div className="mt-4 flex flex-wrap gap-2">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold ${serviceTone}`}>
+              <Activity size={12} />
+              {serviceStatusLabel}
+            </div>
+            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
+              <Globe2 size={12} />
+              {ta("managedDomainCount")} {managedDomainsCount}
+            </div>
+          </div>
+
+          {!canUseSensitiveAdminActions && (
+            <div className="mt-3 inline-flex items-center gap-2 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-[11px] font-semibold text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
+              <ShieldAlert size={12} />
+              {ta("insecureContextTitle")}
+            </div>
           )}
-        </main>
+        </div>
+      </div>
+
+      <div className="space-y-4 p-4">
+        <div className="grid grid-cols-3 gap-2">
+          {sidebarStats.map((stat) => {
+            const Icon = stat.icon
+            return (
+              <TooltipProvider key={stat.key}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <div className="rounded-2xl border border-slate-200/80 bg-white/85 p-3 dark:border-slate-800 dark:bg-slate-950/80">
+                      <div className="flex items-center justify-center">
+                        <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400">
+                          <Icon size={15} />
+                        </div>
+                      </div>
+                      <div className="mt-2 text-center text-sm font-semibold text-slate-950 dark:text-white">
+                        {stat.value}
+                      </div>
+                    </div>
+                  </TooltipTrigger>
+                  <TooltipContent side={mobile ? "top" : "right"}>{stat.label}</TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="border-t border-slate-200/80 px-4 pb-4 pt-4 dark:border-slate-800">
+        <div className="mb-3 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+          {ta("inventoryTitle")}
+        </div>
+        <div className={mobile ? "space-y-2" : "grid grid-cols-2 gap-2"}>
+          {menuItems.map((item) => {
+            const Icon = item.icon
+            const active = activeView === item.id
+
+            if (!mobile) {
+              return (
+                <TooltipProvider key={item.id}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant={active ? "flat" : "light"}
+                        color={active ? "primary" : "default"}
+                        aria-label={item.label}
+                        title={item.label}
+                        className={`h-[4.9rem] w-full rounded-2xl px-3 py-2 transition-all duration-150 ${
+                          active
+                            ? "bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
+                            : "bg-white/65 text-slate-700 hover:bg-white/85 dark:bg-slate-950/45 dark:text-slate-300 dark:hover:bg-slate-900/80"
+                        }`}
+                        onPress={() => onSelectView(item.id)}
+                      >
+                        <div className="flex w-full flex-col items-center justify-center gap-1.5">
+                          <div
+                            className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
+                              active
+                                ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
+                                : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+                            }`}
+                          >
+                            <Icon size={18} />
+                          </div>
+                          <span className="line-clamp-1 text-center text-[11px] font-medium leading-4">
+                            {item.label}
+                          </span>
+                        </div>
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent side="right">{item.label}</TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
+              )
+            }
+
+            return (
+              <Button
+                key={item.id}
+                variant={active ? "flat" : "light"}
+                color={active ? "primary" : "default"}
+                className={`w-full justify-start rounded-2xl transition-all duration-150 ${
+                  active
+                    ? "h-12 bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
+                    : "h-11 text-slate-700 hover:bg-white/85 dark:text-slate-300 dark:hover:bg-slate-900/80"
+                }`}
+                startContent={
+                  <div
+                    className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
+                      active
+                        ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
+                        : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+                    }`}
+                  >
+                    <Icon size={18} />
+                  </div>
+                }
+                onPress={() => onSelectView(item.id)}
+              >
+                {item.label}
+              </Button>
+            )
+          })}
+        </div>
       </div>
     </div>
   )
 }
 
-function StatCard({
+function SectionHeader({
+  title,
+  description,
+  action,
+}: {
+  title: string
+  description?: string
+  action?: ReactNode
+}) {
+  return (
+    <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h2 className="text-lg font-medium text-slate-900 dark:text-white">{title}</h2>
+        {description ? (
+          <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+            {description}
+          </p>
+        ) : null}
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function Panel({
+  children,
+  className,
+}: {
+  children: ReactNode
+  className?: string
+}) {
+  return (
+    <div className={`overflow-hidden rounded-[1.25rem] border border-white/60 bg-white/70 shadow-[0_4px_24px_rgba(15,23,42,0.05)] backdrop-blur-md dark:border-slate-800/70 dark:bg-slate-950/60 dark:shadow-none ${className ?? ""}`}>
+      {children}
+    </div>
+  )
+}
+
+function PanelHeader({
+  title,
   icon,
+  action,
+}: {
+  title: string
+  icon?: ReactNode
+  action?: ReactNode
+}) {
+  return (
+    <div className="flex items-center justify-between border-b border-slate-100/80 px-5 py-3.5 dark:border-slate-800/60">
+      <div className="flex items-center gap-2 text-sm font-medium text-slate-700 dark:text-slate-200">
+        {icon}
+        {title}
+      </div>
+      {action}
+    </div>
+  )
+}
+
+function MetricCard({
   label,
   value,
+  detail,
   tone,
+  progressPercent,
+}: {
+  label: string
+  value: string
+  detail?: string
+  tone: "success" | "warning" | "danger" | "neutral"
+  progressPercent?: number
+}) {
+  const valueColor =
+    tone === "success"
+      ? "text-green-700 dark:text-green-400"
+      : tone === "warning"
+        ? "text-amber-600 dark:text-amber-400"
+        : tone === "danger"
+          ? "text-red-600 dark:text-red-400"
+          : "text-slate-900 dark:text-white"
+
+  const accentBorder =
+    tone === "success"
+      ? "border-l-2 border-l-emerald-400 dark:border-l-emerald-500"
+      : tone === "warning"
+        ? "border-l-2 border-l-amber-400 dark:border-l-amber-500"
+        : tone === "danger"
+          ? "border-l-2 border-l-red-400 dark:border-l-red-500"
+          : ""
+  const progressColor =
+    tone === "success"
+      ? "bg-emerald-500"
+      : tone === "warning"
+        ? "bg-amber-500"
+        : tone === "danger"
+          ? "bg-red-500"
+          : "bg-slate-700 dark:bg-slate-300"
+  const progressWidth =
+    typeof progressPercent === "number" && Number.isFinite(progressPercent)
+      ? `${Math.max(0, Math.min(100, progressPercent))}%`
+      : null
+
+  return (
+    <div className={`flex h-full min-h-[132px] flex-col rounded-[1.25rem] border border-white/60 bg-white/65 px-4 py-3.5 shadow-sm backdrop-blur-sm transition-all duration-200 hover:bg-white/80 hover:shadow-md dark:border-slate-800/70 dark:bg-slate-950/55 dark:hover:bg-slate-950/70 ${accentBorder}`}>
+      <div className="text-xs font-medium text-slate-400 dark:text-slate-500">{label}</div>
+      <div className={`mt-1 text-xl font-semibold ${valueColor}`}>{value}</div>
+      <div className="mt-auto pt-4">
+        {detail && (
+          <div className="text-xs text-slate-500 dark:text-slate-400">{detail}</div>
+        )}
+        {progressWidth && (
+          <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-200/80 dark:bg-slate-800">
+            <div
+              className={`h-full rounded-full transition-[width] duration-300 ${progressColor}`}
+              style={{ width: progressWidth }}
+            />
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+
+function StatusBadge({
+  active,
+  activeLabel,
+  pendingLabel,
+}: {
+  active: boolean
+  activeLabel: string
+  pendingLabel: string
+}) {
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${
+        active
+          ? "bg-green-50 text-green-700 dark:bg-green-950/40 dark:text-green-400"
+          : "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400"
+      }`}
+    >
+      {active ? activeLabel : pendingLabel}
+    </span>
+  )
+}
+
+function IconActionButton({
+  icon,
+  label,
+  tooltip,
+  danger,
+  disabled,
+  isLoading,
+  onPress,
+  className,
 }: {
   icon: ReactNode
   label: string
-  value: string
-  tone: "success" | "warning" | "danger" | "neutral"
+  tooltip?: string
+  danger?: boolean
+  disabled?: boolean
+  isLoading?: boolean
+  onPress?: () => void
+  className?: string
 }) {
-  const toneClassName =
-    tone === "success"
-      ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-300"
-      : tone === "warning"
-        ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-300"
-        : tone === "danger"
-          ? "border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
-          : "border-slate-200 bg-white text-slate-700 dark:border-slate-800 dark:bg-slate-950/60 dark:text-slate-200"
+  const button = (
+    <Button
+      isIconOnly
+      size="sm"
+      variant="flat"
+      aria-label={label}
+      title={tooltip ?? label}
+      className={`h-8 w-8 min-w-0 rounded-lg transition-all duration-150 active:scale-[0.97] ${
+        danger
+          ? "bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-950/30 dark:text-red-400 dark:hover:bg-red-950/50"
+          : "bg-slate-100/70 text-slate-600 hover:bg-slate-200/80 dark:bg-slate-800/60 dark:text-slate-300 dark:hover:bg-slate-700/60"
+      } ${className ?? ""}`}
+      isDisabled={disabled}
+      isLoading={isLoading}
+      onPress={onPress}
+    >
+      {icon}
+    </Button>
+  )
+
+  if (!tooltip) {
+    return button
+  }
 
   return (
-    <Card className={`border ${toneClassName}`}>
-      <CardBody className="gap-3 p-4">
-        <div className="flex items-center gap-2 text-sm font-medium">{icon}{label}</div>
-        <div className="text-2xl font-semibold">{value}</div>
-      </CardBody>
-    </Card>
+    <TooltipProvider>
+      <Tooltip>
+        <TooltipTrigger asChild>{button}</TooltipTrigger>
+        <TooltipContent>{tooltip}</TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
-function ConsoleSectionHeader({
-  title,
-  badge,
-  meta,
-}: {
-  title: string
-  badge: string
-  meta: Array<{ label: string; value: string }>
-}) {
-  return (
-    <section className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/82 p-5 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/65">
-      <div className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold tracking-[0.16em] text-sky-700 dark:border-sky-900/70 dark:bg-sky-950/40 dark:text-sky-200">
-            {badge}
-          </div>
-          <div className="mt-3 text-2xl font-semibold text-slate-950 dark:text-white">
-            {title}
-          </div>
-        </div>
-
-        <div className="grid min-w-[16rem] gap-2 sm:grid-cols-3">
-          {meta.map((item) => (
-            <div
-              key={item.label}
-              className="rounded-2xl border border-slate-200/80 bg-slate-50/80 p-3 dark:border-slate-800 dark:bg-slate-900/50"
-            >
-              <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
-                {item.label}
-              </div>
-              <div className="mt-2 text-sm font-semibold text-slate-900 dark:text-white">
-                {item.value}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </section>
-  )
-}
-
-function EmptyPanel({
+function EmptyState({
   title,
   description,
-  compact = false,
+  compact,
 }: {
   title: string
   description?: string
   compact?: boolean
 }) {
   return (
-    <div className={`rounded-[1.5rem] border border-dashed border-slate-300 bg-slate-50/75 text-slate-600 dark:border-slate-700 dark:bg-slate-900/35 dark:text-slate-300 ${compact ? "p-4" : "p-6"}`}>
-      <div className="text-sm font-semibold text-slate-900 dark:text-white">{title}</div>
-      {description && <div className="mt-2 text-sm leading-6">{description}</div>}
+    <div className={`rounded-[1.25rem] border border-dashed border-slate-300/60 text-center dark:border-slate-700/60 ${compact ? "px-4 py-6" : "px-6 py-10"}`}>
+      <div className="text-sm font-medium text-slate-500 dark:text-slate-400">{title}</div>
+      {description ? (
+        <div className="mt-2 text-sm leading-6 text-slate-400 dark:text-slate-500">
+          {description}
+        </div>
+      ) : null}
     </div>
   )
 }
 
-function DomainRecordCard({
+function DnsRecordCard({
   record,
   copyStatePrefix,
   copiedTarget,
@@ -1667,45 +4016,41 @@ function DomainRecordCard({
   const fullRecord = renderRecordValue(record)
 
   return (
-    <div className="rounded-2xl border border-amber-300 bg-white/80 p-4 shadow-sm dark:border-amber-800 dark:bg-slate-950/30">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-xs font-semibold uppercase tracking-wide text-amber-700 dark:text-amber-300">
+    <div className="rounded-[1.25rem] border border-slate-200/60 bg-gradient-to-br from-slate-50/80 to-white p-4 backdrop-blur-sm dark:border-slate-700/50 dark:from-slate-800/40 dark:to-slate-900/30">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">
           {record.kind}
+        </span>
+        <span className="text-[11px] text-slate-400">TTL {record.ttl}</span>
+      </div>
+
+      <div className="mt-3 space-y-2">
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-slate-400">{labels.host}</div>
+          <div className="mt-0.5 break-all font-mono text-xs text-slate-700 dark:text-slate-200">{record.name}</div>
         </div>
-        <div className="rounded-full bg-amber-100 px-2.5 py-1 text-[11px] font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-200">
-          TTL {record.ttl}
+        <div>
+          <div className="text-[11px] font-medium uppercase tracking-wider text-slate-400">{labels.value}</div>
+          <div className="mt-0.5 break-all font-mono text-xs text-slate-700 dark:text-slate-200">{record.value}</div>
         </div>
       </div>
 
-      <div className="mt-4 space-y-3">
-        <div className="rounded-xl border border-slate-200/70 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/50">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
-            {labels.host}
-          </div>
-          <div className="mt-2 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
-            {record.name}
-          </div>
-        </div>
-        <div className="rounded-xl border border-slate-200/70 bg-slate-50/70 p-3 dark:border-slate-800 dark:bg-slate-900/50">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
-            {labels.value}
-          </div>
-          <div className="mt-2 break-all font-mono text-sm text-slate-900 dark:text-slate-100">
-            {record.value}
-          </div>
-        </div>
-      </div>
-
-      <div className="mt-4 flex flex-wrap gap-2">
-        <Button size="sm" variant="flat" onPress={() => onCopy(record.name, "host")}>
-          {copiedTarget === `${copyStatePrefix}-host` ? copiedLabel : labels.host}
-        </Button>
-        <Button size="sm" variant="flat" onPress={() => onCopy(record.value, "value")}>
-          {copiedTarget === `${copyStatePrefix}-value` ? copiedLabel : labels.value}
-        </Button>
-        <Button size="sm" variant="flat" onPress={() => onCopy(fullRecord, "record")}>
-          {copiedTarget === `${copyStatePrefix}-record` ? copiedLabel : labels.copyRecord}
-        </Button>
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        <IconActionButton
+          icon={<Copy size={11} />}
+          label={copiedTarget === `${copyStatePrefix}-host` ? copiedLabel : labels.host}
+          onPress={() => onCopy(record.name, "host")}
+        />
+        <IconActionButton
+          icon={<Copy size={11} />}
+          label={copiedTarget === `${copyStatePrefix}-value` ? copiedLabel : labels.value}
+          onPress={() => onCopy(record.value, "value")}
+        />
+        <IconActionButton
+          icon={<Copy size={11} />}
+          label={copiedTarget === `${copyStatePrefix}-record` ? copiedLabel : labels.copyRecord}
+          onPress={() => onCopy(fullRecord, "record")}
+        />
       </div>
     </div>
   )

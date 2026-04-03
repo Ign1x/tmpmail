@@ -7,10 +7,11 @@ use uuid::Uuid;
 
 use crate::{
     admin_state,
+    cloudflare,
     domain_management::verify_domain_dns,
     error::ApiError,
     error::AppResult,
-    models::{CreateDomainRequest, Domain, DomainDnsRecord, HydraCollection},
+    models::{CloudflareDnsSyncResponse, CreateDomainRequest, Domain, DomainDnsRecord, HydraCollection},
     state::AppState,
 };
 
@@ -18,15 +19,40 @@ pub async fn list_domains(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<HydraCollection<Domain>>> {
-    let mut store = state.store.lock().await;
     let domains = if let Some(user) = admin_state::optional_console_user(&headers, &state).await {
+        let mut store = state.store.lock().await;
         if user.is_admin() {
             store.list_all_domains().await?
         } else {
             store.list_domains_for_owner(user.id).await?
         }
     } else {
-        store.list_domains().await?
+        let (registration_enabled, allowed_suffixes) = {
+            let admin_state = state.admin_state.read().await;
+            (
+                admin_state.is_public_registration_enabled(),
+                admin_state.registration_settings().allowed_email_suffixes,
+            )
+        };
+        if !registration_enabled {
+            Vec::new()
+        } else {
+            let mut store = state.store.lock().await;
+            let domains = store.list_domains().await?;
+            if allowed_suffixes.is_empty() {
+                domains
+            } else {
+                domains
+                    .into_iter()
+                    .filter(|domain| {
+                        allowed_suffixes.iter().any(|suffix| {
+                            domain.domain == *suffix
+                                || domain.domain.ends_with(&format!(".{suffix}"))
+                        })
+                    })
+                    .collect()
+            }
+        }
     };
     let total = domains.len();
 
@@ -109,6 +135,65 @@ pub async fn delete_domain(
     store.delete_domain(domain_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn sync_domain_cloudflare(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<Json<CloudflareDnsSyncResponse>> {
+    let user = admin_state::require_console_access(&headers, &state).await?;
+    let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
+    ensure_domain_access(&state, user.clone(), domain_id).await?;
+    let config = state.effective_runtime_config().await;
+    let api_token = {
+        let admin_state = state.admin_state.read().await;
+        let settings = admin_state.cloudflare_settings(user.id)?;
+        if !settings.enabled {
+            return Err(ApiError::validation(
+                "cloudflare dns automation is disabled for this user",
+            ));
+        }
+
+        admin_state
+            .cloudflare_api_token(user.id)?
+            .ok_or_else(|| ApiError::validation("cloudflare api token is not configured"))?
+    };
+    let (domain_name, records) = {
+        let mut store = state.store.lock().await;
+        let domain = store.domain_verification_context(domain_id).await?;
+        let records = store.domain_dns_records(domain_id, &config).await?;
+        (domain.0, records)
+    };
+
+    let response = cloudflare::sync_domain_records(
+        &api_token,
+        &domain_name,
+        &records,
+        std::time::Duration::from_secs(state.config.http_request_timeout_seconds.max(5) as u64),
+    )
+    .await?;
+
+    {
+        let mut store = state.store.lock().await;
+        store
+            .append_audit_log(
+                "domain.cloudflare.sync",
+                "domain",
+                domain_id.to_string(),
+                Some(user.id.to_string()),
+                format!(
+                    "zone_name={} created_records={} updated_records={} unchanged_records={}",
+                    response.zone_name,
+                    response.created_records,
+                    response.updated_records,
+                    response.unchanged_records,
+                ),
+            )
+            .await?;
+    }
+
+    Ok(Json(response))
 }
 
 async fn ensure_domain_access(

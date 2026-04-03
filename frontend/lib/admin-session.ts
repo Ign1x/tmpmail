@@ -3,12 +3,15 @@
 import { ADMIN_SESSION_COOKIE_KEY } from "@/lib/admin-session-cookie"
 
 export const ADMIN_SESSION_STORAGE_KEY = ADMIN_SESSION_COOKIE_KEY
-const ADMIN_REVEALED_KEY_STORAGE_KEY = "tmpmail-admin-revealed-key"
+const ADMIN_REVEALED_KEYS_STORAGE_KEY = "tmpmail-admin-revealed-keys"
+const ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY = "tmpmail-admin-revealed-key"
 
-type StoredAdminKey = {
+export type StoredAdminKey = {
   apiKey: string
   expiresAt: number
 }
+
+export type StoredAdminKeyMap = Record<string, StoredAdminKey>
 
 function getCookie(name: string): string {
   if (typeof document === "undefined") {
@@ -112,65 +115,193 @@ export function clearStoredAdminSession(): void {
   clearSessionCookie()
 }
 
-export function storeRevealedAdminKey(apiKey: string, ttlMs: number): void {
+function createStoredAdminKey(apiKey: string, ttlMs: number): StoredAdminKey | null {
+  const trimmedApiKey = apiKey.trim()
+  if (!trimmedApiKey) {
+    return null
+  }
+
+  return {
+    apiKey: trimmedApiKey,
+    expiresAt: Date.now() + Math.max(ttlMs, 1_000),
+  }
+}
+
+function normalizeStoredAdminKey(value: unknown): StoredAdminKey | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null
+  }
+
+  const parsed = value as Partial<StoredAdminKey>
+  if (
+    typeof parsed.apiKey !== "string" ||
+    !parsed.apiKey.trim() ||
+    typeof parsed.expiresAt !== "number"
+  ) {
+    return null
+  }
+
+  if (parsed.expiresAt <= Date.now()) {
+    return null
+  }
+
+  return {
+    apiKey: parsed.apiKey.trim(),
+    expiresAt: parsed.expiresAt,
+  }
+}
+
+function writeStoredAdminKey(storageKey: string, payload: StoredAdminKey | null): void {
   if (typeof window === "undefined") {
     return
   }
 
-  const payload: StoredAdminKey = {
-    apiKey,
-    expiresAt: Date.now() + Math.max(ttlMs, 1_000),
-  }
-
   try {
-    sessionStorage.setItem(ADMIN_REVEALED_KEY_STORAGE_KEY, JSON.stringify(payload))
+    if (payload) {
+      sessionStorage.setItem(storageKey, JSON.stringify(payload))
+      return
+    }
+
+    sessionStorage.removeItem(storageKey)
   } catch {}
 }
 
-export function getStoredRevealedAdminKey(): StoredAdminKey | null {
+function readStoredAdminKey(storageKey: string): StoredAdminKey | null {
   if (typeof window === "undefined") {
     return null
   }
 
   try {
-    const raw = sessionStorage.getItem(ADMIN_REVEALED_KEY_STORAGE_KEY)
+    const raw = sessionStorage.getItem(storageKey)
     if (!raw) {
       return null
     }
 
-    const parsed = JSON.parse(raw) as Partial<StoredAdminKey>
-    if (
-      typeof parsed.apiKey !== "string" ||
-      !parsed.apiKey.trim() ||
-      typeof parsed.expiresAt !== "number"
-    ) {
-      sessionStorage.removeItem(ADMIN_REVEALED_KEY_STORAGE_KEY)
+    const parsed = normalizeStoredAdminKey(JSON.parse(raw))
+    if (!parsed) {
+      sessionStorage.removeItem(storageKey)
       return null
     }
 
-    if (parsed.expiresAt <= Date.now()) {
-      sessionStorage.removeItem(ADMIN_REVEALED_KEY_STORAGE_KEY)
-      return null
-    }
-
-    return {
-      apiKey: parsed.apiKey,
-      expiresAt: parsed.expiresAt,
-    }
+    return parsed
   } catch {
     try {
-      sessionStorage.removeItem(ADMIN_REVEALED_KEY_STORAGE_KEY)
+      sessionStorage.removeItem(storageKey)
     } catch {}
     return null
   }
 }
 
-export function clearStoredRevealedAdminKey(): void {
+function writeStoredAdminKeyMap(payload: StoredAdminKeyMap): void {
   if (typeof window === "undefined") {
     return
   }
 
   try {
-    sessionStorage.removeItem(ADMIN_REVEALED_KEY_STORAGE_KEY)
+    if (Object.keys(payload).length > 0) {
+      sessionStorage.setItem(ADMIN_REVEALED_KEYS_STORAGE_KEY, JSON.stringify(payload))
+      return
+    }
+
+    sessionStorage.removeItem(ADMIN_REVEALED_KEYS_STORAGE_KEY)
   } catch {}
+}
+
+export function storeRevealedAdminKey(keyId: string, apiKey: string, ttlMs: number): void {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  const normalizedKeyId = keyId.trim()
+  const payload = createStoredAdminKey(apiKey, ttlMs)
+  if (!normalizedKeyId || !payload) {
+    return
+  }
+
+  writeStoredAdminKeyMap({
+    ...getStoredRevealedAdminKeys(),
+    [normalizedKeyId]: payload,
+  })
+}
+
+export function storePendingRevealedAdminKey(apiKey: string, ttlMs: number): void {
+  writeStoredAdminKey(
+    ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY,
+    createStoredAdminKey(apiKey, ttlMs),
+  )
+}
+
+export function getStoredRevealedAdminKeys(): StoredAdminKeyMap {
+  if (typeof window === "undefined") {
+    return {}
+  }
+
+  try {
+    const raw = sessionStorage.getItem(ADMIN_REVEALED_KEYS_STORAGE_KEY)
+    if (!raw) {
+      return {}
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      sessionStorage.removeItem(ADMIN_REVEALED_KEYS_STORAGE_KEY)
+      return {}
+    }
+
+    const entries = Object.entries(parsed as Record<string, unknown>)
+    const nextPayload: StoredAdminKeyMap = {}
+
+    for (const [keyId, value] of entries) {
+      const normalizedKey = normalizeStoredAdminKey(value)
+      if (normalizedKey) {
+        nextPayload[keyId] = normalizedKey
+      }
+    }
+
+    if (Object.keys(nextPayload).length !== entries.length) {
+      writeStoredAdminKeyMap(nextPayload)
+    }
+
+    return nextPayload
+  } catch {
+    try {
+      sessionStorage.removeItem(ADMIN_REVEALED_KEYS_STORAGE_KEY)
+    } catch {}
+    return {}
+  }
+}
+
+export function getStoredRevealedAdminKey(keyId: string): StoredAdminKey | null {
+  return getStoredRevealedAdminKeys()[keyId.trim()] ?? null
+}
+
+export function getStoredPendingRevealedAdminKey(): StoredAdminKey | null {
+  return readStoredAdminKey(ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY)
+}
+
+export function clearStoredPendingRevealedAdminKey(): void {
+  writeStoredAdminKey(ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY, null)
+}
+
+export function clearStoredRevealedAdminKey(keyId?: string): void {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  const normalizedKeyId = keyId?.trim()
+  if (!normalizedKeyId) {
+    try {
+      sessionStorage.removeItem(ADMIN_REVEALED_KEYS_STORAGE_KEY)
+      sessionStorage.removeItem(ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY)
+    } catch {}
+    return
+  }
+
+  const current = getStoredRevealedAdminKeys()
+  if (!(normalizedKeyId in current)) {
+    return
+  }
+
+  delete current[normalizedKeyId]
+  writeStoredAdminKeyMap(current)
 }

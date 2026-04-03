@@ -25,14 +25,24 @@ pub async fn admin_metrics(
     headers: HeaderMap,
 ) -> AppResult<Json<AdminMetricsResponse>> {
     let _ = admin_state::require_admin_access(&headers, &state).await?;
+    let console_users_total = {
+        let admin_state = state.admin_state.read().await;
+        admin_state.users_total()
+    };
 
     let stats = {
         let mut store = state.store.lock().await;
         store.stats().await?
     };
     let metrics = state.metrics.snapshot();
+    let runtime = state.metrics.runtime_snapshot();
 
-    Ok(Json(AdminMetricsResponse::from_parts(stats, metrics)))
+    Ok(Json(AdminMetricsResponse::from_parts(
+        console_users_total,
+        stats,
+        metrics,
+        runtime,
+    )))
 }
 
 pub async fn admin_audit_logs(
@@ -48,6 +58,19 @@ pub async fn admin_audit_logs(
     };
 
     Ok(Json(AdminAuditLogsResponse { entries }))
+}
+
+pub async fn clear_admin_audit_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<StatusCode> {
+    let _ = admin_state::require_admin_access(&headers, &state).await?;
+    {
+        let mut store = state.store.lock().await;
+        store.clear_audit_logs().await?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn public_update_notice(

@@ -3,8 +3,10 @@
 import {
   createContext,
   useContext,
-  useState,
+  useCallback,
   useEffect,
+  useMemo,
+  useState,
   type ReactNode,
 } from "react";
 import { useTranslations } from "next-intl";
@@ -29,10 +31,14 @@ interface AuthContextType extends AuthState {
     address: string,
     password: string,
     expiresIn?: number,
+    otpCode?: string,
   ) => Promise<void>;
   deleteAccount: (id: string) => Promise<void>;
   switchAccount: (account: Account) => Promise<void>;
   addAccount: (account: Account, token: string, password?: string) => void;
+  syncAccounts: (accounts: Account[]) => void;
+  activateAccount: (account: Account, token: string) => void;
+  clearAccounts: () => void;
   getAccountsForProvider: (providerId: string) => Account[];
   getCurrentProviderAccounts: () => Account[];
 }
@@ -142,7 +148,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const t = useTranslations("auth");
   const [authState, setAuthState] = useState<AuthState>(() => loadInitialAuthState());
 
-  const getProviderIdFromEmail = () => DEFAULT_PROVIDER_ID;
+  const getProviderIdFromEmail = useCallback(() => DEFAULT_PROVIDER_ID, []);
 
   // 监听token刷新事件，同步更新React state
   useEffect(() => {
@@ -202,7 +208,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [authState]);
 
-  const login = async (address: string, password: string) => {
+  const login = useCallback(async (address: string, password: string) => {
     try {
       const { token } = await getToken(address, password);
       const providerId = getProviderIdFromEmail();
@@ -239,25 +245,26 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error("Login failed:", error);
       throw error;
     }
-  };
+  }, [getProviderIdFromEmail]);
 
-  const register = async (
+  const register = useCallback(async (
     address: string,
     password: string,
     expiresIn?: number,
+    otpCode?: string,
   ) => {
     try {
       const providerId = getProviderIdFromEmail();
-      await createAccount(address, password, providerId, expiresIn);
+      await createAccount(address, password, providerId, expiresIn, otpCode);
       // 注册成功后直接登录
       await login(address, password);
     } catch (error) {
       console.error("Registration failed:", error);
       throw error;
     }
-  };
+  }, [getProviderIdFromEmail, login]);
 
-  const logout = () => {
+  const logout = useCallback(() => {
     const { currentAccount, accounts } = authState;
 
     // 没有当前账户时，直接清除认证状态但保留账户列表
@@ -295,78 +302,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
     }
     // 不要删除 localStorage，交给 useEffect 根据 authState 自动清理/保存
-  };
+  }, [authState]);
 
-  const deleteAccount = async (id: string) => {
-    try {
-      const { currentAccount, accounts, token } = authState;
-
-      // 调用后端删除接口，确保账号真的被删除
-      const targetAccount = accounts.find((account) => account.id === id);
-      const providerId = targetAccount?.providerId || DEFAULT_PROVIDER_ID;
-
-      const deleteToken =
-        currentAccount?.id === id ? token : targetAccount?.token;
-
-      if (!deleteToken) {
-        throw new Error(t("missingDeleteCredentials"));
-      }
-
-      await deleteAccountApi(deleteToken, id, providerId);
-
-      const remainingAccounts = accounts.filter((account) => account.id !== id);
-      const isDeletingCurrent = currentAccount?.id === id;
-
-      // 如果删除的不是当前账户，只更新账户列表即可
-      if (!isDeletingCurrent) {
-        setAuthState((prev) => ({
-          ...prev,
-          accounts: remainingAccounts,
-        }));
-        return;
-      }
-
-      // 删除的是当前账户
-      if (remainingAccounts.length === 0) {
-        // 删除的是最后一个账户，回到未登录状态
-        setAuthState({
-          token: null,
-          currentAccount: null,
-          accounts: [],
-          isAuthenticated: false,
-        });
-        return;
-      }
-
-      // 删除的是当前账户，但还有其他账户：
-      // 1）先清除当前无效 token，并保存剩余账户
-      setAuthState((prev) => ({
-        ...prev,
-        token: null,
-        currentAccount: null,
-        accounts: remainingAccounts,
-        isAuthenticated: false,
-      }));
-
-      // 2）优先选择仍然有凭据的账户尝试自动切换
-      const candidate =
-        remainingAccounts.find(
-          (account) => account.token || account.password,
-        ) || remainingAccounts[0];
-
-      try {
-        await switchAccount(candidate);
-      } catch (switchError) {
-        // 自动切换失败：保持未登录状态，但保留 remainingAccounts，方便用户手动登录
-        console.error("Auto switch after delete failed:", switchError);
-      }
-    } catch (error) {
-      console.error("Delete account failed:", error);
-      throw error;
-    }
-  };
-
-  const switchAccount = async (account: Account) => {
+  const switchAccount = useCallback(async (account: Account) => {
     try {
       const accountProviderId = account.providerId || DEFAULT_PROVIDER_ID;
 
@@ -483,9 +421,78 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       console.error("Switch account failed:", error);
       throw error;
     }
-  };
+  }, [t]);
 
-  const addAccount = (account: Account, token: string, password?: string) => {
+  const deleteAccount = useCallback(async (id: string) => {
+    try {
+      const { currentAccount, accounts, token } = authState;
+
+      // 调用后端删除接口，确保账号真的被删除
+      const targetAccount = accounts.find((account) => account.id === id);
+      const providerId = targetAccount?.providerId || DEFAULT_PROVIDER_ID;
+
+      const deleteToken =
+        currentAccount?.id === id ? token : targetAccount?.token;
+
+      if (!deleteToken) {
+        throw new Error(t("missingDeleteCredentials"));
+      }
+
+      await deleteAccountApi(deleteToken, id, providerId);
+
+      const remainingAccounts = accounts.filter((account) => account.id !== id);
+      const isDeletingCurrent = currentAccount?.id === id;
+
+      // 如果删除的不是当前账户，只更新账户列表即可
+      if (!isDeletingCurrent) {
+        setAuthState((prev) => ({
+          ...prev,
+          accounts: remainingAccounts,
+        }));
+        return;
+      }
+
+      // 删除的是当前账户
+      if (remainingAccounts.length === 0) {
+        // 删除的是最后一个账户，回到未登录状态
+        setAuthState({
+          token: null,
+          currentAccount: null,
+          accounts: [],
+          isAuthenticated: false,
+        });
+        return;
+      }
+
+      // 删除的是当前账户，但还有其他账户：
+      // 1）先清除当前无效 token，并保存剩余账户
+      setAuthState((prev) => ({
+        ...prev,
+        token: null,
+        currentAccount: null,
+        accounts: remainingAccounts,
+        isAuthenticated: false,
+      }));
+
+      // 2）优先选择仍然有凭据的账户尝试自动切换
+      const candidate =
+        remainingAccounts.find(
+          (account) => account.token || account.password,
+        ) || remainingAccounts[0];
+
+      try {
+        await switchAccount(candidate);
+      } catch (switchError) {
+        // 自动切换失败：保持未登录状态，但保留 remainingAccounts，方便用户手动登录
+        console.error("Auto switch after delete failed:", switchError);
+      }
+    } catch (error) {
+      console.error("Delete account failed:", error);
+      throw error;
+    }
+  }, [authState, switchAccount, t]);
+
+  const addAccount = useCallback((account: Account, token: string, password?: string) => {
     const providerId = getProviderIdFromEmail();
     const accountWithAuth = {
       ...account,
@@ -500,36 +507,130 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       accounts: dedupeAccounts([...prev.accounts, accountWithAuth]),
       isAuthenticated: true,
     }));
-  };
+  }, [getProviderIdFromEmail]);
+
+  const syncAccounts = useCallback((accounts: Account[]) => {
+    setAuthState((prev) => {
+      const nextAccounts = dedupeAccounts(
+        accounts.map((account) => {
+          const existing =
+            prev.accounts.find((item) => item.id === account.id) ||
+            prev.accounts.find((item) => item.address === account.address)
+
+          return {
+            ...account,
+            password: existing?.password,
+            token: existing?.token,
+            providerId: account.providerId || existing?.providerId || DEFAULT_PROVIDER_ID,
+          }
+        }),
+      )
+
+      const currentAccount = prev.currentAccount
+        ? nextAccounts.find((account) => account.id === prev.currentAccount?.id) || null
+        : null
+      const token = currentAccount?.token || null
+
+      return {
+        token,
+        currentAccount,
+        accounts: nextAccounts,
+        isAuthenticated: Boolean(token && currentAccount),
+      }
+    })
+  }, [])
+
+  const activateAccount = useCallback((account: Account, token: string) => {
+    setAuthState((prev) => {
+      const existingAccount =
+        prev.accounts.find((item) => item.id === account.id) ||
+        prev.accounts.find((item) => item.address === account.address) ||
+        (prev.currentAccount?.id === account.id || prev.currentAccount?.address === account.address
+          ? prev.currentAccount
+          : null)
+
+      const accountWithAuth = {
+        ...existingAccount,
+        ...account,
+        password: account.password ?? existingAccount?.password,
+        token,
+        providerId:
+          account.providerId || existingAccount?.providerId || DEFAULT_PROVIDER_ID,
+      }
+
+      const existingIndex = prev.accounts.findIndex((item) => item.id === account.id)
+      const accounts =
+        existingIndex >= 0
+          ? prev.accounts.map((item, index) => (index === existingIndex ? accountWithAuth : item))
+          : [...prev.accounts, accountWithAuth]
+
+      return {
+        token,
+        currentAccount: accountWithAuth,
+        accounts: dedupeAccounts(accounts),
+        isAuthenticated: true,
+      }
+    })
+  }, [])
+
+  const clearAccounts = useCallback(() => {
+    setAuthState({
+      token: null,
+      currentAccount: null,
+      accounts: [],
+      isAuthenticated: false,
+    })
+  }, [])
 
   // 获取指定提供商的账户
-  const getAccountsForProvider = (providerId: string): Account[] => {
+  const getAccountsForProvider = useCallback((providerId: string): Account[] => {
     return authState.accounts.filter(
       (account) => (account.providerId || DEFAULT_PROVIDER_ID) === providerId,
     );
-  };
+  }, [authState.accounts]);
 
   // 获取当前账户的提供商的所有账户
-  const getCurrentProviderAccounts = (): Account[] => {
+  const getCurrentProviderAccounts = useCallback((): Account[] => {
     if (!authState.currentAccount) return [];
     const currentProviderId =
       authState.currentAccount.providerId || DEFAULT_PROVIDER_ID;
     return getAccountsForProvider(currentProviderId);
-  };
+  }, [authState.currentAccount, getAccountsForProvider]);
+
+  const contextValue = useMemo(
+    () => ({
+      ...authState,
+      login,
+      logout,
+      register,
+      deleteAccount,
+      switchAccount,
+      addAccount,
+      syncAccounts,
+      activateAccount,
+      clearAccounts,
+      getAccountsForProvider,
+      getCurrentProviderAccounts,
+    }),
+    [
+      activateAccount,
+      addAccount,
+      authState,
+      clearAccounts,
+      deleteAccount,
+      getAccountsForProvider,
+      getCurrentProviderAccounts,
+      login,
+      logout,
+      register,
+      switchAccount,
+      syncAccounts,
+    ],
+  );
 
   return (
     <AuthContext.Provider
-      value={{
-        ...authState,
-        login,
-        logout,
-        register,
-        deleteAccount,
-        switchAccount,
-        addAccount,
-        getAccountsForProvider,
-        getCurrentProviderAccounts,
-      }}
+      value={contextValue}
     >
       {children}
     </AuthContext.Provider>

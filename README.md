@@ -28,6 +28,7 @@
    - 再用 `TMPMAIL_MAIL_CNAME_TARGET` 指向该主机的公网 IP 或上游主机名
    - 配置后，托管域名会统一生成 `CNAME mail.<domain> -> <共享收件主机>`、`MX <domain> -> <共享收件主机>`、`TXT <domain> -> <verification token>`
    - 如果保持 `TMPMAIL_MAIL_EXCHANGE_HOST` 为空，系统会回退为每个域名自己的 `mail.<domain>` 路由
+   - 如果 API 镜像构建阶段卡在 `Updating crates.io index`，可设置 `TMPMAIL_CARGO_MIRROR=sparse+https://rsproxy.cn/index/`
 
 3. 启动服务：
 
@@ -131,6 +132,10 @@
   - `TMPMAIL_API_BIND_IP=127.0.0.1`
   - `TMPMAIL_FRONTEND_BIND_IP=0.0.0.0`
   - `TMPMAIL_PUBLIC_HOST` 可选，用于让脚本输出稳定的对外访问地址
+- API Dockerfile 现在会对 Cargo registry、git 索引和 `target/` 使用 BuildKit cache mount：
+  - 首次构建仍需要拉取 Rust 依赖
+  - 后续在同一台机器重复构建时会明显更快
+  - 如果部署网络访问官方 crates.io 很慢，可在 `.env` 里配置 `TMPMAIL_CARGO_MIRROR=sparse+https://rsproxy.cn/index/`
 - 邮件原文和附件下载统一走当前 API：
   - `/messages/{id}/raw`
   - `/messages/{id}/attachments/{attachment_id}`

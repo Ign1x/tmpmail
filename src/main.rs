@@ -3,6 +3,7 @@ mod app;
 mod app_store;
 mod auth;
 mod cleanup_worker;
+mod cloudflare;
 mod config;
 mod domain_management;
 mod domain_worker;
@@ -10,7 +11,10 @@ mod error;
 mod inbucket;
 mod ingest;
 mod metrics;
+mod mailer;
 mod models;
+mod otp;
+mod persistence;
 mod pg_store;
 mod realtime;
 mod routes;
@@ -23,7 +27,8 @@ use tracing_subscriber::{EnvFilter, fmt};
 
 use crate::{
     app::build_router, cleanup_worker::spawn_cleanup_worker, config::Config,
-    domain_worker::spawn_domain_verifier, ingest::spawn_inbucket_poller, state::AppState,
+    domain_worker::spawn_domain_verifier, ingest::spawn_inbucket_poller,
+    metrics::spawn_runtime_sampler, state::AppState,
 };
 
 #[tokio::main]
@@ -42,6 +47,8 @@ async fn main() -> anyhow::Result<()> {
     let listener = TcpListener::bind(&bind_address)
         .await
         .with_context(|| format!("failed to bind {bind_address}"))?;
+
+    spawn_runtime_sampler(app_state.metrics.clone());
 
     tracing::info!(
         address = %bind_address,

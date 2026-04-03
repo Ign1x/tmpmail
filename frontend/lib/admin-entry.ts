@@ -34,10 +34,27 @@ export function getLocalizedAdminPath(locale: string): string {
   return `/${locale}/admin`
 }
 
+export function getLocalizedHomePath(locale: string): string {
+  return `/${locale}`
+}
+
 export function getAdminConsoleEntryPath(): string {
   return `${getAdminEntryPath()}/console`
 }
 
 export function getLocalizedAdminConsolePath(locale: string): string {
   return `/${locale}/admin/console`
+}
+
+export function replaceBrowserPath(targetPath: string): void {
+  if (typeof window === "undefined") {
+    return
+  }
+
+  if (window.location.pathname === targetPath) {
+    window.location.reload()
+    return
+  }
+
+  window.location.replace(targetPath)
 }

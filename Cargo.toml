@@ -11,11 +11,13 @@ axum = { version = "0.8", features = ["json", "macros"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 hickory-resolver = { version = "0.24", features = ["tokio-runtime", "system-config"] }
 jsonwebtoken = "9"
+lettre = { version = "0.11", default-features = false, features = ["builder", "hostname", "smtp-transport", "tokio1-rustls-tls"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros", "migrate"] }
+sysinfo = "0.37"
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

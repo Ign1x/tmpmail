@@ -35,6 +35,13 @@ pub struct Config {
     pub domain_verification_poll_interval_seconds: i64,
     pub cleanup_interval_seconds: i64,
     pub pending_domain_retention_seconds: i64,
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    pub smtp_from_address: Option<String>,
+    pub smtp_from_name: Option<String>,
+    pub smtp_starttls: bool,
 }
 
 impl Default for Config {
@@ -71,6 +78,13 @@ impl Default for Config {
             domain_verification_poll_interval_seconds: 60,
             cleanup_interval_seconds: 300,
             pending_domain_retention_seconds: 24 * 60 * 60,
+            smtp_host: None,
+            smtp_port: 587,
+            smtp_username: None,
+            smtp_password: None,
+            smtp_from_address: None,
+            smtp_from_name: None,
+            smtp_starttls: true,
         }
     }
 }
@@ -220,6 +234,35 @@ impl Config {
             .and_then(|value| value.parse::<i64>().ok())
             .unwrap_or(defaults.pending_domain_retention_seconds)
             .clamp(60, 30 * 24 * 60 * 60);
+        let smtp_host = env::var("TMPMAIL_SMTP_HOST")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let smtp_port = env::var("TMPMAIL_SMTP_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(defaults.smtp_port)
+            .clamp(1, u16::MAX);
+        let smtp_username = env::var("TMPMAIL_SMTP_USERNAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let smtp_password = env::var("TMPMAIL_SMTP_PASSWORD")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let smtp_from_address = env::var("TMPMAIL_SMTP_FROM_ADDRESS")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let smtp_from_name = env::var("TMPMAIL_SMTP_FROM_NAME")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+        let smtp_starttls = env::var("TMPMAIL_SMTP_STARTTLS")
+            .ok()
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(defaults.smtp_starttls);
 
         Self {
             host,
@@ -253,6 +296,13 @@ impl Config {
             domain_verification_poll_interval_seconds,
             cleanup_interval_seconds,
             pending_domain_retention_seconds,
+            smtp_host,
+            smtp_port,
+            smtp_username,
+            smtp_password,
+            smtp_from_address,
+            smtp_from_name,
+            smtp_starttls,
         }
     }
 
@@ -263,6 +313,10 @@ impl Config {
     pub fn effective_mail_exchange_host(&self, domain: &str) -> String {
         self.explicit_mail_exchange_host()
             .unwrap_or_else(|| format!("mail.{domain}"))
+    }
+
+    pub fn configured_mail_exchange_host(&self) -> Option<String> {
+        self.explicit_mail_exchange_host()
     }
 
     pub fn effective_mail_route_target(&self) -> Option<String> {
@@ -362,7 +416,7 @@ fn normalize_txt_prefix(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, normalize_txt_prefix, parse_bool, parse_csv};
+    use super::{normalize_txt_prefix, parse_bool, parse_csv, Config};
 
     #[test]
     fn derives_public_mail_route_from_remote_inbucket_hostname() {

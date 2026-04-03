@@ -3,6 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        TMPMAIL_CARGO_REGISTRY_PROTOCOL: "${TMPMAIL_CARGO_REGISTRY_PROTOCOL:-sparse}"
+        TMPMAIL_CARGO_MIRROR: "${TMPMAIL_CARGO_MIRROR:-}"
+        TMPMAIL_CARGO_NET_RETRY: "${TMPMAIL_CARGO_NET_RETRY:-10}"
+        TMPMAIL_CARGO_HTTP_TIMEOUT: "${TMPMAIL_CARGO_HTTP_TIMEOUT:-120}"
     image: tmpmail-api:local
     container_name: tmpmail-api
     restart: unless-stopped

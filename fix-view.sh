@@ -1,0 +1,1 @@
+sed -i '/const handleViewChange = (nextView: ConsoleView) => {/!b;n;c\    if (view === "settings" \&\& hasUnsavedChanges) {\n      const confirmDiscard = window.confirm(ta("confirmDiscardUnsavedChanges"))\n      if (!confirmDiscard) return\n      setSettingsDraft(systemSettings || DEFAULT_SETTINGS)\n    }\n    setView(nextView)' frontend/components/domain-management-page.tsx

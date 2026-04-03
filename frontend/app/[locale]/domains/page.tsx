@@ -1,7 +1,5 @@
 import { redirect } from "next/navigation"
 
-import { getAdminEntryPath } from "@/lib/admin-entry"
-
 export const dynamic = "force-dynamic"
 
 export default async function DomainsPage({
@@ -9,6 +7,6 @@ export default async function DomainsPage({
 }: {
   params: Promise<{ locale: string }>
 }) {
-  await params
-  redirect(getAdminEntryPath())
+  const { locale } = await params
+  redirect(`/${locale}`)
 }

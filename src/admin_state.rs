@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     net::IpAddr,
     path::{Path, PathBuf},
@@ -6,6 +7,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use rand_core::{OsRng, RngCore};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -14,16 +16,24 @@ use crate::{
     config::Config,
     error::{ApiError, AppResult},
     models::{
-        AdminSystemSettings, ConsoleUser, ConsoleUserRole, LocalizedUpdateNoticeContent,
-        PublicNoticeTone, PublicUpdateNotice, PublicUpdateNoticeSection,
+        AdminAccessKey, AdminEmailOtpSettings, AdminRegistrationSettings, AdminSystemSettings,
+        AdminUserLimitsSettings, ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole,
+        LinuxDoAuthSettings,
+        LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
+        PublicUpdateNoticeSection,
     },
+    persistence::write_file_atomically,
     state::AppState,
 };
 
 const MIN_PASSWORD_LENGTH: usize = 6;
 const MIN_USERNAME_LENGTH: usize = 3;
 const MAX_USERNAME_LENGTH: usize = 32;
+const MAX_EMAIL_IDENTITY_LENGTH: usize = 128;
 const ADMIN_API_KEY_PREFIX: &str = "tmpmail_admin_";
+const LINUX_DO_DEFAULT_AUTHORIZE_URL: &str = "https://connect.linux.do/oauth2/authorize";
+const LINUX_DO_DEFAULT_TOKEN_URL: &str = "https://connect.linux.do/oauth2/token";
+const LINUX_DO_DEFAULT_USERINFO_URL: &str = "https://connect.linux.do/api/user";
 
 #[derive(Clone, Debug)]
 pub struct AuthenticatedConsoleUser {
@@ -50,6 +60,10 @@ struct PersistedSystemSettings {
     mail_route_target: Option<String>,
     #[serde(default)]
     domain_txt_prefix: Option<String>,
+    #[serde(default = "default_registration_settings")]
+    registration_settings: AdminRegistrationSettings,
+    #[serde(default = "default_user_limits_settings")]
+    user_limits: AdminUserLimitsSettings,
     #[serde(default = "default_public_update_notice")]
     update_notice: Option<PublicUpdateNotice>,
 }
@@ -61,7 +75,40 @@ impl Default for PersistedSystemSettings {
             mail_exchange_host: None,
             mail_route_target: None,
             domain_txt_prefix: None,
+            registration_settings: default_registration_settings(),
+            user_limits: default_user_limits_settings(),
             update_notice: default_public_update_notice(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedConsoleAccessKey {
+    id: Uuid,
+    name: String,
+    key_hash: String,
+    key_hint: String,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedCloudflareSettings {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default, skip_serializing)]
+    api_token: Option<String>,
+    #[serde(default = "default_cloudflare_auto_sync_enabled")]
+    auto_sync_enabled: bool,
+}
+
+impl Default for PersistedCloudflareSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_token: None,
+            auto_sync_enabled: default_cloudflare_auto_sync_enabled(),
         }
     }
 }
@@ -78,16 +125,26 @@ struct PersistedConsoleUser {
     #[serde(default)]
     is_disabled: bool,
     #[serde(default)]
+    api_keys: Vec<PersistedConsoleAccessKey>,
+    #[serde(default, skip_serializing)]
     api_key_hash: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     api_key_hint: Option<String>,
     created_at: DateTime<Utc>,
     updated_at: DateTime<Utc>,
     password_updated_at: DateTime<Utc>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     api_key_updated_at: Option<DateTime<Utc>>,
     #[serde(default)]
     last_login_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    linux_do_user_id: Option<String>,
+    #[serde(default)]
+    linux_do_username: Option<String>,
+    #[serde(default)]
+    linux_do_trust_level: Option<u8>,
+    #[serde(default)]
+    cloudflare: PersistedCloudflareSettings,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -152,13 +209,76 @@ impl AdminStateStore {
     }
 
     pub fn system_settings(&self) -> AdminSystemSettings {
+        let registration_settings = self.registration_settings();
+
         AdminSystemSettings {
             system_enabled: self.persisted.system_settings.system_enabled,
             mail_exchange_host: self.persisted.system_settings.mail_exchange_host.clone(),
             mail_route_target: self.persisted.system_settings.mail_route_target.clone(),
             domain_txt_prefix: self.persisted.system_settings.domain_txt_prefix.clone(),
+            registration_settings,
+            user_limits: self.persisted.system_settings.user_limits.clone(),
             update_notice: self.persisted.system_settings.update_notice.clone(),
         }
+    }
+
+    pub fn effective_system_settings(&self, config: &Config) -> AdminSystemSettings {
+        let mut settings = self.system_settings();
+
+        settings.mail_exchange_host = config.configured_mail_exchange_host();
+        settings.mail_route_target = config
+            .effective_mail_route_target()
+            .and_then(|value| normalize_optional_hostname_or_ip_setting_lossy(Some(value.as_str())));
+        settings.domain_txt_prefix = normalize_txt_prefix_setting(Some(config.domain_txt_prefix.as_str()));
+
+        settings
+    }
+
+    pub fn registration_settings(&self) -> AdminRegistrationSettings {
+        let mut settings = self.persisted.system_settings.registration_settings.clone();
+        settings.linux_do.client_secret_configured = settings
+            .linux_do
+            .client_secret
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        settings
+    }
+
+    pub fn is_public_registration_enabled(&self) -> bool {
+        self.persisted
+            .system_settings
+            .registration_settings
+            .open_registration_enabled
+    }
+
+    pub fn default_public_domain_limit(&self) -> u32 {
+        self.persisted
+            .system_settings
+            .user_limits
+            .default_domain_limit
+    }
+
+    pub fn mailbox_limit(&self) -> u32 {
+        self.persisted.system_settings.user_limits.mailbox_limit
+    }
+
+    pub fn api_key_limit(&self) -> u32 {
+        self.persisted.system_settings.user_limits.api_key_limit
+    }
+
+    pub fn is_domain_allowed_for_public_registration(&self, domain: &str) -> bool {
+        let normalized_domain = normalize_hostname_like(domain);
+        let allowed_suffixes = &self
+            .persisted
+            .system_settings
+            .registration_settings
+            .allowed_email_suffixes;
+
+        allowed_suffixes.is_empty()
+            || allowed_suffixes.iter().any(|suffix| {
+                normalized_domain == *suffix || normalized_domain.ends_with(&format!(".{suffix}"))
+            })
     }
 
     pub fn apply_runtime_overrides(&self, config: &mut Config) {
@@ -201,13 +321,24 @@ impl AdminStateStore {
             password_hash: auth::hash_password(password)?,
             domain_limit: u32::MAX,
             is_disabled: false,
-            api_key_hash: Some(auth::hash_password(&api_key)?),
-            api_key_hint: Some(mask_api_key(&api_key)),
+            api_keys: vec![PersistedConsoleAccessKey {
+                id: Uuid::new_v4(),
+                name: "Default Key".to_owned(),
+                key_hash: auth::hash_password(&api_key)?,
+                key_hint: mask_api_key(&api_key),
+                created_at: now,
+            }],
+            api_key_hash: None,
+            api_key_hint: None,
             created_at: now,
             updated_at: now,
             password_updated_at: now,
-            api_key_updated_at: Some(now),
+            api_key_updated_at: None,
             last_login_at: None,
+            linux_do_user_id: None,
+            linux_do_username: None,
+            linux_do_trust_level: None,
+            cloudflare: PersistedCloudflareSettings::default(),
         };
 
         self.persisted.users.push(user.clone());
@@ -308,6 +439,32 @@ impl AdminStateStore {
         domain_limit: u32,
     ) -> AppResult<ConsoleUser> {
         let normalized_username = normalize_username(username)?;
+        self.create_user_with_normalized(normalized_username, password, role, domain_limit)
+    }
+
+    pub fn create_public_user(
+        &mut self,
+        username: &str,
+        password: &str,
+        domain_limit: u32,
+    ) -> AppResult<ConsoleUser> {
+        let normalized_username = normalize_username(username)?;
+        self.ensure_public_registration_identifier_allowed(&normalized_username)?;
+        self.create_user_with_normalized(
+            normalized_username,
+            password,
+            ConsoleUserRole::User,
+            domain_limit,
+        )
+    }
+
+    fn create_user_with_normalized(
+        &mut self,
+        normalized_username: String,
+        password: &str,
+        role: ConsoleUserRole,
+        domain_limit: u32,
+    ) -> AppResult<ConsoleUser> {
         validate_password(password)?;
         self.ensure_username_available(&normalized_username, None)?;
 
@@ -319,6 +476,7 @@ impl AdminStateStore {
             password_hash: auth::hash_password(password)?,
             domain_limit,
             is_disabled: false,
+            api_keys: Vec::new(),
             api_key_hash: None,
             api_key_hint: None,
             created_at: now,
@@ -326,6 +484,10 @@ impl AdminStateStore {
             password_updated_at: now,
             api_key_updated_at: None,
             last_login_at: None,
+            linux_do_user_id: None,
+            linux_do_username: None,
+            linux_do_trust_level: None,
+            cloudflare: PersistedCloudflareSettings::default(),
         };
         let public = user.to_public();
         self.persisted.users.push(user);
@@ -382,6 +544,65 @@ impl AdminStateStore {
         self.save()?;
 
         Ok(public)
+    }
+
+    pub fn authenticate_linux_do(
+        &mut self,
+        linux_do_user_id: &str,
+        linux_do_username: &str,
+        trust_level: u8,
+    ) -> AppResult<AuthenticatedConsoleUser> {
+        let normalized_user_id = normalize_linux_do_user_id(linux_do_user_id)?;
+        let trimmed_linux_do_username = linux_do_username.trim();
+        let now = Utc::now();
+
+        if let Some(user) = self.persisted.users.iter_mut().find(|candidate| {
+            candidate.linux_do_user_id.as_deref() == Some(normalized_user_id.as_str())
+        }) {
+            if user.is_disabled {
+                return Err(ApiError::forbidden("console user is disabled"));
+            }
+
+            user.linux_do_username =
+                normalize_optional_copy(Some(trimmed_linux_do_username.to_owned()));
+            user.linux_do_trust_level = Some(trust_level);
+            user.last_login_at = Some(now);
+            user.updated_at = now;
+            let authenticated = user.to_authenticated();
+            self.persisted.updated_at = Some(now);
+            self.save()?;
+            return Ok(authenticated);
+        }
+
+        let username =
+            self.allocate_linux_do_username(trimmed_linux_do_username, &normalized_user_id)?;
+        let password_hash = auth::hash_password(&generate_linux_do_placeholder_password())?;
+        let user = PersistedConsoleUser {
+            id: Uuid::new_v4(),
+            username,
+            role: ConsoleUserRole::User,
+            password_hash,
+            domain_limit: self.default_public_domain_limit(),
+            is_disabled: false,
+            api_keys: Vec::new(),
+            api_key_hash: None,
+            api_key_hint: None,
+            created_at: now,
+            updated_at: now,
+            password_updated_at: now,
+            api_key_updated_at: None,
+            last_login_at: Some(now),
+            linux_do_user_id: Some(normalized_user_id),
+            linux_do_username: normalize_optional_copy(Some(trimmed_linux_do_username.to_owned())),
+            linux_do_trust_level: Some(trust_level),
+            cloudflare: PersistedCloudflareSettings::default(),
+        };
+        let authenticated = user.to_authenticated();
+        self.persisted.users.push(user);
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok(authenticated)
     }
 
     pub fn delete_user(&mut self, user_id: Uuid) -> AppResult<()> {
@@ -461,11 +682,18 @@ impl AdminStateStore {
         let api_key = generate_admin_api_key();
 
         user.password_hash = auth::hash_password(new_password)?;
-        user.api_key_hash = Some(auth::hash_password(&api_key)?);
-        user.api_key_hint = Some(mask_api_key(&api_key));
+        user.api_keys = vec![PersistedConsoleAccessKey {
+            id: Uuid::new_v4(),
+            name: "Recovery Key".to_owned(),
+            key_hash: auth::hash_password(&api_key)?,
+            key_hint: mask_api_key(&api_key),
+            created_at: now,
+        }];
+        user.api_key_hash = None;
+        user.api_key_hint = None;
         user.updated_at = now;
         user.password_updated_at = now;
-        user.api_key_updated_at = Some(now);
+        user.api_key_updated_at = None;
         user.is_disabled = false;
         let public = user.to_public();
         self.persisted.updated_at = Some(now);
@@ -474,44 +702,120 @@ impl AdminStateStore {
         Ok((public, api_key))
     }
 
-    pub fn get_or_create_api_key(&mut self, user_id: Uuid) -> AppResult<String> {
+    pub fn list_api_keys(&self, user_id: Uuid) -> AppResult<Vec<AdminAccessKey>> {
         let user = self
-            .persisted
-            .users
-            .iter()
-            .find(|user| user.id == user_id)
+            .find_user(user_id)
             .ok_or_else(|| ApiError::not_found("console user not found"))?;
-        if user
-            .api_key_hash
-            .as_deref()
-            .map(|value| !value.trim().is_empty())
-            .unwrap_or(false)
-        {
-            return Err(ApiError::forbidden(
-                "api key is write-only; rotate it to issue a new key",
-            ));
-        }
 
-        self.regenerate_api_key(user_id)
+        let mut keys = user
+            .api_keys
+            .iter()
+            .map(PersistedConsoleAccessKey::to_public)
+            .collect::<Vec<_>>();
+        keys.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        Ok(keys)
     }
 
-    pub fn regenerate_api_key(&mut self, user_id: Uuid) -> AppResult<String> {
+    pub fn create_api_key(
+        &mut self,
+        user_id: Uuid,
+        name: Option<&str>,
+    ) -> AppResult<(AdminAccessKey, String)> {
         let now = Utc::now();
         let api_key = generate_admin_api_key();
+        let api_key_limit = self.api_key_limit() as usize;
         let user = self
             .persisted
             .users
             .iter_mut()
             .find(|user| user.id == user_id)
             .ok_or_else(|| ApiError::not_found("console user not found"))?;
-        user.api_key_hash = Some(auth::hash_password(&api_key)?);
-        user.api_key_hint = Some(mask_api_key(&api_key));
+        if user.api_keys.len() >= api_key_limit {
+            return Err(ApiError::validation(
+                "api key limit has been reached for this user",
+            ));
+        }
+
+        let access_key = PersistedConsoleAccessKey {
+            id: Uuid::new_v4(),
+            name: normalize_api_key_name(name, user.api_keys.len() + 1),
+            key_hash: auth::hash_password(&api_key)?,
+            key_hint: mask_api_key(&api_key),
+            created_at: now,
+        };
+        let public = access_key.to_public();
+        user.api_keys.push(access_key);
         user.updated_at = now;
-        user.api_key_updated_at = Some(now);
         self.persisted.updated_at = Some(now);
         self.save()?;
 
-        Ok(api_key)
+        Ok((public, api_key))
+    }
+
+    pub fn delete_api_key(&mut self, user_id: Uuid, key_id: Uuid) -> AppResult<AdminAccessKey> {
+        let now = Utc::now();
+        let user = self
+            .persisted
+            .users
+            .iter_mut()
+            .find(|user| user.id == user_id)
+            .ok_or_else(|| ApiError::not_found("console user not found"))?;
+        let key_index = user
+            .api_keys
+            .iter()
+            .position(|key| key.id == key_id)
+            .ok_or_else(|| ApiError::not_found("access key not found"))?;
+        let removed = user.api_keys.remove(key_index);
+        user.updated_at = now;
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok(removed.to_public())
+    }
+
+    pub fn cloudflare_settings(&self, user_id: Uuid) -> AppResult<ConsoleCloudflareSettings> {
+        let user = self
+            .find_user(user_id)
+            .ok_or_else(|| ApiError::not_found("console user not found"))?;
+
+        Ok(user.cloudflare.to_public())
+    }
+
+    pub fn cloudflare_api_token(&self, user_id: Uuid) -> AppResult<Option<String>> {
+        let user = self
+            .find_user(user_id)
+            .ok_or_else(|| ApiError::not_found("console user not found"))?;
+
+        Ok(normalize_optional_copy(user.cloudflare.api_token.clone()))
+    }
+
+    pub fn update_cloudflare_settings(
+        &mut self,
+        user_id: Uuid,
+        enabled: bool,
+        api_token: Option<String>,
+        auto_sync_enabled: bool,
+    ) -> AppResult<ConsoleCloudflareSettings> {
+        let now = Utc::now();
+        let user = self
+            .persisted
+            .users
+            .iter_mut()
+            .find(|user| user.id == user_id)
+            .ok_or_else(|| ApiError::not_found("console user not found"))?;
+
+        if let Some(value) = api_token {
+            user.cloudflare.api_token = normalize_optional_copy(Some(value));
+        }
+
+        user.cloudflare.enabled = enabled;
+        user.cloudflare.auto_sync_enabled = auto_sync_enabled;
+        user.updated_at = now;
+        let public_settings = user.cloudflare.to_public();
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok(public_settings)
     }
 
     pub fn authenticate_api_key(&self, token: &str) -> Option<AuthenticatedConsoleUser> {
@@ -521,10 +825,9 @@ impl AdminStateStore {
             .find(|user| {
                 !user.is_disabled
                     && user
-                        .api_key_hash
-                        .as_deref()
-                        .map(|hash| auth::verify_password(token, hash).unwrap_or(false))
-                        .unwrap_or(false)
+                        .api_keys
+                        .iter()
+                        .any(|key| auth::verify_password(token, &key.key_hash).unwrap_or(false))
             })
             .map(PersistedConsoleUser::to_authenticated)
     }
@@ -551,6 +854,8 @@ impl AdminStateStore {
         mail_exchange_host: Option<&str>,
         mail_route_target: Option<&str>,
         domain_txt_prefix: Option<&str>,
+        registration_settings: Option<AdminRegistrationSettings>,
+        user_limits: Option<AdminUserLimitsSettings>,
         update_notice: Option<PublicUpdateNotice>,
     ) -> AppResult<AdminSystemSettings> {
         let now = Utc::now();
@@ -569,6 +874,15 @@ impl AdminStateStore {
             self.persisted.system_settings.domain_txt_prefix =
                 normalize_txt_prefix_setting(Some(value));
         }
+        if let Some(value) = registration_settings {
+            self.persisted.system_settings.registration_settings = normalize_registration_settings(
+                value,
+                Some(&self.persisted.system_settings.registration_settings),
+            )?;
+        }
+        if let Some(value) = user_limits {
+            self.persisted.system_settings.user_limits = normalize_user_limits_settings(value)?;
+        }
         if let Some(value) = update_notice {
             self.persisted.system_settings.update_notice = Some(normalize_update_notice(value)?);
         }
@@ -579,22 +893,11 @@ impl AdminStateStore {
     }
 
     fn save(&self) -> AppResult<()> {
-        let parent = self
-            .path
-            .parent()
-            .ok_or_else(|| ApiError::internal("invalid admin state path"))?;
-
-        fs::create_dir_all(parent).map_err(|error| {
-            ApiError::internal(format!("failed to prepare admin state directory: {error}"))
-        })?;
         let serialized = serde_json::to_string_pretty(&self.persisted).map_err(|error| {
             ApiError::internal(format!("failed to serialize admin state: {error}"))
         })?;
-        let temp_path = self.path.with_extension("json.tmp");
-        fs::write(&temp_path, serialized)
-            .map_err(|error| ApiError::internal(format!("failed to write admin state: {error}")))?;
-        fs::rename(&temp_path, &self.path).map_err(|error| {
-            ApiError::internal(format!("failed to finalize admin state: {error}"))
+        write_file_atomically(&self.path, &serialized).map_err(|error| {
+            ApiError::internal(format!("failed to persist admin state: {error}"))
         })?;
 
         Ok(())
@@ -608,10 +911,74 @@ impl AdminStateStore {
         if self.persisted.users.iter().any(|user| {
             user.username == username && exclude_user_id.map(|id| id != user.id).unwrap_or(true)
         }) {
-            return Err(ApiError::validation("console username already exists"));
+            return Err(ApiError::validation("console account already exists"));
         }
 
         Ok(())
+    }
+
+    fn ensure_public_registration_identifier_allowed(&self, identifier: &str) -> AppResult<()> {
+        let Some((_, domain)) = identifier.rsplit_once('@') else {
+            return Ok(());
+        };
+        let allowed_suffixes = &self
+            .persisted
+            .system_settings
+            .registration_settings
+            .allowed_email_suffixes;
+
+        if allowed_suffixes.is_empty() {
+            return Ok(());
+        }
+
+        if allowed_suffixes.iter().any(|suffix| {
+            domain == suffix
+                || domain
+                    .strip_suffix(suffix)
+                    .is_some_and(|prefix| prefix.ends_with('.'))
+        }) {
+            return Ok(());
+        }
+
+        Err(ApiError::validation(
+            "registration email suffix is not allowed",
+        ))
+    }
+
+    fn allocate_linux_do_username(
+        &self,
+        preferred_username: &str,
+        linux_do_user_id: &str,
+    ) -> AppResult<String> {
+        let mut candidates = Vec::new();
+
+        if let Ok(normalized_preferred) = normalize_username(preferred_username) {
+            candidates.push(normalized_preferred.clone());
+            candidates.push(build_linux_do_username_candidate(
+                &normalized_preferred,
+                linux_do_user_id,
+            ));
+        }
+
+        candidates.push(build_linux_do_username_candidate(
+            "linuxdo",
+            linux_do_user_id,
+        ));
+
+        for candidate in candidates {
+            if self
+                .persisted
+                .users
+                .iter()
+                .all(|user| user.username != candidate)
+            {
+                return Ok(candidate);
+            }
+        }
+
+        Err(ApiError::validation(
+            "unable to allocate a linux.do username for this account",
+        ))
     }
 
     fn find_user(&self, user_id: Uuid) -> Option<&PersistedConsoleUser> {
@@ -619,38 +986,80 @@ impl AdminStateStore {
     }
 
     fn migrate_legacy_single_admin_if_needed(&mut self) -> AppResult<()> {
-        if !self.persisted.users.is_empty() {
-            if self
-                .persisted
-                .api_key
-                .as_deref()
-                .map(|value| !value.trim().is_empty())
-                .unwrap_or(false)
-                && self.persisted.api_key_hash.is_none()
+        let mut changed = false;
+        for user in &mut self.persisted.users {
+            if user.api_keys.is_empty()
+                && let Some(access_key) = build_legacy_access_key(
+                    user.api_key_hash.take(),
+                    None,
+                    user.api_key_hint.take(),
+                    user.api_key_updated_at.unwrap_or(user.updated_at),
+                    "Migrated Key",
+                )?
             {
-                self.persisted.api_key_hash = self.persisted.api_key.clone();
+                user.api_keys.push(access_key);
+                changed = true;
+            }
+
+            if user.api_key_hash.take().is_some() {
+                changed = true;
+            }
+            if user.api_key_hint.take().is_some() {
+                changed = true;
+            }
+            if user.api_key_updated_at.take().is_some() {
+                changed = true;
+            }
+        }
+
+        if !self.persisted.users.is_empty() {
+            if self.persisted.api_key.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_hash.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_hint.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_updated_at.take().is_some() {
+                changed = true;
             }
             self.persisted.api_key = None;
-            return self.save();
+            if changed {
+                self.save()?;
+            }
+            return Ok(());
         }
 
         let Some(password_hash) = self.persisted.password_hash.clone() else {
-            self.persisted.api_key = None;
-            return self.save();
+            if self.persisted.api_key.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_hash.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_hint.take().is_some() {
+                changed = true;
+            }
+            if self.persisted.api_key_updated_at.take().is_some() {
+                changed = true;
+            }
+            if changed {
+                self.save()?;
+            }
+            return Ok(());
         };
         let now = self.persisted.updated_at.unwrap_or_else(Utc::now);
-        let api_key_hash = if let Some(hash) = self.persisted.api_key_hash.clone() {
-            Some(hash)
-        } else if let Some(legacy_plaintext_key) = self.persisted.api_key.clone() {
-            Some(auth::hash_password(&legacy_plaintext_key)?)
-        } else {
-            None
-        };
-        let api_key_hint = self
-            .persisted
-            .api_key_hint
-            .clone()
-            .or_else(|| self.persisted.api_key.as_deref().map(mask_api_key));
+        let api_keys = build_legacy_access_key(
+            self.persisted.api_key_hash.clone(),
+            self.persisted.api_key.clone(),
+            self.persisted.api_key_hint.clone(),
+            self.persisted.api_key_updated_at.unwrap_or(now),
+            "Migrated Key",
+        )?
+        .into_iter()
+        .collect::<Vec<_>>();
 
         self.persisted.users.push(PersistedConsoleUser {
             id: Uuid::new_v4(),
@@ -659,13 +1068,18 @@ impl AdminStateStore {
             password_hash,
             domain_limit: u32::MAX,
             is_disabled: false,
-            api_key_hash,
-            api_key_hint,
+            api_keys,
+            api_key_hash: None,
+            api_key_hint: None,
             created_at: self.persisted.created_at.unwrap_or(now),
             updated_at: now,
             password_updated_at: self.persisted.password_updated_at.unwrap_or(now),
-            api_key_updated_at: self.persisted.api_key_updated_at,
+            api_key_updated_at: None,
             last_login_at: None,
+            linux_do_user_id: None,
+            linux_do_username: None,
+            linux_do_trust_level: None,
+            cloudflare: PersistedCloudflareSettings::default(),
         });
         self.persisted.password_hash = None;
         self.persisted.api_key = None;
@@ -735,6 +1149,60 @@ fn read_persisted_state(path: &Path) -> anyhow::Result<PersistedAdminState> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_cloudflare_auto_sync_enabled() -> bool {
+    true
+}
+
+fn default_registration_settings() -> AdminRegistrationSettings {
+    AdminRegistrationSettings {
+        open_registration_enabled: true,
+        allowed_email_suffixes: Vec::new(),
+        email_otp: default_email_otp_settings(),
+        linux_do: default_linux_do_auth_settings(),
+    }
+}
+
+fn default_user_limits_settings() -> AdminUserLimitsSettings {
+    AdminUserLimitsSettings {
+        default_domain_limit: 3,
+        mailbox_limit: 5,
+        api_key_limit: 5,
+    }
+}
+
+fn default_email_otp_settings() -> AdminEmailOtpSettings {
+    AdminEmailOtpSettings {
+        enabled: false,
+        subject: None,
+        body: None,
+        ttl_seconds: 600,
+        cooldown_seconds: 60,
+    }
+}
+
+fn default_email_otp_subject() -> String {
+    "TmpMail verification code".to_owned()
+}
+
+fn default_email_otp_body() -> String {
+    "Your TmpMail verification code is {{code}}. It expires in {{ttlSeconds}} seconds."
+        .to_owned()
+}
+
+fn default_linux_do_auth_settings() -> LinuxDoAuthSettings {
+    LinuxDoAuthSettings {
+        enabled: false,
+        client_id: None,
+        client_secret: None,
+        client_secret_configured: false,
+        minimum_trust_level: 0,
+        authorize_url: Some(LINUX_DO_DEFAULT_AUTHORIZE_URL.to_owned()),
+        token_url: Some(LINUX_DO_DEFAULT_TOKEN_URL.to_owned()),
+        userinfo_url: Some(LINUX_DO_DEFAULT_USERINFO_URL.to_owned()),
+        callback_url: None,
+    }
 }
 
 fn default_public_update_notice() -> Option<PublicUpdateNotice> {
@@ -911,6 +1379,86 @@ fn normalize_optional_copy(value: Option<String>) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
+fn normalize_registration_settings(
+    value: AdminRegistrationSettings,
+    existing: Option<&AdminRegistrationSettings>,
+) -> AppResult<AdminRegistrationSettings> {
+    let allowed_email_suffixes = value
+        .allowed_email_suffixes
+        .into_iter()
+        .filter_map(normalize_email_suffix_setting)
+        .collect::<AppResult<BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let email_otp_enabled = value.email_otp.enabled;
+    let email_otp = AdminEmailOtpSettings {
+        enabled: email_otp_enabled,
+        subject: normalize_optional_copy(value.email_otp.subject)
+            .or_else(|| email_otp_enabled.then(default_email_otp_subject)),
+        body: normalize_optional_copy(value.email_otp.body)
+            .or_else(|| email_otp_enabled.then(default_email_otp_body)),
+        ttl_seconds: value.email_otp.ttl_seconds.clamp(60, 3_600),
+        cooldown_seconds: value.email_otp.cooldown_seconds.clamp(0, 3_600),
+    };
+
+    let linux_do = LinuxDoAuthSettings {
+        enabled: value.linux_do.enabled,
+        client_id: normalize_optional_copy(value.linux_do.client_id),
+        client_secret: normalize_optional_copy(value.linux_do.client_secret)
+            .or_else(|| existing.and_then(|settings| settings.linux_do.client_secret.clone())),
+        client_secret_configured: false,
+        minimum_trust_level: value.linux_do.minimum_trust_level.min(4),
+        authorize_url: normalize_optional_url_setting(value.linux_do.authorize_url.as_deref())?
+            .or_else(|| existing.and_then(|settings| settings.linux_do.authorize_url.clone()))
+            .or_else(|| Some(LINUX_DO_DEFAULT_AUTHORIZE_URL.to_owned())),
+        token_url: normalize_optional_url_setting(value.linux_do.token_url.as_deref())?
+            .or_else(|| existing.and_then(|settings| settings.linux_do.token_url.clone()))
+            .or_else(|| Some(LINUX_DO_DEFAULT_TOKEN_URL.to_owned())),
+        userinfo_url: normalize_optional_url_setting(value.linux_do.userinfo_url.as_deref())?
+            .or_else(|| existing.and_then(|settings| settings.linux_do.userinfo_url.clone()))
+            .or_else(|| Some(LINUX_DO_DEFAULT_USERINFO_URL.to_owned())),
+        callback_url: normalize_optional_url_setting(value.linux_do.callback_url.as_deref())?
+            .or_else(|| existing.and_then(|settings| settings.linux_do.callback_url.clone())),
+    };
+
+    let mut linux_do = linux_do;
+    linux_do.client_secret_configured = linux_do
+        .client_secret
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+
+    if linux_do.enabled
+        && (linux_do.client_id.is_none()
+            || linux_do.client_secret.is_none()
+            || linux_do.authorize_url.is_none()
+            || linux_do.token_url.is_none()
+            || linux_do.userinfo_url.is_none())
+    {
+        return Err(ApiError::validation(
+            "linux.do auth requires client id, client secret, authorize url, token url, and userinfo url",
+        ));
+    }
+
+    Ok(AdminRegistrationSettings {
+        open_registration_enabled: value.open_registration_enabled,
+        allowed_email_suffixes,
+        email_otp,
+        linux_do,
+    })
+}
+
+fn normalize_user_limits_settings(
+    value: AdminUserLimitsSettings,
+) -> AppResult<AdminUserLimitsSettings> {
+    Ok(AdminUserLimitsSettings {
+        default_domain_limit: value.default_domain_limit.min(500),
+        mailbox_limit: value.mailbox_limit.min(200),
+        api_key_limit: value.api_key_limit.min(50),
+    })
+}
+
 fn validate_password(password: &str) -> AppResult<()> {
     let trimmed = password.trim();
     if trimmed.len() < MIN_PASSWORD_LENGTH {
@@ -922,8 +1470,25 @@ fn validate_password(password: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_linux_do_user_id(value: &str) -> AppResult<String> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(ApiError::validation("linux.do user id is required"));
+    }
+
+    Ok(normalized.to_owned())
+}
+
 fn normalize_username(username: &str) -> AppResult<String> {
     let normalized = username.trim().to_ascii_lowercase();
+    if normalized.contains('@') {
+        return normalize_console_email_identifier(&normalized);
+    }
+
+    normalize_console_username_identifier(&normalized)
+}
+
+fn normalize_console_username_identifier(normalized: &str) -> AppResult<String> {
     if normalized.chars().count() < MIN_USERNAME_LENGTH {
         return Err(ApiError::validation(format!(
             "console username must be at least {MIN_USERNAME_LENGTH} characters"
@@ -944,7 +1509,85 @@ fn normalize_username(username: &str) -> AppResult<String> {
         return Err(ApiError::validation("console username format is invalid"));
     }
 
-    Ok(normalized)
+    Ok(normalized.to_owned())
+}
+
+fn normalize_console_email_identifier(normalized: &str) -> AppResult<String> {
+    if normalized.chars().count() < MIN_USERNAME_LENGTH {
+        return Err(ApiError::validation(format!(
+            "console email must be at least {MIN_USERNAME_LENGTH} characters"
+        )));
+    }
+    if normalized.chars().count() > MAX_EMAIL_IDENTITY_LENGTH {
+        return Err(ApiError::validation(format!(
+            "console email must be at most {MAX_EMAIL_IDENTITY_LENGTH} characters"
+        )));
+    }
+
+    let mut parts = normalized.split('@');
+    let local = parts
+        .next()
+        .ok_or_else(|| ApiError::validation("console email format is invalid"))?;
+    let domain = parts
+        .next()
+        .ok_or_else(|| ApiError::validation("console email format is invalid"))?;
+    if parts.next().is_some() || local.is_empty() || domain.is_empty() {
+        return Err(ApiError::validation("console email format is invalid"));
+    }
+    if local.starts_with('.') || local.ends_with('.') || local.contains("..") {
+        return Err(ApiError::validation("console email format is invalid"));
+    }
+    if local
+        .chars()
+        .any(|ch| !(ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '+')))
+    {
+        return Err(ApiError::validation("console email format is invalid"));
+    }
+
+    let normalized_domain = normalize_optional_hostname_setting(Some(domain))?
+        .ok_or_else(|| ApiError::validation("console email format is invalid"))?;
+
+    Ok(format!("{local}@{normalized_domain}"))
+}
+
+fn build_linux_do_username_candidate(prefix: &str, linux_do_user_id: &str) -> String {
+    let sanitized_prefix = prefix
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-'))
+        .collect::<String>()
+        .trim_matches('-')
+        .trim_matches('_')
+        .trim_matches('.')
+        .to_ascii_lowercase();
+    let prefix = if sanitized_prefix.len() >= MIN_USERNAME_LENGTH {
+        sanitized_prefix
+    } else {
+        "linuxdo".to_owned()
+    };
+    let subject_suffix = linux_do_user_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    let subject_suffix = if subject_suffix.is_empty() {
+        "user".to_owned()
+    } else {
+        subject_suffix
+    };
+    let suffix = if subject_suffix.len() > 12 {
+        subject_suffix[..12].to_owned()
+    } else {
+        subject_suffix
+    };
+
+    let available_prefix_len = MAX_USERNAME_LENGTH.saturating_sub(suffix.len() + 1);
+    let trimmed_prefix = if prefix.len() > available_prefix_len {
+        prefix[..available_prefix_len].to_owned()
+    } else {
+        prefix
+    };
+
+    format!("{trimmed_prefix}-{suffix}")
 }
 
 fn normalize_hostname_like(value: &str) -> String {
@@ -988,6 +1631,45 @@ fn normalize_optional_hostname_or_ip_setting_lossy(value: Option<&str>) -> Optio
         .flatten()
 }
 
+fn normalize_email_suffix_setting(value: String) -> Option<AppResult<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let normalized = trimmed
+        .trim_start_matches('@')
+        .trim_start_matches("*.")
+        .trim()
+        .to_owned();
+
+    Some(
+        normalize_optional_hostname_setting(Some(&normalized)).and_then(|value| {
+            value.ok_or_else(|| ApiError::validation("registration email suffix cannot be empty"))
+        }),
+    )
+}
+
+fn normalize_optional_url_setting(value: Option<&str>) -> AppResult<Option<String>> {
+    let Some(raw) = value.map(str::trim) else {
+        return Ok(None);
+    };
+    if raw.is_empty() {
+        return Ok(None);
+    }
+
+    let url = Url::parse(raw)
+        .map_err(|_| ApiError::validation("linux.do endpoint must be a valid url"))?;
+
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiError::validation(
+            "linux.do endpoint must use http or https",
+        ));
+    }
+
+    Ok(Some(url.to_string()))
+}
+
 fn normalize_txt_prefix_setting(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
@@ -995,10 +1677,60 @@ fn normalize_txt_prefix_setting(value: Option<&str>) -> Option<String> {
         .filter(|value| !value.is_empty() && value != "@")
 }
 
+fn normalize_api_key_name(value: Option<&str>, fallback_index: usize) -> String {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(64).collect::<String>());
+
+    normalized.unwrap_or_else(|| format!("Key {fallback_index}"))
+}
+
+fn build_legacy_access_key(
+    legacy_hash: Option<String>,
+    legacy_plaintext: Option<String>,
+    legacy_hint: Option<String>,
+    created_at: DateTime<Utc>,
+    default_name: &str,
+) -> AppResult<Option<PersistedConsoleAccessKey>> {
+    let key_hash = if let Some(hash) = legacy_hash.filter(|value| !value.trim().is_empty()) {
+        hash
+    } else if let Some(plaintext) = legacy_plaintext
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        auth::hash_password(&plaintext)?
+    } else {
+        return Ok(None);
+    };
+
+    let key_hint = legacy_hint
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| legacy_plaintext.as_deref().map(mask_api_key))
+        .unwrap_or_else(|| "hidden".to_owned());
+
+    Ok(Some(PersistedConsoleAccessKey {
+        id: Uuid::new_v4(),
+        name: default_name.to_owned(),
+        key_hash,
+        key_hint,
+        created_at,
+    }))
+}
+
 fn generate_admin_api_key() -> String {
     let mut bytes = [0_u8; 24];
     OsRng.fill_bytes(&mut bytes);
     format!("{ADMIN_API_KEY_PREFIX}{}", hex_encode(&bytes))
+}
+
+fn generate_linux_do_placeholder_password() -> String {
+    let mut bytes = [0_u8; 24];
+    OsRng.fill_bytes(&mut bytes);
+    bytes
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -1022,6 +1754,31 @@ fn mask_api_key(value: &str) -> String {
     )
 }
 
+impl PersistedConsoleAccessKey {
+    fn to_public(&self) -> AdminAccessKey {
+        AdminAccessKey {
+            id: self.id.to_string(),
+            name: self.name.clone(),
+            masked_key: self.key_hint.clone(),
+            created_at: self.created_at,
+        }
+    }
+}
+
+impl PersistedCloudflareSettings {
+    fn to_public(&self) -> ConsoleCloudflareSettings {
+        ConsoleCloudflareSettings {
+            enabled: self.enabled,
+            api_token_configured: self
+                .api_token
+                .as_deref()
+                .map(|value| !value.trim().is_empty())
+                .unwrap_or(false),
+            auto_sync_enabled: self.auto_sync_enabled,
+        }
+    }
+}
+
 impl PersistedConsoleUser {
     fn to_public(&self) -> ConsoleUser {
         ConsoleUser {
@@ -1030,7 +1787,11 @@ impl PersistedConsoleUser {
             role: self.role.clone(),
             domain_limit: self.domain_limit,
             is_disabled: self.is_disabled,
-            api_key_hint: self.api_key_hint.clone(),
+            api_key_hint: self
+                .api_keys
+                .iter()
+                .max_by_key(|key| key.created_at)
+                .map(|key| key.key_hint.clone()),
             created_at: self.created_at,
             updated_at: self.updated_at,
         }

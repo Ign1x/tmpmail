@@ -60,17 +60,17 @@ export default function UpdateNoticeModal({ isOpen, onClose, notice, locale }: U
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} placement="center" backdrop="blur" size="lg" scrollBehavior="inside">
-      <ModalContent>
-        <ModalHeader className="flex flex-col gap-1">
+      <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
+        <ModalHeader className="flex flex-col gap-1 border-b border-slate-200/80 px-6 pb-5 pt-6 dark:border-slate-800">
           <div className="flex justify-center mb-2">
-            <div className="w-14 h-14 bg-blue-100 dark:bg-blue-900/30 rounded-full flex items-center justify-center">
+            <div className="w-14 h-14 bg-blue-100 dark:bg-blue-900/30 rounded-[1.25rem] flex items-center justify-center">
               <Bell size={28} className="text-blue-600 dark:text-blue-400" />
             </div>
           </div>
           <h2 className="text-xl font-semibold text-center">{content.title}</h2>
           <p className="text-sm text-gray-500 dark:text-gray-400 text-center">{content.dateLabel}</p>
         </ModalHeader>
-        <ModalBody>
+        <ModalBody className="px-6 py-5">
           <div className="space-y-4">
             {content.sections.map((section, index) => {
               const styles = SECTION_STYLES[section.tone]
@@ -78,7 +78,7 @@ export default function UpdateNoticeModal({ isOpen, onClose, notice, locale }: U
               const Icon = styles.Icon
 
               return (
-                <Card key={`${section.tone}-${index}-${section.title}`} className={styles.cardClassName}>
+                <Card key={`${section.tone}-${index}-${section.title}`} className={`${styles.cardClassName} rounded-[1.4rem]`}>
                   <CardBody className="p-4">
                     <div className="flex items-start gap-3">
                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5 ${styles.iconWrapperClassName}`}>
@@ -113,8 +113,8 @@ export default function UpdateNoticeModal({ isOpen, onClose, notice, locale }: U
             )}
           </div>
         </ModalBody>
-        <ModalFooter>
-          <Button color="primary" onPress={onClose} className="w-full">{content.dismissLabel}</Button>
+        <ModalFooter className="border-t border-slate-200/80 px-6 py-5 dark:border-slate-800">
+          <Button color="primary" onPress={onClose} className="w-full rounded-full">{content.dismissLabel}</Button>
         </ModalFooter>
       </ModalContent>
     </Modal>

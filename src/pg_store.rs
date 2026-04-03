@@ -36,6 +36,9 @@ struct DomainRow {
     domain: String,
     is_verified: bool,
     status: String,
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
     owner_user_id: Option<Uuid>,
     verification_token: Option<String>,
     verification_error: Option<String>,
@@ -47,6 +50,10 @@ struct DomainRow {
 struct AccountRow {
     id: Uuid,
     address: String,
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    owner_user_id: Option<Uuid>,
     password_hash: String,
     is_disabled: bool,
     is_deleted: bool,
@@ -57,6 +64,10 @@ struct AccountRow {
 struct AccountWithUsedRow {
     id: Uuid,
     address: String,
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    owner_user_id: Option<Uuid>,
     quota: i64,
     is_disabled: bool,
     is_deleted: bool,
@@ -243,7 +254,10 @@ impl PgStore {
     pub async fn create_domain(
         &self,
         domain: &str,
-        owner_user_id: Option<Uuid>,
+        #[allow(dead_code)]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    owner_user_id: Option<Uuid>,
     ) -> AppResult<Domain> {
         let normalized_domain = normalize_domain(domain)?;
         let now = Utc::now();
@@ -308,74 +322,69 @@ impl PgStore {
             return Err(ApiError::validation("system domains cannot be deleted"));
         }
 
-        let has_mailboxes = sqlx::query_scalar::<_, bool>(
+        let now = Utc::now();
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let accounts = sqlx::query_as::<_, AccountRow>(
             r#"
-            SELECT EXISTS(
-                SELECT 1
-                FROM accounts
-                WHERE is_deleted = FALSE
-                  AND split_part(address, '@', 2) = $1
-            )
+            SELECT id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
+            FROM accounts
+            WHERE is_deleted = FALSE
+              AND split_part(address, '@', 2) = $1
             "#,
         )
         .bind(&row.domain)
-        .fetch_one(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
-        let should_cleanup_mailboxes = !row.is_verified || row.status == "pending_verification";
-        if has_mailboxes && !should_cleanup_mailboxes {
-            return Err(ApiError::validation("domain still has mailbox accounts"));
-        }
+        let deleted_accounts = if accounts.is_empty() {
+            0
+        } else {
+            let account_ids = accounts
+                .iter()
+                .map(|account| account.id)
+                .collect::<Vec<_>>();
 
-        let now = Utc::now();
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let deleted_accounts = if has_mailboxes {
-            let account_ids = sqlx::query_scalar::<_, Uuid>(
+            sqlx::query(
                 r#"
-                SELECT id
-                FROM accounts
-                WHERE is_deleted = FALSE
-                  AND split_part(address, '@', 2) = $1
+                UPDATE messages
+                SET is_deleted = TRUE, updated_at = $2
+                WHERE account_id = ANY($1)
+                  AND is_deleted = FALSE
                 "#,
             )
-            .bind(&row.domain)
-            .fetch_all(&mut *tx)
+            .bind(&account_ids)
+            .bind(now)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
 
-            if !account_ids.is_empty() {
-                sqlx::query(
-                    r#"
-                    UPDATE messages
-                    SET is_deleted = TRUE, updated_at = $2
-                    WHERE account_id = ANY($1)
-                      AND is_deleted = FALSE
-                    "#,
-                )
-                .bind(&account_ids)
-                .bind(now)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
+            sqlx::query(
+                r#"
+                UPDATE accounts
+                SET is_deleted = TRUE, updated_at = $2
+                WHERE id = ANY($1)
+                  AND is_deleted = FALSE
+                "#,
+            )
+            .bind(&account_ids)
+            .bind(now)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
 
-                sqlx::query(
-                    r#"
-                    UPDATE accounts
-                    SET is_deleted = TRUE, updated_at = $2
-                    WHERE id = ANY($1)
-                      AND is_deleted = FALSE
-                    "#,
+            for account in &accounts {
+                insert_audit_log_tx(
+                    &mut tx,
+                    "account.delete",
+                    "account",
+                    account.id.to_string(),
+                    None,
+                    format!("address={}", account.address),
                 )
-                .bind(&account_ids)
-                .bind(now)
-                .execute(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
+                .await?;
             }
 
-            account_ids.len()
-        } else {
-            0
+            accounts.len()
         };
 
         sqlx::query(
@@ -486,6 +495,20 @@ impl PgStore {
         password: &str,
         expires_in: Option<i64>,
     ) -> AppResult<Account> {
+        self.create_account_for_owner(address, password, expires_in, None)
+            .await
+    }
+
+    pub async fn create_account_for_owner(
+        &self,
+        address: &str,
+        password: &str,
+        expires_in: Option<i64>,
+        #[allow(dead_code)]
+    #[allow(dead_code)]
+    #[allow(dead_code)]
+    owner_user_id: Option<Uuid>,
+    ) -> AppResult<Account> {
         let normalized_address = normalize_address(address)?;
         if password.trim().is_empty() {
             return Err(ApiError::validation("password must not be empty"));
@@ -526,14 +549,15 @@ impl PgStore {
         let account_row = sqlx::query_as::<_, AccountRow>(
             r#"
             INSERT INTO accounts (
-                id, address, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
+                id, address, owner_user_id, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
             )
-            VALUES ($1, $2, $3, $4, FALSE, FALSE, $5, $5, $6)
-            RETURNING id, address, password_hash, is_disabled, is_deleted, expires_at
+            VALUES ($1, $2, $3, $4, $5, FALSE, FALSE, $6, $6, $7)
+            RETURNING id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
             "#,
         )
         .bind(account_id)
         .bind(&normalized_address)
+        .bind(owner_user_id)
         .bind(auth::hash_password(password)?)
         .bind(u64_to_i64(DEFAULT_QUOTA_BYTES, "quota")?)
         .bind(now)
@@ -564,7 +588,7 @@ impl PgStore {
         let normalized_address = normalize_address(address)?;
         let account = sqlx::query_as::<_, AccountRow>(
             r#"
-            SELECT id, address, password_hash, is_disabled, is_deleted, expires_at
+            SELECT id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
             FROM accounts
             WHERE address = $1 AND is_deleted = FALSE
             LIMIT 1
@@ -591,6 +615,7 @@ impl PgStore {
             SELECT
                 accounts.id,
                 accounts.address,
+                accounts.owner_user_id,
                 accounts.quota,
                 accounts.is_disabled,
                 accounts.is_deleted,
@@ -614,7 +639,7 @@ impl PgStore {
 
         let active_row = sqlx::query_as::<_, AccountRow>(
             r#"
-            SELECT id, address, password_hash, is_disabled, is_deleted, expires_at
+            SELECT id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
             FROM accounts
             WHERE id = $1
             "#,
@@ -628,6 +653,7 @@ impl PgStore {
         Ok(Account {
             id: row.id.to_string(),
             address: row.address,
+            owner_user_id: row.owner_user_id.map(|value| value.to_string()),
             quota: i64_to_u64(row.quota, "quota")?,
             used: i64_to_u64(row.used, "used")?,
             is_disabled: row.is_disabled,
@@ -637,10 +663,88 @@ impl PgStore {
         })
     }
 
+    pub async fn list_accounts_for_owner(&self, owner_user_id: Uuid) -> AppResult<Vec<Account>> {
+        let rows = sqlx::query_as::<_, AccountWithUsedRow>(
+            r#"
+            SELECT
+                accounts.id,
+                accounts.address,
+                accounts.owner_user_id,
+                accounts.quota,
+                accounts.is_disabled,
+                accounts.is_deleted,
+                accounts.created_at,
+                accounts.updated_at,
+                COALESCE((
+                    SELECT SUM(messages.size)
+                    FROM messages
+                    WHERE messages.account_id = accounts.id
+                      AND messages.is_deleted = FALSE
+                ), 0) AS used
+            FROM accounts
+            WHERE accounts.owner_user_id = $1
+            ORDER BY accounts.address
+            "#,
+        )
+        .bind(owner_user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(Account {
+                    id: row.id.to_string(),
+                    address: row.address,
+                    owner_user_id: row.owner_user_id.map(|value| value.to_string()),
+                    quota: i64_to_u64(row.quota, "quota")?,
+                    used: i64_to_u64(row.used, "used")?,
+                    is_disabled: row.is_disabled,
+                    is_deleted: row.is_deleted,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                })
+            })
+            .collect()
+    }
+
+    pub async fn count_accounts_owned_by(&self, owner_user_id: Uuid) -> AppResult<usize> {
+        let total = sqlx::query_scalar::<_, i64>(
+            r#"
+            SELECT COUNT(*)
+            FROM accounts
+            WHERE owner_user_id = $1
+            "#,
+        )
+        .bind(owner_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        i64_to_usize(total, "owned accounts")
+    }
+
+    pub async fn account_owner_user_id(&self, account_id: Uuid) -> AppResult<Option<Uuid>> {
+        let owner_user_id = sqlx::query_scalar::<_, Option<Uuid>>(
+            r#"
+            SELECT owner_user_id
+            FROM accounts
+            WHERE id = $1
+            "#,
+        )
+        .bind(account_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| ApiError::not_found("account not found"))?;
+
+        Ok(owner_user_id)
+    }
+
     pub async fn delete_account(&self, account_id: Uuid) -> AppResult<()> {
         let account = sqlx::query_as::<_, AccountRow>(
             r#"
-            SELECT id, address, password_hash, is_disabled, is_deleted, expires_at
+            SELECT id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
             FROM accounts
             WHERE id = $1
             "#,
@@ -1199,6 +1303,15 @@ impl PgStore {
         .map_err(map_sqlx_error)
     }
 
+    pub async fn clear_audit_logs(&self) -> AppResult<()> {
+        sqlx::query("DELETE FROM audit_logs")
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
     pub async fn append_audit_log(
         &self,
         action: &str,
@@ -1335,14 +1448,15 @@ impl PgStore {
             sqlx::query(
                 r#"
                 INSERT INTO accounts (
-                    id, address, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
+                    id, address, owner_user_id, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
                 ON CONFLICT (id) DO NOTHING
                 "#,
             )
             .bind(account.id)
             .bind(&account.address)
+            .bind(account.owner_user_id)
             .bind(&account.password_hash)
             .bind(u64_to_i64(account.quota, "quota")?)
             .bind(account.is_disabled)
@@ -1436,7 +1550,7 @@ impl PgStore {
     async fn assert_account_active(&self, account_id: Uuid) -> AppResult<AccountRow> {
         let account = sqlx::query_as::<_, AccountRow>(
             r#"
-            SELECT id, address, password_hash, is_disabled, is_deleted, expires_at
+            SELECT id, address, owner_user_id, password_hash, is_disabled, is_deleted, expires_at
             FROM accounts
             WHERE id = $1
             "#,

@@ -51,9 +51,9 @@ export async function generateMetadata({
       ? `使用 ${BRAND_NAME} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
       : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${BRAND_NAME}.`,
     icons: {
-      icon: "https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png",
-      shortcut: "https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png",
-      apple: "https://img.116119.xyz/img/2025/06/08/547d9cd9739b8e15a51e510342af3fb0.png",
+      icon: "/brand-mark.svg",
+      shortcut: "/brand-mark.svg",
+      apple: "/brand-mark.svg",
     },
     alternates: {
       languages: {

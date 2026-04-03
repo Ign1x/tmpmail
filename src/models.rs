@@ -49,6 +49,8 @@ pub struct DomainDnsRecord {
 pub struct Account {
     pub id: String,
     pub address: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_user_id: Option<String>,
     pub quota: u64,
     pub used: u64,
     pub is_disabled: bool,
@@ -130,6 +132,9 @@ pub struct AdminStatusResponse {
     pub admin_users_total: usize,
     pub is_recovery_enabled: bool,
     pub system_enabled: bool,
+    pub open_registration_enabled: bool,
+    pub linux_do_enabled: bool,
+    pub email_otp_enabled: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,7 +199,72 @@ pub struct PublicUpdateNotice {
     pub en: LocalizedUpdateNoticeContent,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminEmailOtpSettings {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    pub ttl_seconds: u32,
+    pub cooldown_seconds: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxDoAuthSettings {
+    pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    #[serde(default)]
+    pub client_secret_configured: bool,
+    #[serde(default)]
+    pub minimum_trust_level: u8,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorize_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub userinfo_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminRegistrationSettings {
+    pub open_registration_enabled: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_email_suffixes: Vec<String>,
+    pub email_otp: AdminEmailOtpSettings,
+    pub linux_do: LinuxDoAuthSettings,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUserLimitsSettings {
+    pub default_domain_limit: u32,
+    pub mailbox_limit: u32,
+    pub api_key_limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleCloudflareSettings {
+    pub enabled: bool,
+    pub api_token_configured: bool,
+    pub auto_sync_enabled: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminSystemSettings {
     pub system_enabled: bool,
@@ -204,6 +274,8 @@ pub struct AdminSystemSettings {
     pub mail_route_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_txt_prefix: Option<String>,
+    pub registration_settings: AdminRegistrationSettings,
+    pub user_limits: AdminUserLimitsSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_notice: Option<PublicUpdateNotice>,
 }
@@ -232,8 +304,51 @@ pub struct AdminSetupResponse {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdminAccessKey {
+    pub id: String,
+    pub name: String,
+    pub masked_key: String,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminAccessKeyListResponse {
+    pub keys: Vec<AdminAccessKey>,
+    pub limit: u32,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminAccessKeyResponse {
+    pub key: AdminAccessKey,
     pub api_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminCreateAccessKeyRequest {
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxDoAuthorizeRequest {
+    pub redirect_uri: String,
+    pub state: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxDoAuthorizeResponse {
+    pub authorization_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxDoCompleteRequest {
+    pub code: String,
+    pub redirect_uri: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -260,9 +375,20 @@ impl From<crate::store::CleanupReport> for CleanupRunResponse {
     }
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatusSnapshot {
+    pub cpu_usage_percent: f32,
+    pub memory_used_bytes: u64,
+    pub memory_total_bytes: u64,
+    pub memory_usage_percent: f32,
+    pub uptime_seconds: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminMetricsResponse {
+    pub console_users_total: usize,
     pub total_domains: usize,
     pub active_domains: usize,
     pub pending_domains: usize,
@@ -290,14 +416,18 @@ pub struct AdminMetricsResponse {
     pub last_domain_verification_at: Option<DateTime<Utc>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_cleanup_at: Option<DateTime<Utc>>,
+    pub runtime: RuntimeStatusSnapshot,
 }
 
 impl AdminMetricsResponse {
     pub fn from_parts(
+        console_users_total: usize,
         stats: crate::store::StoreStats,
         metrics: crate::metrics::MetricsSnapshot,
+        runtime: RuntimeStatusSnapshot,
     ) -> Self {
         Self {
+            console_users_total,
             total_domains: stats.total_domains,
             active_domains: stats.active_domains,
             pending_domains: stats.pending_domains,
@@ -322,6 +452,7 @@ impl AdminMetricsResponse {
             last_inbucket_sync_at: metrics.last_inbucket_sync_at,
             last_domain_verification_at: metrics.last_domain_verification_at,
             last_cleanup_at: metrics.last_cleanup_at,
+            runtime,
         }
     }
 }
@@ -330,8 +461,24 @@ impl AdminMetricsResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CreateAccountRequest {
     pub address: String,
-    pub password: String,
+    #[serde(default)]
+    pub password: Option<String>,
     pub expires_in: Option<i64>,
+    #[serde(default)]
+    pub otp_code: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendEmailOtpRequest {
+    pub email: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SendEmailOtpResponse {
+    pub expires_in_seconds: u32,
+    pub cooldown_seconds: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +509,18 @@ pub struct AdminBootstrapRequest {
 pub struct AdminLoginRequest {
     pub username: String,
     pub password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleRegisterRequest {
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
+    pub password: String,
+    #[serde(default)]
+    pub otp_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,7 +569,45 @@ pub struct AdminUpdateSystemSettingsRequest {
     pub mail_exchange_host: Option<String>,
     pub mail_route_target: Option<String>,
     pub domain_txt_prefix: Option<String>,
+    pub registration_settings: Option<AdminRegistrationSettings>,
+    pub user_limits: Option<AdminUserLimitsSettings>,
     pub update_notice: Option<PublicUpdateNotice>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateConsoleCloudflareSettingsRequest {
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_token: Option<String>,
+    #[serde(default = "default_true")]
+    pub auto_sync_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestConsoleCloudflareTokenRequest {
+    #[serde(default)]
+    pub api_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareDnsSyncResponse {
+    pub zone_name: String,
+    pub created_records: usize,
+    pub updated_records: usize,
+    pub unchanged_records: usize,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudflareTokenValidationResponse {
+    pub zone_count: usize,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Clone, Debug)]

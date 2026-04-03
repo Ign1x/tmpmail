@@ -1,43 +1,48 @@
-"use client";
+"use client"
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Button } from "@heroui/button";
-import { Avatar } from "@heroui/avatar";
-import { Card, CardBody } from "@heroui/card";
-import { AlertCircle, Clock3, Mail, Paperclip, RefreshCw } from "lucide-react";
-import { formatDistanceToNow } from "date-fns";
-import { enUS, zhCN } from "date-fns/locale";
-import { useLocale, useTranslations } from "next-intl";
-
-import { useAuth } from "@/contexts/auth-context";
-import { useMailStatus } from "@/contexts/mail-status-context";
-import { useHeroUIToast } from "@/hooks/use-heroui-toast";
-import { useMailChecker } from "@/hooks/use-mail-checker";
-import { useIsMobile } from "@/hooks/use-mobile";
-import { getMessages } from "@/lib/api";
-import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config";
-import type { Message } from "@/types";
+import { useCallback, useEffect, useRef, useState } from "react"
+import { Avatar } from "@heroui/avatar"
+import { Button } from "@heroui/button"
+import { Card, CardBody } from "@heroui/card"
+import { AlertCircle, ArrowUpRight, Clock3, FileText, Inbox, Mail, Paperclip, RefreshCw } from "lucide-react"
+import { formatDistanceToNow } from "date-fns"
+import { enUS, zhCN } from "date-fns/locale"
+import { useLocale, useTranslations } from "next-intl"
+import { useAuth } from "@/contexts/auth-context"
+import { useMailStatus } from "@/contexts/mail-status-context"
+import { useHeroUIToast } from "@/hooks/use-heroui-toast"
+import { useMailChecker } from "@/hooks/use-mail-checker"
+import { useIsMobile } from "@/hooks/use-mobile"
+import { getMessages } from "@/lib/api"
+import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import type { Message } from "@/types"
 
 interface MessageListProps {
-  onSelectMessage: (message: Message) => void;
-  refreshKey?: number;
+  onSelectMessage: (message: Message) => void
+  refreshKey?: number
 }
 
-type FetchMode = "initial" | "refresh";
+type FetchMode = "initial" | "refresh"
 
 function LoadingSkeleton({ isMobile }: { isMobile: boolean }) {
   return (
     <div className={`h-full w-full overflow-y-auto ${isMobile ? "p-2" : "p-4"}`}>
-      <div className={`${isMobile ? "mb-4" : "mb-6"} space-y-3`}>
-        <div className="h-8 w-40 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
-        <div className="h-5 w-72 animate-pulse rounded-full bg-slate-100 dark:bg-slate-900/80" />
+      <div className="rounded-[1.8rem] border border-white/70 bg-white/82 p-5 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none">
+        <div className="h-5 w-28 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
+        <div className="mt-3 h-9 w-44 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
+        <div className="mt-3 h-4 w-64 animate-pulse rounded-full bg-slate-100 dark:bg-slate-900/80" />
+        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div key={index} className="h-24 animate-pulse rounded-[1.4rem] bg-slate-100 dark:bg-slate-900/80" />
+          ))}
+        </div>
       </div>
 
-      <div className={`${isMobile ? "space-y-2" : "space-y-4"}`}>
+      <div className={`mt-4 ${isMobile ? "space-y-2" : "space-y-4"}`}>
         {Array.from({ length: 4 }).map((_, index) => (
           <div
             key={index}
-            className="overflow-hidden rounded-3xl border border-slate-200/80 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/60"
+            className="overflow-hidden rounded-[1.7rem] border border-slate-200/80 bg-white/80 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/60"
           >
             <div className="flex items-start gap-4">
               <div className="h-11 w-11 animate-pulse rounded-2xl bg-slate-200 dark:bg-slate-800" />
@@ -55,94 +60,98 @@ function LoadingSkeleton({ isMobile }: { isMobile: boolean }) {
         ))}
       </div>
     </div>
-  );
+  )
 }
 
-export default function MessageList({
-  onSelectMessage,
-  refreshKey,
-}: MessageListProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isInitialLoading, setIsInitialLoading] = useState(true);
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const { token, currentAccount } = useAuth();
-  const { toast } = useHeroUIToast();
-  const { isEnabled, connectionState, lastCheckTime, newMessageCount } =
-    useMailStatus();
-  const isMobile = useIsMobile();
-  const t = useTranslations("messageList");
-  const td = useTranslations("messageDetail");
-  const locale = useLocale();
-  const messageCountRef = useRef(0);
-  const fetchRequestIdRef = useRef(0);
+function formatMessageSize(size: number) {
+  if (size < 1024) {
+    return `${size} B`
+  }
+
+  if (size < 1024 * 1024) {
+    return `${Math.max(1, Math.round(size / 102.4) / 10)} KB`
+  }
+
+  return `${Math.round(size / 1024 / 102.4) / 10} MB`
+}
+
+export default function MessageList({ onSelectMessage, refreshKey }: MessageListProps) {
+  const [messages, setMessages] = useState<Message[]>([])
+  const [isInitialLoading, setIsInitialLoading] = useState(true)
+  const [isRefreshing, setIsRefreshing] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const { token, currentAccount } = useAuth()
+  const { toast } = useHeroUIToast()
+  const { isEnabled, connectionState, lastCheckTime, newMessageCount } = useMailStatus()
+  const isMobile = useIsMobile()
+  const t = useTranslations("messageList")
+  const td = useTranslations("messageDetail")
+  const locale = useLocale()
+  const messageCountRef = useRef(0)
+  const fetchRequestIdRef = useRef(0)
 
   useEffect(() => {
-    messageCountRef.current = messages.length;
-  }, [messages.length]);
+    messageCountRef.current = messages.length
+  }, [messages.length])
 
   useEffect(() => {
     return () => {
-      fetchRequestIdRef.current += 1;
-    };
-  }, []);
+      fetchRequestIdRef.current += 1
+    }
+  }, [])
 
   const fetchInbox = useCallback(
     async (mode: FetchMode) => {
-      const requestId = ++fetchRequestIdRef.current;
+      const requestId = ++fetchRequestIdRef.current
       if (!token || !currentAccount) {
-        setMessages([]);
-        setError(null);
-        setIsInitialLoading(false);
-        setIsRefreshing(false);
-        return;
+        setMessages([])
+        setError(null)
+        setIsInitialLoading(false)
+        setIsRefreshing(false)
+        return
       }
 
       if (mode === "initial") {
-        setIsInitialLoading(true);
+        setIsInitialLoading(true)
       } else {
-        setIsRefreshing(true);
+        setIsRefreshing(true)
       }
 
       try {
-        const providerId = currentAccount.providerId || DEFAULT_PROVIDER_ID;
-        const { messages: fetchedMessages } = await getMessages(
-          token,
-          1,
-          providerId,
-        );
+        const providerId = currentAccount.providerId || DEFAULT_PROVIDER_ID
+        const { messages: fetchedMessages } = await getMessages(token, 1, providerId)
 
         if (fetchRequestIdRef.current !== requestId) {
-          return;
+          return
         }
 
-        setMessages(fetchedMessages || []);
-        setError(null);
+        setMessages(fetchedMessages || [])
+        setError(null)
       } catch (err) {
         if (fetchRequestIdRef.current !== requestId) {
-          return;
+          return
         }
 
-        console.error("Failed to fetch messages:", err);
-        setError(mode === "refresh" ? t("refreshError") : t("fetchError"));
+        console.error("Failed to fetch messages:", err)
+        setError(mode === "refresh" ? t("refreshError") : t("fetchError"))
 
         if (mode === "initial" || messageCountRef.current === 0) {
-          setMessages([]);
+          setMessages([])
         }
       } finally {
         if (fetchRequestIdRef.current !== requestId) {
-          return;
+          return
         }
 
         if (mode === "initial") {
-          setIsInitialLoading(false);
+          setIsInitialLoading(false)
         } else {
-          setIsRefreshing(false);
+          setIsRefreshing(false)
         }
       }
     },
     [currentAccount, t, token],
-  );
+  )
 
   const handleNewMessage = useCallback(
     (message: Message) => {
@@ -152,102 +161,93 @@ export default function MessageList({
         color: "success",
         variant: "flat",
         icon: <Mail size={16} />,
-      });
+      })
     },
     [t, toast],
-  );
+  )
 
   const handleMessagesUpdate = useCallback((nextMessages: Message[]) => {
-    setMessages(nextMessages);
-    setError(null);
-    setIsInitialLoading(false);
-    setIsRefreshing(false);
-  }, []);
+    setMessages(nextMessages)
+    setError(null)
+    setIsInitialLoading(false)
+    setIsRefreshing(false)
+  }, [])
 
   const manualRefresh = useCallback(async () => {
-    await fetchInbox("refresh");
-  }, [fetchInbox]);
+    await fetchInbox("refresh")
+  }, [fetchInbox])
 
   useMailChecker({
     currentMessages: messages,
     onNewMessage: handleNewMessage,
     onMessagesUpdate: handleMessagesUpdate,
     enabled: isEnabled,
-  });
+  })
 
   useEffect(() => {
-    void fetchInbox("initial");
-  }, [fetchInbox, currentAccount?.id]);
+    void fetchInbox("initial")
+  }, [fetchInbox, currentAccount?.id])
 
   useEffect(() => {
     if (refreshKey && refreshKey > 0) {
-      void manualRefresh();
+      void manualRefresh()
     }
-  }, [manualRefresh, refreshKey]);
+  }, [manualRefresh, refreshKey])
 
-  const activityLocale = locale === "en" ? enUS : zhCN;
+  const activityLocale = locale === "en" ? enUS : zhCN
   const relativeLastCheck = lastCheckTime
     ? formatDistanceToNow(lastCheckTime, {
         addSuffix: true,
         locale: activityLocale,
       })
-    : null;
+    : null
 
-  const formatMessageSize = (size: number) => {
-    if (size < 1024) {
-      return `${size} B`;
-    }
+  const unreadCount = messages.filter((message) => !message.seen).length
+  const attachmentCount = messages.filter((message) => message.hasAttachments).length
+  const streamLabel =
+    !isEnabled
+      ? t("streamPaused")
+      : connectionState === "connected"
+        ? t("streamConnected")
+        : connectionState === "reconnecting"
+          ? t("streamReconnecting")
+          : connectionState === "error"
+            ? t("streamError")
+            : t("streamConnecting")
 
-    if (size < 1024 * 1024) {
-      return `${Math.max(1, Math.round(size / 102.4) / 10)} KB`;
-    }
-
-    return `${Math.round(size / 1024 / 102.4) / 10} MB`;
-  };
-
-  const streamLabel = !isEnabled
-    ? t("streamPaused")
-    : connectionState === "connected"
-      ? t("streamConnected")
-      : connectionState === "reconnecting"
-        ? t("streamReconnecting")
+  const streamTone =
+    !isEnabled
+      ? "border-slate-200 bg-white/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-300"
+      : connectionState === "connected"
+        ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"
         : connectionState === "error"
-          ? t("streamError")
-          : t("streamConnecting");
+          ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200"
+          : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
 
   const renderHeader = () => (
-    <div className={`sticky ${isMobile ? "top-0 -mx-2 px-2" : "top-0 -mx-4 px-4"} z-10 mb-4 bg-gradient-to-b from-slate-50/95 via-slate-50/85 to-transparent pb-4 pt-1 backdrop-blur-sm dark:from-slate-950/95 dark:via-slate-950/80`}>
-      <div className="rounded-[1.75rem] border border-white/70 bg-white/85 p-4 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur dark:border-slate-800 dark:bg-slate-950/70 dark:shadow-none sm:p-5">
+    <div className={`sticky ${isMobile ? "top-0 -mx-2 px-2" : "top-0 -mx-4 px-4"} z-10 mb-4 bg-gradient-to-b from-slate-50/95 via-slate-50/90 to-transparent pb-4 pt-1 backdrop-blur-sm dark:from-slate-950/95 dark:via-slate-950/85`}>
+      <div className="tm-glass-panel-strong rounded-[1.9rem] p-4 sm:p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="min-w-0 flex-1">
             {currentAccount && (
-              <div className="inline-flex max-w-full items-center gap-2 rounded-full border border-slate-200 bg-white/75 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-300">
+              <div className="tm-chip-strong max-w-full">
                 <Mail size={12} />
                 <span className="truncate">{currentAccount.address}</span>
               </div>
             )}
-            <div className="mt-3">
-              <h2
-                className={`${isMobile ? "text-xl" : "text-2xl"} font-bold text-slate-900 dark:text-slate-100`}
-              >
+            <div className="mt-4">
+              <h2 className={`${isMobile ? "text-xl" : "text-2xl"} font-bold text-slate-900 dark:text-slate-100`}>
                 {t("inbox")}
               </h2>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                {streamLabel}
-              </p>
+              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{streamLabel}</p>
             </div>
           </div>
 
           <Button
             size="sm"
             variant="flat"
-            className="rounded-full bg-white/80 text-slate-700 shadow-sm backdrop-blur dark:bg-slate-900/80 dark:text-slate-200"
-            startContent={
-              <RefreshCw
-                size={14}
-                className={isRefreshing ? "animate-spin" : undefined}
-              />
-            }
+            className="rounded-full bg-white/82 text-slate-700 shadow-sm backdrop-blur dark:bg-slate-900/82 dark:text-slate-200"
+            startContent={<RefreshCw size={14} className={isRefreshing ? "animate-spin" : undefined} />}
             onPress={() => void manualRefresh()}
             isDisabled={isRefreshing || isInitialLoading}
           >
@@ -256,45 +256,46 @@ export default function MessageList({
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <div
-            className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 font-semibold ${
-              !isEnabled
-                ? "border-slate-200 bg-white/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/80 dark:text-slate-300"
-                : connectionState === "connected"
-                  ? "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/60 dark:bg-emerald-950/40 dark:text-emerald-200"
-                  : connectionState === "error"
-                    ? "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-900/60 dark:bg-rose-950/40 dark:text-rose-200"
-                    : "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-200"
-            }`}
-          >
-            <div
-              className={`h-2.5 w-2.5 rounded-full ${
-                isEnabled ? "bg-current" : "bg-slate-400"
-              }`}
-            />
+          <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 font-semibold ${streamTone}`}>
+            <span className={`h-2.5 w-2.5 rounded-full ${isEnabled ? "bg-current" : "bg-slate-400"}`} />
             {streamLabel}
           </div>
-          <span className="rounded-full bg-slate-100 px-2.5 py-1 font-medium text-slate-600 dark:bg-slate-900 dark:text-slate-300">
-            {t("messageCount")}: {messages.length}
-          </span>
-          {newMessageCount > 0 && (
-            <span className="rounded-full bg-sky-100 px-2.5 py-1 font-medium text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
-              {t("newMessagesBadge", { count: newMessageCount })}
-            </span>
-          )}
           {relativeLastCheck && (
-            <span className="inline-flex items-center gap-1 rounded-full bg-white/80 px-2.5 py-1 font-medium text-slate-500 shadow-sm dark:bg-slate-900/80 dark:text-slate-300">
+            <span className="tm-chip">
               <Clock3 size={12} />
               {t("lastChecked", { time: relativeLastCheck })}
             </span>
           )}
+          {newMessageCount > 0 && (
+            <span className="rounded-full bg-sky-100 px-2.5 py-1 text-xs font-semibold text-sky-700 dark:bg-sky-950/60 dark:text-sky-200">
+              {t("newMessagesBadge", { count: newMessageCount })}
+            </span>
+          )}
+        </div>
+
+        <div className="mt-5 grid gap-3 sm:grid-cols-3">
+          <div className="tm-stat-card">
+            <div className="tm-section-label">{t("messageCount")}</div>
+            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{messages.length}</div>
+            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t("inbox")}</div>
+          </div>
+          <div className="tm-stat-card">
+            <div className="tm-section-label">{t("new")}</div>
+            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{unreadCount}</div>
+            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t("newEmail")}</div>
+          </div>
+          <div className="tm-stat-card">
+            <div className="tm-section-label">{td("attachments")}</div>
+            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{attachmentCount}</div>
+            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{td("attachments")}</div>
+          </div>
         </div>
       </div>
     </div>
-  );
+  )
 
   if (isInitialLoading) {
-    return <LoadingSkeleton isMobile={isMobile} />;
+    return <LoadingSkeleton isMobile={isMobile} />
   }
 
   if (error && messages.length === 0) {
@@ -306,12 +307,8 @@ export default function MessageList({
             <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
               <AlertCircle className="h-6 w-6" />
             </div>
-            <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
-              {error}
-            </p>
-            <p className="mt-2 text-sm leading-6 text-amber-800 dark:text-amber-200">
-              {t("errorHelp")}
-            </p>
+            <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">{error}</p>
+            <p className="mt-2 text-sm leading-6 text-amber-800 dark:text-amber-200">{t("errorHelp")}</p>
             <Button
               className="mt-5 rounded-full"
               color="warning"
@@ -325,26 +322,31 @@ export default function MessageList({
           </div>
         </div>
       </div>
-    );
+    )
   }
 
   if (messages.length === 0) {
     return (
       <div className={`h-full overflow-y-auto ${isMobile ? "p-2" : "p-4"}`}>
         {renderHeader()}
-        <div className="flex min-h-[18rem] flex-col items-center justify-center rounded-[1.75rem] border border-dashed border-slate-300 bg-white/60 p-6 text-center backdrop-blur dark:border-slate-800 dark:bg-slate-950/40">
-          <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-900 dark:text-slate-500">
-            <Mail className="h-10 w-10" />
+        <div className="tm-glass-panel flex min-h-[18rem] flex-col items-center justify-center rounded-[1.75rem] p-6 text-center">
+          <div className="mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-slate-100 text-slate-400 dark:bg-slate-900 dark:text-slate-500">
+            <Inbox className="h-10 w-10" />
           </div>
-          <h3 className="text-xl font-semibold text-slate-800 dark:text-slate-200">
-            {t("emptyTitle")}
-          </h3>
-          <p className="mt-2 max-w-md text-sm leading-7 text-slate-500 dark:text-slate-400">
-            {t("emptyDesc")}
-          </p>
+          <h3 className="text-xl font-semibold text-slate-800 dark:text-slate-200">{t("emptyTitle")}</h3>
+          <p className="mt-2 max-w-md text-sm leading-7 text-slate-500 dark:text-slate-400">{t("emptyDesc")}</p>
+          <Button
+            className="mt-5 rounded-full"
+            variant="flat"
+            startContent={<RefreshCw size={14} />}
+            onPress={() => void manualRefresh()}
+            isLoading={isRefreshing}
+          >
+            {t("retry")}
+          </Button>
         </div>
       </div>
-    );
+    )
   }
 
   return (
@@ -352,7 +354,7 @@ export default function MessageList({
       {renderHeader()}
 
       {error && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-200 bg-amber-50/80 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-[1.4rem] border border-amber-200 bg-amber-50/85 px-4 py-3 text-sm text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/30 dark:text-amber-100">
           <div className="flex items-center gap-2">
             <AlertCircle size={16} />
             <span>{error}</span>
@@ -371,124 +373,128 @@ export default function MessageList({
       )}
 
       <div className={`${isMobile ? "space-y-2" : "space-y-4"} w-full`}>
-        {messages.map((message) => (
-          <Card
-            key={message.id}
-            isPressable
-            onPress={() => onSelectMessage(message)}
-            className={`w-full cursor-pointer overflow-hidden transition-all duration-300 ${
-              !message.seen
-                ? "border-l-4 border-l-sky-500 border-t border-r border-b border-sky-200 bg-gradient-to-r from-sky-50/90 to-white shadow-lg hover:translate-y-[-1px] hover:shadow-xl dark:border-sky-900 dark:from-sky-950/40 dark:to-slate-950/80"
-                : "border border-slate-200 bg-white/85 shadow-sm hover:translate-y-[-1px] hover:border-slate-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-950/60 dark:hover:border-slate-700"
-            }`}
-          >
-            <CardBody className={`${isMobile ? "p-3" : "p-5"} w-full`}>
-              <div
-                className={`flex items-start ${isMobile ? "space-x-3" : "space-x-4"} w-full`}
-              >
-                <div className="relative">
-                  <Avatar
-                    name={
-                      message.from.name
-                        ? message.from.name.charAt(0).toUpperCase()
-                        : message.from.address.charAt(0).toUpperCase()
-                    }
-                    className={`flex-shrink-0 font-semibold ${
-                      !message.seen
-                        ? "bg-sky-500 text-white shadow-lg"
-                        : "bg-slate-300 text-slate-700 dark:bg-slate-700 dark:text-slate-200"
-                    }`}
-                    size={isMobile ? "md" : "lg"}
-                  />
-                  {!message.seen && (
-                    <div
-                      className={`absolute -top-1 -right-1 ${isMobile ? "w-2.5 h-2.5" : "w-3 h-3"} rounded-full border-2 border-white bg-sky-500 dark:border-slate-950`}
+        {messages.map((message) => {
+          const senderName = message.from.name || message.from.address
+          const isUnread = !message.seen
+
+          return (
+            <Card
+              key={message.id}
+              isPressable
+              onPress={() => onSelectMessage(message)}
+              aria-label={`${senderName} ${message.subject}`}
+              className={`group w-full cursor-pointer overflow-hidden rounded-[1.7rem] transition-all duration-200 ${
+                isUnread
+                  ? "border border-sky-200 bg-gradient-to-r from-sky-50/95 via-white to-white shadow-[0_18px_50px_rgba(14,165,233,0.12)] hover:-translate-y-0.5 hover:shadow-[0_24px_64px_rgba(14,165,233,0.18)] dark:border-sky-900/60 dark:from-sky-950/30 dark:via-slate-950 dark:to-slate-950"
+                  : "border border-slate-200 bg-white/88 shadow-sm hover:-translate-y-0.5 hover:border-slate-300 hover:shadow-md dark:border-slate-800 dark:bg-slate-950/62 dark:hover:border-slate-700"
+              }`}
+            >
+              <CardBody className={`${isMobile ? "p-3" : "p-5"} relative w-full`}>
+                {isUnread && <div className="absolute inset-y-4 left-0 w-1 rounded-full bg-sky-500" />}
+
+                <div className={`flex items-start ${isMobile ? "gap-3" : "gap-4"} w-full`}>
+                  <div className="relative pt-0.5">
+                    <Avatar
+                      name={senderName.charAt(0).toUpperCase()}
+                      className={`flex-shrink-0 font-semibold ${
+                        isUnread
+                          ? "bg-sky-500 text-white shadow-lg"
+                          : "bg-slate-300 text-slate-700 dark:bg-slate-700 dark:text-slate-200"
+                      }`}
+                      size={isMobile ? "md" : "lg"}
                     />
-                  )}
-                </div>
-
-                <div className="min-w-0 flex-1">
-                  <div
-                    className={`flex items-start justify-between ${isMobile ? "mb-1" : "mb-2"}`}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <h3
-                        className={`${isMobile ? "text-sm" : "text-base"} truncate ${
-                          !message.seen
-                            ? "font-bold text-slate-900 dark:text-white"
-                            : "font-semibold text-slate-700 dark:text-slate-300"
-                        }`}
-                      >
-                        {message.from.name || message.from.address}
-                      </h3>
-                      {message.from.name &&
-                        message.from.address &&
-                        message.from.address !== message.from.name && (
-                          <p className="mt-0.5 truncate text-[11px] text-slate-500 dark:text-slate-400">
-                            {message.from.address}
-                          </p>
-                        )}
-                      <p
-                        className={`${isMobile ? "text-xs" : "text-sm"} truncate ${isMobile ? "mt-0.5" : "mt-1"} ${
-                          !message.seen
-                            ? "font-semibold text-slate-800 dark:text-slate-200"
-                            : "font-medium text-slate-600 dark:text-slate-400"
-                        }`}
-                      >
-                        {message.subject}
-                      </p>
-                    </div>
-
-                    <div
-                      className={`ml-3 flex flex-col items-end ${isMobile ? "gap-1" : "gap-1.5"}`}
-                    >
-                      <span
-                        className={`${isMobile ? "text-xs" : "text-xs"} flex-shrink-0 ${
-                          !message.seen
-                            ? "font-medium text-sky-600 dark:text-sky-300"
-                            : "text-slate-500 dark:text-slate-400"
-                        }`}
-                      >
-                        {formatDistanceToNow(new Date(message.createdAt), {
-                          addSuffix: true,
-                          locale: activityLocale,
-                        })}
-                      </span>
-                      {!message.seen && (
-                        <div className="rounded-full bg-sky-500 px-2 py-0.5 text-xs font-medium text-white">
-                          {t("new")}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <p
-                    className={`${isMobile ? "mt-2 text-xs" : "mt-3 text-sm"} line-clamp-2 leading-relaxed ${
-                      !message.seen
-                        ? "text-slate-700 dark:text-slate-300"
-                        : "text-slate-500 dark:text-slate-400"
-                    }`}
-                  >
-                    {message.intro}
-                  </p>
-
-                  <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                    {message.hasAttachments && (
-                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-900">
-                        <Paperclip size={11} />
-                        {td("attachments")}
-                      </span>
+                    {isUnread && (
+                      <div className="absolute -right-1 -top-1 h-3 w-3 rounded-full border-2 border-white bg-sky-500 dark:border-slate-950" />
                     )}
-                    <span className="rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-900">
-                      {formatMessageSize(message.size)}
-                    </span>
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <h3
+                            className={`${isMobile ? "text-sm" : "text-base"} truncate ${
+                              isUnread
+                                ? "font-bold text-slate-900 dark:text-white"
+                                : "font-semibold text-slate-700 dark:text-slate-300"
+                            }`}
+                          >
+                            {senderName}
+                          </h3>
+                          {isUnread && (
+                            <span className="rounded-full bg-sky-500 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-white">
+                              {t("new")}
+                            </span>
+                          )}
+                        </div>
+                        {message.from.name &&
+                          message.from.address &&
+                          message.from.address !== message.from.name && (
+                            <p className="mt-1 truncate text-[11px] text-slate-500 dark:text-slate-400">
+                              {message.from.address}
+                            </p>
+                          )}
+                      </div>
+
+                      <div className="flex shrink-0 items-center gap-2">
+                        <span
+                          className={`text-xs ${
+                            isUnread
+                              ? "font-medium text-sky-600 dark:text-sky-300"
+                              : "text-slate-500 dark:text-slate-400"
+                          }`}
+                        >
+                          {formatDistanceToNow(new Date(message.createdAt), {
+                            addSuffix: true,
+                            locale: activityLocale,
+                          })}
+                        </span>
+                        <ArrowUpRight
+                          size={16}
+                          className="text-slate-300 transition-transform duration-200 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-slate-500 dark:text-slate-600 dark:group-hover:text-slate-300"
+                        />
+                      </div>
+                    </div>
+
+                    <p
+                      className={`${isMobile ? "mt-2 text-sm" : "mt-2 text-base"} truncate ${
+                        isUnread
+                          ? "font-semibold text-slate-800 dark:text-slate-200"
+                          : "font-medium text-slate-700 dark:text-slate-300"
+                      }`}
+                    >
+                      {message.subject}
+                    </p>
+
+                    <p
+                      className={`${isMobile ? "mt-2 text-xs" : "mt-3 text-sm"} line-clamp-2 leading-relaxed ${
+                        isUnread
+                          ? "text-slate-700 dark:text-slate-300"
+                          : "text-slate-500 dark:text-slate-400"
+                      }`}
+                    >
+                      {message.intro}
+                    </p>
+
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                      {message.hasAttachments && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-900">
+                          <Paperclip size={11} />
+                          {td("attachments")}
+                        </span>
+                      )}
+                      <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 dark:bg-slate-900">
+                        <FileText size={11} />
+                        {formatMessageSize(message.size)}
+                      </span>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </CardBody>
-          </Card>
-        ))}
+              </CardBody>
+            </Card>
+          )
+        })}
       </div>
     </div>
-  );
+  )
 }

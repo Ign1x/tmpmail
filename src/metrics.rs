@@ -1,7 +1,17 @@
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::{
+    sync::{
+        Arc, RwLock,
+        atomic::{AtomicI64, AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
+use sysinfo::{CpuRefreshKind, MemoryRefreshKind, RefreshKind, System};
+use tokio::time::sleep;
+
+use crate::models::RuntimeStatusSnapshot;
 
 #[derive(Default)]
 pub struct AppMetrics {
@@ -20,6 +30,7 @@ pub struct AppMetrics {
     last_inbucket_sync_at_unix: AtomicI64,
     last_domain_verification_at_unix: AtomicI64,
     last_cleanup_at_unix: AtomicI64,
+    runtime: RwLock<RuntimeStatusSnapshot>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -94,7 +105,11 @@ impl AppMetrics {
     }
 
     pub fn close_sse_connection(&self) {
-        self.sse_connections_active.fetch_sub(1, Ordering::Relaxed);
+        let _ = self.sse_connections_active.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.saturating_sub(1)),
+        );
     }
 
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -134,9 +149,57 @@ impl AppMetrics {
         }
     }
 
+    pub fn record_runtime_snapshot(&self, snapshot: RuntimeStatusSnapshot) {
+        if let Ok(mut current) = self.runtime.write() {
+            *current = snapshot;
+        }
+    }
+
+    pub fn runtime_snapshot(&self) -> RuntimeStatusSnapshot {
+        self.runtime
+            .read()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or_default()
+    }
+
     fn set_timestamp(&self, cell: &AtomicI64) {
         cell.store(Utc::now().timestamp(), Ordering::Relaxed);
     }
+}
+
+pub fn spawn_runtime_sampler(metrics: Arc<AppMetrics>) {
+    tokio::spawn(async move {
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+
+        system.refresh_memory();
+        system.refresh_cpu_usage();
+
+        loop {
+            sleep(Duration::from_secs(2)).await;
+            system.refresh_memory();
+            system.refresh_cpu_usage();
+
+            let memory_total = system.total_memory();
+            let memory_used = system.used_memory();
+            let memory_usage_percent = if memory_total == 0 {
+                0.0
+            } else {
+                ((memory_used as f64 / memory_total as f64) * 100.0) as f32
+            };
+
+            metrics.record_runtime_snapshot(RuntimeStatusSnapshot {
+                cpu_usage_percent: round_one_decimal(system.global_cpu_usage()),
+                memory_used_bytes: memory_used,
+                memory_total_bytes: memory_total,
+                memory_usage_percent: round_one_decimal(memory_usage_percent),
+                uptime_seconds: System::uptime(),
+            });
+        }
+    });
 }
 
 fn unix_to_datetime(timestamp: i64) -> Option<DateTime<Utc>> {
@@ -145,4 +208,36 @@ fn unix_to_datetime(timestamp: i64) -> Option<DateTime<Utc>> {
     }
 
     DateTime::from_timestamp(timestamp, 0)
+}
+
+fn round_one_decimal(value: f32) -> f32 {
+    (value * 10.0).round() / 10.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppMetrics;
+
+    #[test]
+    fn close_sse_connection_saturates_at_zero() {
+        let metrics = AppMetrics::default();
+
+        metrics.close_sse_connection();
+        metrics.close_sse_connection();
+
+        assert_eq!(metrics.snapshot().sse_connections_active, 0);
+    }
+
+    #[test]
+    fn close_sse_connection_balances_open_count_without_underflow() {
+        let metrics = AppMetrics::default();
+
+        metrics.open_sse_connection();
+        metrics.open_sse_connection();
+        metrics.close_sse_connection();
+        metrics.close_sse_connection();
+        metrics.close_sse_connection();
+
+        assert_eq!(metrics.snapshot().sse_connections_active, 0);
+    }
 }
