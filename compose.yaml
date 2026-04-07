@@ -1,4 +1,24 @@
 services:
+  secrets-init:
+    image: busybox:1.37.0
+    container_name: tmpmail-secrets-init
+    restart: "no"
+    env_file:
+      - .env
+    command: ["/bin/sh", "/usr/local/bin/compose-init-secrets.sh"]
+    network_mode: none
+    volumes:
+      - ./scripts/compose-init-secrets.sh:/usr/local/bin/compose-init-secrets.sh:ro
+      - ./data/runtime-secrets:/run/tmpmail-secrets
+      - ./data/postgres:/var/lib/postgresql/data:ro
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
   api:
     build:
       context: .
@@ -15,6 +35,8 @@ services:
     env_file:
       - .env
     depends_on:
+      secrets-init:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       inbucket:
@@ -23,10 +45,14 @@ services:
       - public
       - backend
     environment:
+      TMPMAIL_JWT_SECRET_FILE: "/run/tmpmail-secrets/jwt_secret"
+      TMPMAIL_POSTGRES_PASSWORD_FILE: "/run/tmpmail-secrets/postgres_password"
       TMPMAIL_INGEST_MODE: "remote-inbucket"
       TMPMAIL_INBUCKET_BASE_URL: "http://inbucket:9000"
       TMPMAIL_INBUCKET_USERNAME: ""
       TMPMAIL_INBUCKET_PASSWORD: ""
+    volumes:
+      - ./data/runtime-secrets:/run/tmpmail-secrets:ro
     ports:
       - "${TMPMAIL_API_BIND_IP:-127.0.0.1}:${TMPMAIL_PORT:-8080}:${TMPMAIL_PORT:-8080}"
     read_only: true
@@ -94,14 +120,18 @@ services:
     image: postgres:17-alpine
     container_name: tmpmail-postgres
     restart: unless-stopped
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
     networks:
       - backend
     environment:
       POSTGRES_DB: "${TMPMAIL_POSTGRES_DB:-tmpmail}"
       POSTGRES_USER: "${TMPMAIL_POSTGRES_USER:-tmpmail}"
-      POSTGRES_PASSWORD: "${TMPMAIL_POSTGRES_PASSWORD:?TMPMAIL_POSTGRES_PASSWORD must be set to a strong value for the bundled postgres service}"
+      POSTGRES_PASSWORD_FILE: "/run/tmpmail-secrets/postgres_password"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
+      - ./data/runtime-secrets:/run/tmpmail-secrets:ro
     ports:
       - "${TMPMAIL_POSTGRES_BIND_IP:-127.0.0.1}:${TMPMAIL_POSTGRES_PORT:-5432}:5432"
     security_opt:

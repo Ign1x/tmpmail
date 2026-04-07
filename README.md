@@ -17,12 +17,14 @@
 
 2. 编辑 `.env`，至少确认以下字段：
 
-   - `TMPMAIL_JWT_SECRET`，必须是 32 位以上随机高强度字符串；弱默认值现在会被启动校验直接拒绝
-   - `TMPMAIL_POSTGRES_PASSWORD`，compose 自带 PostgreSQL 容器必须显式设置强密码
+   - `TMPMAIL_ADMIN_PASSWORD`，默认会以固定用户名 `admin` 引导后台管理员；至少 10 位
    - `TMPMAIL_MAIL_EXCHANGE_HOST`，必须指向真正对外提供 MX 的稳定公网主机名，例如 `mail.your-domain.tld`
-   - 默认 compose 部署不需要手写 `TMPMAIL_DATABASE_URL`；后端会自动用 `TMPMAIL_POSTGRES_USER` / `TMPMAIL_POSTGRES_PASSWORD` / `TMPMAIL_POSTGRES_DB` 生成连接串，并自动处理密码里的特殊字符
+   - 默认 compose 部署不需要手写 `TMPMAIL_DATABASE_URL`
+   - `TMPMAIL_JWT_SECRET` 和 `TMPMAIL_POSTGRES_PASSWORD` 留空即可；`secrets-init` 会在首次启动时自动生成，并持久化到 `./data/runtime-secrets/`
+   - 如需查看自动生成值，可执行 `docker compose logs secrets-init`
+   - 因为你要求“日志里可见”，生成值会出现在 `secrets-init` 容器日志里；这很方便，但也意味着 Docker 日志访问权限本身就是敏感权限
    - 只有在你不使用 compose 自带 PostgreSQL、或者要让宿主机直跑的后端连接外部数据库时，才需要显式设置 `TMPMAIL_DATABASE_URL`
-   - 如需用环境变量创建默认管理员，请同时确认 `TMPMAIL_ADMIN_PASSWORD` 和 `TMPMAIL_ADMIN_PASSWORD_MODE`
+   - 默认建议保留 `TMPMAIL_ADMIN_PASSWORD_MODE=bootstrap`；只有救援或显式重置密码时才考虑 `force`
    - 本地 HTTP 联调可设 `TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT=false`
    - `TMPMAIL_TRUST_PROXY_HEADERS` 默认应保持 `false`；只有在前面明确有一层可信反向代理负责覆盖 `X-Forwarded-*` / `Forwarded` 头时才改成 `true`
    - 配置后，托管域名会统一生成 `CNAME mail.<domain> -> <共享收件主机>`、`MX <domain> -> <共享收件主机>`、`TXT <domain> -> <verification token>`
@@ -51,24 +53,25 @@
 
 ## PostgreSQL
 
-- 现在后端是 PostgreSQL-only；默认 compose 部署会自动根据 `TMPMAIL_POSTGRES_*` 生成连接串。
+- 现在后端是 PostgreSQL-only；默认 compose 部署会自动根据 `TMPMAIL_POSTGRES_*` 和 `./data/runtime-secrets/postgres_password` 生成连接串。
 - 服务启动时会自动执行 `migrations/` 下的建表迁移。
 - `/readyz` 会实际执行数据库探测，Compose 也用它做 API 健康检查。
 - 仓库自带的 `compose.yaml` 默认会把 API、前端、PostgreSQL、Inbucket 一起拉起。
-- 运行时持久化数据只会写到当前目录下的 `./data/postgres`、`./data/inbucket/config`、`./data/inbucket/storage`。
-- 默认端口现在只绑定到 `127.0.0.1`，并要求显式设置 `TMPMAIL_POSTGRES_PASSWORD`。
+- 运行时持久化数据只会写到当前目录下的 `./data/postgres`、`./data/inbucket/config`、`./data/inbucket/storage`、`./data/runtime-secrets`。
+- 默认端口现在只绑定到 `127.0.0.1`；如果你不手填 `TMPMAIL_POSTGRES_PASSWORD`，compose 会在首次启动自动生成并持久化。
 - 默认 compose 部署时，API 容器会固定通过 Docker 服务名 `postgres:5432` 访问数据库，并自动生成等价于下面的连接串：
 
   `postgres://tmpmail:<自动 URL 编码后的 TMPMAIL_POSTGRES_PASSWORD>@postgres:5432/tmpmail`
 
 - 只有在你把后端直接跑在宿主机上、或者改接外部 PostgreSQL 时，才需要自己设置 `TMPMAIL_DATABASE_URL`。
 - 这时如果数据库在宿主机本机，通常可写成 `postgres://tmpmail:<URL 编码后的密码>@127.0.0.1:${TMPMAIL_POSTGRES_PORT:-5432}/tmpmail`。
+- 如果 `./data/postgres` 已经存在，但 `./data/runtime-secrets/postgres_password` 丢了，默认 compose 不会擅自重生一个新密码，而是直接报错，防止把现有数据库密码状态搞乱。
 
 ## Admin Domains
 
 - 后台现在是独立的 console 用户体系，默认入口仍是 `/admin`：
 
-  1. 首次进入时先创建第一个管理员用户名和密码
+  1. 默认部署会在首次启动时按 `TMPMAIL_ADMIN_PASSWORD` 自动引导固定管理员用户 `admin`
   2. 之后所有后台成员都通过“用户名 + 密码”登录
   3. 角色分为 `admin` 和 `user`
   4. `admin` 可以管理后台用户、每个用户可添加的域名数量、系统启停状态、共享收件主机配置、日志与清理任务
@@ -77,10 +80,11 @@
 - 管理后台默认入口是 `/admin`，也可通过 `TMPMAIL_ADMIN_ENTRY_PATH` 改成自定义入口。
 - 管理台是独立页面，不在主导航里直接暴露。
 - 控制台 session 现在只保存在前端 BFF 管理的 HttpOnly cookie 中；浏览器 JavaScript 不再读取或持久化 console JWT，`/api/mail` 会在服务端为控制台请求补 `Authorization`。
-- `TMPMAIL_ADMIN_PASSWORD` 现在必须配合 `TMPMAIL_ADMIN_PASSWORD_MODE` 使用：
+- `TMPMAIL_ADMIN_PASSWORD` 现在是默认部署必填，并且要配合 `TMPMAIL_ADMIN_PASSWORD_MODE` 使用：
   - `bootstrap`：仅在首次引导时创建默认 `admin`
   - `force`：显式强制覆盖现有 `admin` 密码，只建议短时开发/救援使用
   - `disabled`：完全忽略该环境变量
+- 默认部署建议保持 `bootstrap`，这样首次启动就会稳定创建 `admin` 用户，不再依赖首次进页面手工引导。
 - 控制台密码和邮箱密码现在都要求至少 10 位；Argon2 参数也已固定为显式的 Argon2id 配置，避免运行时默认值漂移。
 - 控制台用户、密码哈希、后台 API Key 哈希和系统设置都持久化在 PostgreSQL。
 - 邮箱 OTP 状态也持久化在 PostgreSQL；验证码落库前会先哈希，不保存明文。
@@ -149,7 +153,8 @@
   - `TMPMAIL_FRONTEND_BIND_IP=0.0.0.0`
   - `TMPMAIL_PUBLIC_HOST` 可选，用于让脚本输出稳定的对外访问地址
 - API 与前端容器现在默认以非 root 用户运行，并在 compose 里启用了 `no-new-privileges`、`cap_drop: ALL` 和只读根文件系统；如 Linux 下绑定挂载 `./data` 出现权限问题，请把 `TMPMAIL_CONTAINER_UID/TMPMAIL_CONTAINER_GID` 调整为宿主机当前 UID/GID。
-- Compose 里的 PostgreSQL 默认只绑定 `127.0.0.1`，且未设置 `TMPMAIL_POSTGRES_PASSWORD` 时会直接拒绝启动，避免弱默认凭据和意外对外暴露。
+- Compose 里的 PostgreSQL 默认只绑定 `127.0.0.1`；未显式设置 `TMPMAIL_POSTGRES_PASSWORD` 时会改由 `secrets-init` 首次生成并持久化，避免把弱默认密码写死在模板里。
+- `compose.yaml` 现在会先运行一个一次性的 `secrets-init` 容器：空白的 `TMPMAIL_JWT_SECRET` / `TMPMAIL_POSTGRES_PASSWORD` 会在那里首次生成、写入 `./data/runtime-secrets/`，并打印到该容器日志中。
 - 后端默认不会信任客户端自带的 `X-Forwarded-*` / `Forwarded` 头，避免在直接 compose 部署时被伪造 HTTPS、来源 IP 或 Host；只有显式设置 `TMPMAIL_TRUST_PROXY_HEADERS=true` 后，才会按反向代理头解析这些信息。
 - API Dockerfile 现在会对 Cargo registry、git 索引和 `target/` 使用 BuildKit cache mount：
   - 首次构建仍需要拉取 Rust 依赖

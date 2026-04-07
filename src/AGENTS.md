@@ -29,7 +29,8 @@ Backend core modules own config, state, storage, workers, auth, and domain logic
 - Linux Do client secrets can be seeded from `TMPMAIL_LINUX_DO_CLIENT_SECRET`; `AdminStateStore` persists the secret separately in PostgreSQL.
 - Domain code should use `effective_runtime_config()` when admin-managed overrides can affect DNS or routing behavior.
 - PostgreSQL startup applies repo migrations once; there is no legacy JSON import path anymore.
-- `Config::from_env()` should accept either an explicit `TMPMAIL_DATABASE_URL` or the bundled compose `TMPMAIL_POSTGRES_*` settings; keep the default same-host compose path zero-friction.
+- `Config::from_env()` should accept either an explicit `TMPMAIL_DATABASE_URL` or the bundled compose `TMPMAIL_POSTGRES_*` settings plus compose-mounted `*_FILE` secrets; keep the default same-host compose path zero-friction.
+- Default runtime startup should require `TMPMAIL_ADMIN_PASSWORD` unless `TMPMAIL_ADMIN_PASSWORD_MODE=disabled`; the same-host compose path assumes a deterministic bootstrap admin user.
 - Background jobs should favor `try_lock_store_for_background()` semantics over long blocking work; the helper is now a background scheduling gate, not a user-request mutex.
 - Keep legacy placeholder behavior out of active config flow; `mail.tmpmail.local` is treated as stale.
 - Worker toggles and poll intervals are config-driven; zero or disabled values intentionally prevent spawning.

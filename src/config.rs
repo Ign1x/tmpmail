@@ -1,5 +1,5 @@
 use anyhow::{bail, Context, Result};
-use std::{env, net::IpAddr};
+use std::{env, fs, io::ErrorKind, net::IpAddr};
 
 use reqwest::Url;
 
@@ -116,7 +116,7 @@ impl Config {
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(defaults.port);
-        let jwt_secret = env::var("TMPMAIL_JWT_SECRET").unwrap_or(defaults.jwt_secret);
+        let jwt_secret = read_optional_secret("TMPMAIL_JWT_SECRET")?.unwrap_or(defaults.jwt_secret);
         let http_request_timeout_seconds = env::var("TMPMAIL_HTTP_REQUEST_TIMEOUT_SECONDS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -143,18 +143,16 @@ impl Config {
         let database_url = resolve_database_url(
             read_optional_env("TMPMAIL_DATABASE_URL"),
             read_optional_env("TMPMAIL_POSTGRES_USER"),
-            read_optional_env("TMPMAIL_POSTGRES_PASSWORD"),
+            read_optional_secret("TMPMAIL_POSTGRES_PASSWORD")?,
             read_optional_env("TMPMAIL_POSTGRES_DB"),
         )?;
-        let admin_password = env::var("TMPMAIL_ADMIN_PASSWORD")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let admin_password = read_optional_secret("TMPMAIL_ADMIN_PASSWORD")?;
         let admin_password_mode = env::var("TMPMAIL_ADMIN_PASSWORD_MODE")
             .ok()
             .map(|value| parse_admin_password_mode(&value))
             .transpose()?
             .unwrap_or(defaults.admin_password_mode);
+        validate_required_admin_password(admin_password_mode, admin_password.as_deref())?;
         let allow_insecure_dev_secrets = env::var("TMPMAIL_ALLOW_INSECURE_DEV_SECRETS")
             .ok()
             .and_then(|value| parse_bool(&value))
@@ -163,10 +161,7 @@ impl Config {
             .ok()
             .and_then(|value| parse_bool(&value))
             .unwrap_or(defaults.admin_require_secure_transport);
-        let admin_recovery_token = env::var("TMPMAIL_ADMIN_RECOVERY_TOKEN")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let admin_recovery_token = read_optional_secret("TMPMAIL_ADMIN_RECOVERY_TOKEN")?;
         let admin_session_ttl_seconds = env::var("TMPMAIL_ADMIN_SESSION_TTL_SECONDS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -199,10 +194,7 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let inbucket_password = env::var("TMPMAIL_INBUCKET_PASSWORD")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let inbucket_password = read_optional_secret("TMPMAIL_INBUCKET_PASSWORD")?;
         let inbucket_request_timeout_seconds = env::var("TMPMAIL_INBUCKET_REQUEST_TIMEOUT_SECONDS")
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -277,10 +269,7 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let smtp_password = env::var("TMPMAIL_SMTP_PASSWORD")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let smtp_password = read_optional_secret("TMPMAIL_SMTP_PASSWORD")?;
         let smtp_from_address = env::var("TMPMAIL_SMTP_FROM_ADDRESS")
             .ok()
             .map(|value| value.trim().to_owned())
@@ -293,10 +282,7 @@ impl Config {
             .ok()
             .and_then(|value| parse_bool(&value))
             .unwrap_or(defaults.smtp_starttls);
-        let linux_do_client_secret = env::var("TMPMAIL_LINUX_DO_CLIENT_SECRET")
-            .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
+        let linux_do_client_secret = read_optional_secret("TMPMAIL_LINUX_DO_CLIENT_SECRET")?;
 
         let config = Self {
             host,
@@ -434,6 +420,34 @@ fn read_optional_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn read_optional_secret(name: &str) -> Result<Option<String>> {
+    if let Some(path) = read_optional_env(&format!("{name}_FILE")) {
+        if let Some(value) = read_optional_secret_file(&path)? {
+            return Ok(Some(value));
+        }
+    }
+
+    Ok(read_optional_env(name))
+}
+
+fn read_optional_secret_file(path: &str) -> Result<Option<String>> {
+    let trimmed_path = path.trim();
+    if trimmed_path.is_empty() {
+        return Ok(None);
+    }
+
+    match fs::read_to_string(trimmed_path) {
+        Ok(content) => {
+            let value = content.trim().to_owned();
+            Ok((!value.is_empty()).then_some(value))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to read secret file {trimmed_path}"))
+        }
+    }
+}
+
 fn resolve_database_url(
     explicit_database_url: Option<String>,
     postgres_user: Option<String>,
@@ -446,7 +460,7 @@ fn resolve_database_url(
 
     let postgres_password = postgres_password.ok_or_else(|| {
         anyhow::anyhow!(
-            "TMPMAIL_DATABASE_URL must be set, or set TMPMAIL_POSTGRES_PASSWORD so the bundled postgres service can be used automatically"
+            "TMPMAIL_DATABASE_URL must be set, or set TMPMAIL_POSTGRES_PASSWORD / TMPMAIL_POSTGRES_PASSWORD_FILE so the bundled postgres service can be used automatically"
         )
     })?;
     let postgres_user = postgres_user.unwrap_or_else(|| "tmpmail".to_owned());
@@ -521,6 +535,19 @@ fn parse_admin_password_mode(value: &str) -> Result<AdminPasswordMode> {
         "force" => Ok(AdminPasswordMode::Force),
         _ => bail!("TMPMAIL_ADMIN_PASSWORD_MODE must be one of: disabled, bootstrap, force"),
     }
+}
+
+fn validate_required_admin_password(
+    admin_password_mode: AdminPasswordMode,
+    admin_password: Option<&str>,
+) -> Result<()> {
+    if matches!(admin_password_mode, AdminPasswordMode::Disabled) || admin_password.is_some() {
+        return Ok(());
+    }
+
+    bail!(
+        "TMPMAIL_ADMIN_PASSWORD must be set for runtime startup; use TMPMAIL_ADMIN_PASSWORD or TMPMAIL_ADMIN_PASSWORD_FILE, or explicitly set TMPMAIL_ADMIN_PASSWORD_MODE=disabled to bypass bootstrap"
+    )
 }
 
 fn looks_like_placeholder_secret(value: &str) -> bool {
@@ -614,10 +641,14 @@ fn normalize_txt_prefix(value: &str) -> String {
 mod tests {
     use super::{
         build_bundled_postgres_url, looks_like_placeholder_secret, normalize_txt_prefix,
-        parse_admin_password_mode, parse_bool, parse_csv, resolve_database_url, AdminPasswordMode,
-        Config,
+        parse_admin_password_mode, parse_bool, parse_csv, read_optional_secret_file,
+        resolve_database_url, validate_required_admin_password, AdminPasswordMode, Config,
     };
     use reqwest::Url;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[test]
     fn derives_public_mail_route_from_remote_inbucket_hostname() {
@@ -783,6 +814,35 @@ mod tests {
     }
 
     #[test]
+    fn reads_secret_from_file_and_trims_whitespace() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("tmpmail-secret-{unique}.txt"));
+
+        fs::write(&path, "  secret-from-file \n").expect("write secret file");
+        let value = read_optional_secret_file(path.to_str().expect("utf8 temp path"))
+            .expect("read secret file");
+        fs::remove_file(&path).ok();
+
+        assert_eq!(value.as_deref(), Some("secret-from-file"));
+    }
+
+    #[test]
+    fn missing_secret_file_is_treated_as_absent() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("tmpmail-secret-missing-{unique}.txt"));
+        let value = read_optional_secret_file(path.to_str().expect("utf8 temp path"))
+            .expect("missing secret file should be absent");
+
+        assert_eq!(value, None);
+    }
+
+    #[test]
     fn parse_csv_normalizes_and_deduplicates_domains() {
         assert_eq!(
             parse_csv(" Foo.EXAMPLE.com.,foo.example.com, bar.example.com "),
@@ -841,6 +901,21 @@ mod tests {
             AdminPasswordMode::Disabled
         );
         assert!(parse_admin_password_mode("invalid-mode").is_err());
+    }
+
+    #[test]
+    fn admin_password_is_required_unless_bootstrap_is_disabled() {
+        let error = validate_required_admin_password(AdminPasswordMode::Bootstrap, None)
+            .expect_err("missing admin password should fail in bootstrap mode");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TMPMAIL_ADMIN_PASSWORD must be set"),
+            "unexpected error: {error}"
+        );
+        validate_required_admin_password(AdminPasswordMode::Disabled, None)
+            .expect("disabled mode may skip admin password");
     }
 
     #[test]

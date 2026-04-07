@@ -60,8 +60,9 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - Prefer plain `docker compose up -d --build` / `docker compose down` for the default deployment path; `scripts/dev-up.sh` and `scripts/dev-down.sh` are optional local helpers, and `dev-up` can auto-create `.env` from `.env.example`.
 - `.env.example` is the source of truth for new settings. Update `README.md` when admin, JWT, transport, or deployment knobs change.
 - Env namespaces are deliberate: `TMPMAIL_*` backend/runtime plus Docker build overrides, `NEXT_PUBLIC_TMPMAIL_*` browser-visible frontend, and `INBUCKET_*` compose-internal container envs.
-- Security-sensitive envs now include `TMPMAIL_JWT_SECRET`, `TMPMAIL_ALLOW_INSECURE_DEV_SECRETS`, `TMPMAIL_ADMIN_PASSWORD_MODE`, `TMPMAIL_DATABASE_URL`, `TMPMAIL_POSTGRES_PASSWORD`, `TMPMAIL_TRUST_PROXY_HEADERS`, `TMPMAIL_CONTAINER_UID`, `TMPMAIL_CONTAINER_GID`, and `TMPMAIL_POSTGRES_BIND_IP`; keep docs and compose defaults aligned when they change.
+- Security-sensitive envs now include `TMPMAIL_JWT_SECRET`, `TMPMAIL_ALLOW_INSECURE_DEV_SECRETS`, `TMPMAIL_ADMIN_PASSWORD`, `TMPMAIL_ADMIN_PASSWORD_MODE`, `TMPMAIL_DATABASE_URL`, `TMPMAIL_POSTGRES_PASSWORD`, `TMPMAIL_TRUST_PROXY_HEADERS`, `TMPMAIL_CONTAINER_UID`, `TMPMAIL_CONTAINER_GID`, and `TMPMAIL_POSTGRES_BIND_IP`; keep docs and compose defaults aligned when they change.
 - Main compose now wires TmpMail to the built-in `inbucket` service over the Docker network; do not document `TMPMAIL_INGEST_MODE` / `TMPMAIL_INBUCKET_BASE_URL` as required for the default same-host deployment path.
+- Main compose now includes a one-shot `secrets-init` step that persists generated JWT / PostgreSQL secrets under repo-local `./data/runtime-secrets`; do not move that runtime state outside the project directory.
 - Default compose persistence must stay under repo-local `./data/`; avoid introducing named volumes or host paths outside the project directory for runtime state.
 - Default direct-compose deployments must treat proxy headers as untrusted; only enable `TMPMAIL_TRUST_PROXY_HEADERS` when a trusted reverse proxy is explicitly in front and overwrites forwarding headers.
 - Public Prometheus scraping is opt-in through `TMPMAIL_PUBLIC_METRICS_ENABLED`; do not assume `/metrics` is always exposed.
@@ -80,7 +81,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - Do not edit `DuckMail/` as if it were live code. The active frontend is `frontend/`.
 - Do not commit `.env`, `data/`, or legacy generated `inbucket.compose.yml` / `inbucket.env` / `inbucket-data/` artifacts.
 - Do not assume `cargo run` reads `.env`; the Rust binary reads process env directly.
-- Do not assume `cargo run` or tests read `.env`; export `TMPMAIL_DATABASE_URL` explicitly outside Docker unless you are inside the bundled compose path.
+- Do not assume `cargo run` or tests read `.env`; export `TMPMAIL_DATABASE_URL` explicitly outside Docker unless you are inside the bundled compose path, and remember that compose-specific `*_FILE` secret wiring does not exist in plain host runs.
 - Do not assume env always wins over persisted admin-state overrides for mail/DNS behavior.
 - Do not hardcode `/admin`; `TMPMAIL_ADMIN_ENTRY_PATH` and `frontend/proxy.ts` can rewrite public admin paths.
 
