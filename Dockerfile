@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 FROM rust:1.93-bookworm AS builder
 
 ARG TMPMAIL_CARGO_REGISTRY_PROTOCOL=sparse
@@ -30,34 +28,30 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
     && printf 'fn main() {}\n' > src/main.rs
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    cargo fetch --locked
+RUN cargo fetch --locked
 
 COPY src ./src
 COPY migrations ./migrations
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,target=/app/target,sharing=locked \
-    cargo build --release --locked \
+RUN cargo build --release --locked \
     && cp target/release/tmpmail-api /tmp/tmpmail-api
 
-FROM debian:bookworm-slim AS runtime
+FROM rust:1.93-bookworm AS runtime
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --system --gid 10001 tmpmail \
+    && useradd --system --uid 10001 --gid tmpmail --home-dir /app --shell /usr/sbin/nologin tmpmail \
+    && mkdir -p /app /tmp \
+    && chown -R tmpmail:tmpmail /app /tmp
 
 WORKDIR /app
 
-RUN mkdir -p /app/data/config /app/data/storage
-
-COPY --from=builder /tmp/tmpmail-api /usr/local/bin/tmpmail-api
+COPY --from=builder --chown=tmpmail:tmpmail /tmp/tmpmail-api /usr/local/bin/tmpmail-api
 
 ENV TMPMAIL_HOST=0.0.0.0
 ENV TMPMAIL_PORT=8080
 
 EXPOSE 8080
+
+USER tmpmail:tmpmail
 
 CMD ["tmpmail-api"]

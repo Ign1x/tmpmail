@@ -1,14 +1,15 @@
 use std::{
-    collections::BTreeSet,
-    fs,
+    collections::{BTreeMap, BTreeSet},
     net::IpAddr,
-    path::{Path, PathBuf},
+    thread,
 };
 
+use anyhow::Context;
 use chrono::{DateTime, Utc};
 use rand_core::{OsRng, RngCore};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
+use sqlx::{Connection, PgConnection, PgPool, postgres::PgPoolOptions, types::Json};
 use uuid::Uuid;
 
 use crate::{
@@ -18,15 +19,12 @@ use crate::{
     models::{
         AdminAccessKey, AdminEmailOtpSettings, AdminRegistrationSettings, AdminSystemSettings,
         AdminUserLimitsSettings, ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole,
-        LinuxDoAuthSettings,
-        LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
+        LinuxDoAuthSettings, LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
         PublicUpdateNoticeSection,
     },
-    persistence::write_file_atomically,
     state::AppState,
 };
 
-const MIN_PASSWORD_LENGTH: usize = 6;
 const MIN_USERNAME_LENGTH: usize = 3;
 const MAX_USERNAME_LENGTH: usize = 32;
 const MAX_EMAIL_IDENTITY_LENGTH: usize = 128;
@@ -172,20 +170,97 @@ struct PersistedAdminState {
     api_key_updated_at: Option<DateTime<Utc>>,
 }
 
+impl PersistedAdminState {
+    fn cloudflare_tokens_map(&self) -> BTreeMap<String, String> {
+        self.users
+            .iter()
+            .filter_map(|user| {
+                user.cloudflare
+                    .api_token
+                    .as_ref()
+                    .map(|token| (user.id.to_string(), token.clone()))
+            })
+            .collect()
+    }
+
+    fn apply_cloudflare_tokens(&mut self, tokens: &BTreeMap<String, String>) {
+        for user in &mut self.users {
+            user.cloudflare.api_token = tokens.get(&user.id.to_string()).cloned();
+        }
+    }
+
+    fn linux_do_client_secret(&self) -> Option<String> {
+        self.system_settings
+            .registration_settings
+            .linux_do
+            .client_secret
+            .clone()
+    }
+
+    fn apply_linux_do_client_secret(&mut self, client_secret: Option<String>) {
+        self.system_settings
+            .registration_settings
+            .linux_do
+            .client_secret = client_secret;
+    }
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct AdminStateRow {
+    state: Json<PersistedAdminState>,
+    cloudflare_tokens: Json<BTreeMap<String, String>>,
+    linux_do_client_secret: Option<String>,
+}
+
+fn redact_cloudflare_tokens_for_serialization(
+    persisted: &PersistedAdminState,
+) -> PersistedAdminState {
+    let mut serialized = persisted.clone();
+    for user in &mut serialized.users {
+        user.cloudflare.api_token = None;
+    }
+    serialized
+        .system_settings
+        .registration_settings
+        .linux_do
+        .client_secret = None;
+
+    serialized
+}
+
+#[derive(Clone, Debug)]
+struct PgAdminStateBackend {
+    database_url: String,
+    pool: PgPool,
+}
+
 #[derive(Clone, Debug)]
 pub struct AdminStateStore {
-    path: PathBuf,
+    backend: PgAdminStateBackend,
     persisted: PersistedAdminState,
 }
 
 impl AdminStateStore {
-    pub fn load(path: impl Into<PathBuf>) -> anyhow::Result<Self> {
-        let path = path.into();
-        let persisted = read_persisted_state(&path)?;
-        let mut store = Self { path, persisted };
+    pub async fn load(config: &Config) -> anyhow::Result<Self> {
+        let mut store = Self::load_from_postgres(config.required_database_url()?).await?;
         store.migrate_legacy_single_admin_if_needed()?;
 
         Ok(store)
+    }
+
+    async fn load_from_postgres(database_url: &str) -> anyhow::Result<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(database_url)
+            .await
+            .with_context(|| "failed to connect postgres admin state backend")?;
+        let backend = PgAdminStateBackend {
+            database_url: database_url.to_owned(),
+            pool,
+        };
+        let persisted = backend.load_state().await?;
+
+        Ok(Self { backend, persisted })
     }
 
     pub fn is_bootstrap_required(&self) -> bool {
@@ -226,10 +301,11 @@ impl AdminStateStore {
         let mut settings = self.system_settings();
 
         settings.mail_exchange_host = config.configured_mail_exchange_host();
-        settings.mail_route_target = config
-            .effective_mail_route_target()
-            .and_then(|value| normalize_optional_hostname_or_ip_setting_lossy(Some(value.as_str())));
-        settings.domain_txt_prefix = normalize_txt_prefix_setting(Some(config.domain_txt_prefix.as_str()));
+        settings.mail_route_target = config.effective_mail_route_target().and_then(|value| {
+            normalize_optional_hostname_or_ip_setting_lossy(Some(value.as_str()))
+        });
+        settings.domain_txt_prefix =
+            normalize_txt_prefix_setting(Some(config.domain_txt_prefix.as_str()));
 
         settings
     }
@@ -348,7 +424,18 @@ impl AdminStateStore {
         Ok((user.to_public(), api_key))
     }
 
-    pub fn sync_default_admin_from_env(&mut self, password: &str) -> AppResult<()> {
+    pub fn bootstrap_default_admin_from_env(&mut self, password: &str) -> AppResult<()> {
+        validate_password(password)?;
+
+        if !self.is_bootstrap_required() {
+            return Ok(());
+        }
+
+        let _ = self.bootstrap_first_admin("admin", password)?;
+        Ok(())
+    }
+
+    pub fn force_sync_default_admin_from_env(&mut self, password: &str) -> AppResult<()> {
         validate_password(password)?;
 
         if let Some(admin_index) = self
@@ -377,8 +464,47 @@ impl AdminStateStore {
             return self.save();
         }
 
-        let _ = self.bootstrap_first_admin("admin", password)?;
-        Ok(())
+        self.bootstrap_default_admin_from_env(password)
+    }
+
+    pub fn sync_linux_do_client_secret_from_env(
+        &mut self,
+        client_secret: Option<&str>,
+    ) -> AppResult<()> {
+        let Some(value) = client_secret
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(());
+        };
+
+        let current = self
+            .persisted
+            .system_settings
+            .registration_settings
+            .linux_do
+            .client_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|secret| !secret.is_empty());
+
+        if current == Some(value) {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        self.persisted
+            .system_settings
+            .registration_settings
+            .linux_do
+            .client_secret = Some(value.to_owned());
+        self.persisted
+            .system_settings
+            .registration_settings
+            .linux_do
+            .client_secret_configured = true;
+        self.persisted.updated_at = Some(now);
+        self.save()
     }
 
     pub fn authenticate(
@@ -417,6 +543,12 @@ impl AdminStateStore {
     pub fn current_user(&self, user_id: Uuid) -> AppResult<ConsoleUser> {
         self.find_user(user_id)
             .map(PersistedConsoleUser::to_public)
+            .ok_or_else(|| ApiError::unauthorized("console user not found"))
+    }
+
+    pub fn current_session_version(&self, user_id: Uuid) -> AppResult<i64> {
+        self.find_user(user_id)
+            .map(PersistedConsoleUser::session_version)
             .ok_or_else(|| ApiError::unauthorized("console user not found"))
     }
 
@@ -716,6 +848,13 @@ impl AdminStateStore {
         Ok(keys)
     }
 
+    pub fn latest_api_key(&self, user_id: Uuid) -> AppResult<Option<AdminAccessKey>> {
+        Ok(self
+            .list_api_keys(user_id)?
+            .into_iter()
+            .max_by(|left, right| left.created_at.cmp(&right.created_at)))
+    }
+
     pub fn create_api_key(
         &mut self,
         user_id: Uuid,
@@ -844,6 +983,9 @@ impl AdminStateStore {
         if user.is_disabled {
             return Err(ApiError::forbidden("console user is disabled"));
         }
+        if claims.session_version != user.session_version() {
+            return Err(ApiError::unauthorized("invalid console session"));
+        }
 
         Ok(user.to_authenticated())
     }
@@ -893,13 +1035,7 @@ impl AdminStateStore {
     }
 
     fn save(&self) -> AppResult<()> {
-        let serialized = serde_json::to_string_pretty(&self.persisted).map_err(|error| {
-            ApiError::internal(format!("failed to serialize admin state: {error}"))
-        })?;
-        write_file_atomically(&self.path, &serialized).map_err(|error| {
-            ApiError::internal(format!("failed to persist admin state: {error}"))
-        })?;
-
+        self.backend.save_state_blocking(&self.persisted)?;
         Ok(())
     }
 
@@ -1089,6 +1225,80 @@ impl AdminStateStore {
     }
 }
 
+impl PgAdminStateBackend {
+    async fn load_state(&self) -> anyhow::Result<PersistedAdminState> {
+        let row = sqlx::query_as::<_, AdminStateRow>(
+            r#"
+            SELECT state, cloudflare_tokens, linux_do_client_secret
+            FROM admin_state_store
+            WHERE id = TRUE
+            "#,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .with_context(|| "failed to load admin state from postgres")?;
+
+        if let Some(row) = row {
+            let mut persisted = row.state.0;
+            persisted.apply_cloudflare_tokens(&row.cloudflare_tokens.0);
+            persisted.apply_linux_do_client_secret(row.linux_do_client_secret);
+            return Ok(persisted);
+        }
+
+        Ok(PersistedAdminState {
+            system_settings: PersistedSystemSettings::default(),
+            ..PersistedAdminState::default()
+        })
+    }
+
+    fn save_state_blocking(&self, persisted: &PersistedAdminState) -> AppResult<()> {
+        let persisted = persisted.clone();
+        let database_url = self.database_url.clone();
+
+        thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| {
+                    ApiError::internal(format!("failed to build admin state runtime: {error}"))
+                })?
+                .block_on(async move {
+                    let serialized = redact_cloudflare_tokens_for_serialization(&persisted);
+                    let cloudflare_tokens = persisted.cloudflare_tokens_map();
+                    let linux_do_client_secret = persisted.linux_do_client_secret();
+                    let mut connection =
+                        PgConnection::connect(&database_url).await.map_err(|error| {
+                            ApiError::internal(format!(
+                                "failed to connect admin state writer: {error}"
+                            ))
+                        })?;
+
+                    sqlx::query(
+                        r#"
+                        INSERT INTO admin_state_store (id, state, cloudflare_tokens, linux_do_client_secret, updated_at)
+                        VALUES (TRUE, $1, $2, $3, NOW())
+                        ON CONFLICT (id)
+                        DO UPDATE SET state = EXCLUDED.state, cloudflare_tokens = EXCLUDED.cloudflare_tokens, linux_do_client_secret = EXCLUDED.linux_do_client_secret, updated_at = NOW()
+                        "#,
+                    )
+                    .bind(Json(&serialized))
+                    .bind(Json(&cloudflare_tokens))
+                    .bind(linux_do_client_secret)
+                    .execute(&mut connection)
+                    .await
+                    .map_err(|error| {
+                        ApiError::internal(format!("failed to persist admin state: {error}"))
+                    })?;
+
+                    connection.close().await.ok();
+                    Ok(())
+                })
+        })
+        .join()
+        .map_err(|_| ApiError::internal("admin state persistence thread panicked"))?
+    }
+}
+
 pub async fn optional_console_user(
     headers: &axum::http::HeaderMap,
     state: &AppState,
@@ -1105,6 +1315,17 @@ pub async fn optional_console_user(
 
     let admin_state = state.admin_state.read().await;
     admin_state.authenticate_api_key(&token)
+}
+
+pub async fn require_console_session_user(
+    headers: &axum::http::HeaderMap,
+    state: &AppState,
+) -> AppResult<AuthenticatedConsoleUser> {
+    auth::require_secure_admin_transport(headers, &state.config)?;
+    let token = auth::bearer_token(headers)?;
+    let claims = auth::decode_console_session_token(&token, &state.config)?;
+    let admin_state = state.admin_state.read().await;
+    admin_state.user_from_claims(&claims)
 }
 
 pub async fn require_console_access(
@@ -1126,25 +1347,6 @@ pub async fn require_admin_access(
     }
 
     Ok(user)
-}
-
-fn read_persisted_state(path: &Path) -> anyhow::Result<PersistedAdminState> {
-    if !path.exists() {
-        return Ok(PersistedAdminState {
-            system_settings: PersistedSystemSettings::default(),
-            ..PersistedAdminState::default()
-        });
-    }
-
-    let raw = fs::read_to_string(path)?;
-    if raw.trim().is_empty() {
-        return Ok(PersistedAdminState {
-            system_settings: PersistedSystemSettings::default(),
-            ..PersistedAdminState::default()
-        });
-    }
-
-    Ok(serde_json::from_str(&raw)?)
 }
 
 fn default_true() -> bool {
@@ -1182,13 +1384,12 @@ fn default_email_otp_settings() -> AdminEmailOtpSettings {
     }
 }
 
-fn default_email_otp_subject() -> String {
+pub(crate) fn default_email_otp_subject() -> String {
     "TmpMail verification code".to_owned()
 }
 
-fn default_email_otp_body() -> String {
-    "Your TmpMail verification code is {{code}}. It expires in {{ttlSeconds}} seconds."
-        .to_owned()
+pub(crate) fn default_email_otp_body() -> String {
+    "Your TmpMail verification code is {{code}}. It expires in {{ttlSeconds}} seconds.".to_owned()
 }
 
 fn default_linux_do_auth_settings() -> LinuxDoAuthSettings {
@@ -1409,17 +1610,23 @@ fn normalize_registration_settings(
             .or_else(|| existing.and_then(|settings| settings.linux_do.client_secret.clone())),
         client_secret_configured: false,
         minimum_trust_level: value.linux_do.minimum_trust_level.min(4),
-        authorize_url: normalize_optional_url_setting(value.linux_do.authorize_url.as_deref())?
-            .or_else(|| existing.and_then(|settings| settings.linux_do.authorize_url.clone()))
-            .or_else(|| Some(LINUX_DO_DEFAULT_AUTHORIZE_URL.to_owned())),
-        token_url: normalize_optional_url_setting(value.linux_do.token_url.as_deref())?
+        authorize_url: normalize_optional_linux_do_endpoint_url(
+            value.linux_do.authorize_url.as_deref(),
+        )?
+        .or_else(|| existing.and_then(|settings| settings.linux_do.authorize_url.clone()))
+        .or_else(|| Some(LINUX_DO_DEFAULT_AUTHORIZE_URL.to_owned())),
+        token_url: normalize_optional_linux_do_endpoint_url(value.linux_do.token_url.as_deref())?
             .or_else(|| existing.and_then(|settings| settings.linux_do.token_url.clone()))
             .or_else(|| Some(LINUX_DO_DEFAULT_TOKEN_URL.to_owned())),
-        userinfo_url: normalize_optional_url_setting(value.linux_do.userinfo_url.as_deref())?
-            .or_else(|| existing.and_then(|settings| settings.linux_do.userinfo_url.clone()))
-            .or_else(|| Some(LINUX_DO_DEFAULT_USERINFO_URL.to_owned())),
-        callback_url: normalize_optional_url_setting(value.linux_do.callback_url.as_deref())?
-            .or_else(|| existing.and_then(|settings| settings.linux_do.callback_url.clone())),
+        userinfo_url: normalize_optional_linux_do_endpoint_url(
+            value.linux_do.userinfo_url.as_deref(),
+        )?
+        .or_else(|| existing.and_then(|settings| settings.linux_do.userinfo_url.clone()))
+        .or_else(|| Some(LINUX_DO_DEFAULT_USERINFO_URL.to_owned())),
+        callback_url: normalize_optional_linux_do_callback_url(
+            value.linux_do.callback_url.as_deref(),
+        )?
+        .or_else(|| existing.and_then(|settings| settings.linux_do.callback_url.clone())),
     };
 
     let mut linux_do = linux_do;
@@ -1460,14 +1667,7 @@ fn normalize_user_limits_settings(
 }
 
 fn validate_password(password: &str) -> AppResult<()> {
-    let trimmed = password.trim();
-    if trimmed.len() < MIN_PASSWORD_LENGTH {
-        return Err(ApiError::validation(format!(
-            "console password must be at least {MIN_PASSWORD_LENGTH} characters"
-        )));
-    }
-
-    Ok(())
+    auth::validate_password(password, "console password")
 }
 
 fn normalize_linux_do_user_id(value: &str) -> AppResult<String> {
@@ -1650,7 +1850,19 @@ fn normalize_email_suffix_setting(value: String) -> Option<AppResult<String>> {
     )
 }
 
-fn normalize_optional_url_setting(value: Option<&str>) -> AppResult<Option<String>> {
+fn normalize_optional_linux_do_endpoint_url(value: Option<&str>) -> AppResult<Option<String>> {
+    normalize_optional_linux_do_url(value, "endpoint", false)
+}
+
+fn normalize_optional_linux_do_callback_url(value: Option<&str>) -> AppResult<Option<String>> {
+    normalize_optional_linux_do_url(value, "callback url", true)
+}
+
+fn normalize_optional_linux_do_url(
+    value: Option<&str>,
+    label: &str,
+    require_clean_callback: bool,
+) -> AppResult<Option<String>> {
     let Some(raw) = value.map(str::trim) else {
         return Ok(None);
     };
@@ -1659,15 +1871,51 @@ fn normalize_optional_url_setting(value: Option<&str>) -> AppResult<Option<Strin
     }
 
     let url = Url::parse(raw)
-        .map_err(|_| ApiError::validation("linux.do endpoint must be a valid url"))?;
+        .map_err(|_| ApiError::validation(format!("linux.do {label} must be a valid url")))?;
 
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(ApiError::validation(
-            "linux.do endpoint must use http or https",
-        ));
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(ApiError::validation(format!(
+            "linux.do {label} must not include credentials"
+        )));
+    }
+
+    if url.fragment().is_some() {
+        return Err(ApiError::validation(format!(
+            "linux.do {label} must not include a fragment"
+        )));
+    }
+
+    match url.scheme() {
+        "https" => {}
+        "http" if is_local_url_host(&url) => {}
+        "http" => {
+            return Err(ApiError::validation(format!(
+                "linux.do {label} must use https unless it targets localhost"
+            )));
+        }
+        _ => {
+            return Err(ApiError::validation(format!(
+                "linux.do {label} must use http or https"
+            )));
+        }
+    }
+
+    if require_clean_callback && url.query().is_some() {
+        return Err(ApiError::validation(format!(
+            "linux.do {label} must not include a query string"
+        )));
     }
 
     Ok(Some(url.to_string()))
+}
+
+fn is_local_url_host(url: &Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    matches!(normalized.as_str(), "localhost" | "127.0.0.1" | "::1")
+        || normalized.ends_with(".localhost")
 }
 
 fn normalize_txt_prefix_setting(value: Option<&str>) -> Option<String> {
@@ -1780,6 +2028,10 @@ impl PersistedCloudflareSettings {
 }
 
 impl PersistedConsoleUser {
+    fn session_version(&self) -> i64 {
+        self.password_updated_at.timestamp_millis()
+    }
+
     fn to_public(&self) -> ConsoleUser {
         ConsoleUser {
             id: self.id.to_string(),
@@ -1809,36 +2061,62 @@ impl PersistedConsoleUser {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, fs, path::PathBuf};
-
-    use uuid::Uuid;
+    use serde_json::Value;
+    use sqlx::{Connection, PgConnection, Row};
+    use tokio::runtime::Builder;
 
     use super::AdminStateStore;
+    use crate::{
+        config::Config,
+        test_support::{TestDatabase, attach_test_database},
+    };
 
-    fn temp_state_path(name: &str) -> PathBuf {
-        env::temp_dir().join(format!("tmpmail-{name}-{}.json", Uuid::new_v4()))
+    fn load_store(label: &str) -> (AdminStateStore, TestDatabase) {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                let (config, database) = attach_test_database(Config::default(), label).await;
+                let store = AdminStateStore::load(&config).await.expect("load state");
+                (store, database)
+            })
+    }
+
+    fn stored_admin_state_json(database: &TestDatabase) -> String {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                let mut connection = PgConnection::connect(database.url())
+                    .await
+                    .expect("connect admin state database");
+                let row = sqlx::query("SELECT state FROM admin_state_store WHERE id = TRUE")
+                    .fetch_one(&mut connection)
+                    .await
+                    .expect("load stored admin state");
+                let state: Value = row.try_get("state").expect("decode stored state");
+                serde_json::to_string(&state).expect("serialize stored state")
+            })
     }
 
     #[test]
     fn bootstrap_admin_stores_generated_key_hashed_only() {
-        let path = temp_state_path("admin-state");
-        let mut store = AdminStateStore::load(&path).expect("load state");
+        let (mut store, database) = load_store("admin-state");
 
         let (_, api_key) = store
             .bootstrap_first_admin("admin", "AdminPass123!")
             .expect("bootstrap admin");
-        let raw = fs::read_to_string(&path).expect("read state file");
+        let raw = stored_admin_state_json(&database);
 
         assert!(!raw.contains(&api_key));
         assert!(store.authenticate_api_key(&api_key).is_some());
-
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn recovery_reset_rotates_password_and_key() {
-        let path = temp_state_path("recover-admin-state");
-        let mut store = AdminStateStore::load(&path).expect("load state");
+        let (mut store, _database) = load_store("recover-admin-state");
         let (_, old_api_key) = store
             .bootstrap_first_admin("admin", "AdminPass123!")
             .expect("bootstrap admin");
@@ -1849,14 +2127,11 @@ mod tests {
 
         assert!(store.authenticate_api_key(&new_api_key).is_some());
         assert!(store.authenticate_api_key(&old_api_key).is_none());
-
-        let _ = fs::remove_file(path);
     }
 
     #[test]
     fn default_state_exposes_public_update_notice() {
-        let path = temp_state_path("default-update-notice");
-        let store = AdminStateStore::load(&path).expect("load state");
+        let (store, _database) = load_store("default-update-notice");
         let settings = store.system_settings();
         let notice = settings
             .update_notice
@@ -1867,7 +2142,5 @@ mod tests {
         assert_eq!(notice.version, "2026-01-16-storage-upgrade");
         assert_eq!(notice.zh.title, "系统更新通知");
         assert_eq!(notice.en.title, "System Update Notice");
-
-        let _ = fs::remove_file(path);
     }
 }

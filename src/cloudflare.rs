@@ -1,9 +1,8 @@
 use std::time::Duration;
 
 use reqwest::{
-    Client,
+    Client, Url,
     header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue},
-    Url,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -68,7 +67,7 @@ pub async fn sync_domain_records(
         None => {
             return Err(ApiError::validation(format!(
                 "no Cloudflare zone available for {domain}"
-            )))
+            )));
         }
     };
 
@@ -225,10 +224,9 @@ async fn upsert_txt_record(
     existing_records: Vec<CloudflareDnsRecord>,
 ) -> AppResult<RecordAction> {
     let desired_content = record.value.trim();
-    if existing_records
-        .iter()
-        .any(|existing| normalize_dns_text(&existing.content) == normalize_dns_text(desired_content))
-    {
+    if existing_records.iter().any(|existing| {
+        normalize_dns_text(&existing.content) == normalize_dns_text(desired_content)
+    }) {
         return Ok(RecordAction::Unchanged);
     }
 
@@ -344,7 +342,12 @@ async fn create_record(client: &Client, zone_id: &str, body: Value) -> AppResult
     Ok(())
 }
 
-async fn update_record(client: &Client, zone_id: &str, record_id: &str, body: Value) -> AppResult<()> {
+async fn update_record(
+    client: &Client,
+    zone_id: &str,
+    record_id: &str,
+    body: Value,
+) -> AppResult<()> {
     send_cloudflare_request::<Value>(
         client,
         reqwest::Method::PUT,
@@ -382,7 +385,9 @@ async fn send_cloudflare_request<T: for<'de> Deserialize<'de>>(
         return Ok(envelope);
     }
 
-    Err(ApiError::validation(render_cloudflare_errors(&envelope.errors)))
+    Err(ApiError::validation(render_cloudflare_errors(
+        &envelope.errors,
+    )))
 }
 
 fn render_cloudflare_errors(errors: &[CloudflareApiError]) -> String {

@@ -67,7 +67,7 @@ export default function LinuxDoCallbackPage({
       }
 
       const redirectUri = new URL(callbackPath, window.location.origin).toString()
-      const response = await completeLinuxDoLogin(
+      await completeLinuxDoLogin(
         {
           code,
           redirectUri,
@@ -75,7 +75,7 @@ export default function LinuxDoCallbackPage({
         DEFAULT_PROVIDER_ID,
       )
 
-      setStoredAdminSession(response.sessionToken)
+      setStoredAdminSession()
       window.location.replace(homePath)
     }
 

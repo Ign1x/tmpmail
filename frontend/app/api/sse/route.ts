@@ -8,6 +8,11 @@ function getApiBaseUrl(): string {
   return process.env.TMPMAIL_SERVER_API_BASE_URL?.trim() || DEFAULT_PROVIDER_BASE_URL
 }
 
+function trustProxyHeaders(): boolean {
+  const value = process.env.TMPMAIL_TRUST_PROXY_HEADERS?.trim().toLowerCase()
+  return ["1", "true", "yes", "on"].includes(value || "")
+}
+
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("Authorization")?.trim()
   if (!authHeader) {
@@ -28,13 +33,16 @@ export async function GET(request: NextRequest) {
   try {
     const upstreamBaseUrl = getApiBaseUrl().replace(/\/+$/, "")
     const upstreamUrl = `${upstreamBaseUrl}/events?accountId=${encodeURIComponent(accountId)}`
-    const forwardedProto =
-      request.headers.get("X-Forwarded-Proto")?.trim() ||
-      request.nextUrl.protocol.replace(":", "")
-    const forwardedHost =
-      request.headers.get("X-Forwarded-Host")?.trim() ||
-      request.headers.get("Host")?.trim() ||
-      request.nextUrl.host
+    const forwardedProto = trustProxyHeaders()
+      ? request.headers.get("X-Forwarded-Proto")?.trim() ||
+        request.nextUrl.protocol.replace(":", "")
+      : request.nextUrl.protocol.replace(":", "")
+    const forwardedHost = trustProxyHeaders()
+      ? request.headers.get("X-Forwarded-Host")?.trim() ||
+        request.nextUrl.host ||
+        request.headers.get("Host")?.trim() ||
+        ""
+      : request.nextUrl.host || request.headers.get("Host")?.trim() || ""
 
     const upstream = await fetch(upstreamUrl, {
       method: "GET",

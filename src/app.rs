@@ -1,11 +1,16 @@
 use std::time::Duration;
 
-use axum::{Router, error_handling::HandleErrorLayer, http::StatusCode, response::IntoResponse};
+use axum::{
+    Router, error_handling::HandleErrorLayer, extract::DefaultBodyLimit, http::StatusCode,
+    response::IntoResponse,
+};
 use serde_json::json;
 use tower::{BoxError, ServiceBuilder, load_shed::error::Overloaded};
-use tower_http::trace::TraceLayer;
+use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 
 use crate::{routes, state::AppState};
+
+const DEFAULT_API_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 pub fn build_router(state: AppState) -> Router {
     let request_timeout = Duration::from_secs(
@@ -17,8 +22,12 @@ pub fn build_router(state: AppState) -> Router {
             .unwrap_or(15),
     );
     let concurrency_limit = state.config.http_concurrency_limit.max(16);
-    let protected_api =
-        apply_api_protection(routes::api_router(), request_timeout, concurrency_limit);
+    let protected_api = apply_api_protection(
+        routes::api_router(),
+        request_timeout,
+        concurrency_limit,
+        DEFAULT_API_BODY_LIMIT_BYTES,
+    );
 
     routes::stream_router()
         .merge(protected_api)
@@ -30,13 +39,17 @@ fn apply_api_protection<S>(
     router: Router<S>,
     request_timeout: Duration,
     concurrency_limit: usize,
+    body_limit_bytes: usize,
 ) -> Router<S>
 where
     S: Clone + Send + Sync + 'static,
 {
-    router.layer(
+    let body_limit = body_limit_bytes.max(1);
+
+    router.layer(DefaultBodyLimit::max(body_limit)).layer(
         ServiceBuilder::new()
             .layer(HandleErrorLayer::new(handle_api_layer_error))
+            .layer(RequestBodyLimitLayer::new(body_limit))
             .load_shed()
             .concurrency_limit(concurrency_limit)
             .timeout(request_timeout),
@@ -86,15 +99,16 @@ mod tests {
         Router,
         body::{Body, to_bytes},
         error_handling::HandleErrorLayer,
+        extract::Json,
         http::{Request, StatusCode},
         response::IntoResponse,
-        routing::get,
+        routing::{get, post},
     };
     use serde_json::{Value, json};
     use tokio::{sync::Notify, time::sleep};
     use tower::{BoxError, ServiceBuilder, ServiceExt, service_fn};
 
-    use super::apply_api_protection;
+    use super::{DEFAULT_API_BODY_LIMIT_BYTES, apply_api_protection};
 
     #[tokio::test]
     async fn timeout_middleware_returns_gateway_timeout_json() {
@@ -108,6 +122,7 @@ mod tests {
             ),
             Duration::from_millis(10),
             16,
+            DEFAULT_API_BODY_LIMIT_BYTES,
         );
 
         let response = app
@@ -193,6 +208,33 @@ mod tests {
             })
         );
         assert_eq!(held_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn body_limit_returns_payload_too_large() {
+        let app = apply_api_protection(
+            Router::new().route(
+                "/upload",
+                post(|_body: Json<serde_json::Value>| async { StatusCode::OK }),
+            ),
+            Duration::from_secs(1),
+            16,
+            8,
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/upload")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#""0123456789""#))
+                    .expect("build large request"),
+            )
+            .await
+            .expect("body limit response");
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     async fn read_json_body(response: axum::response::Response) -> Value {

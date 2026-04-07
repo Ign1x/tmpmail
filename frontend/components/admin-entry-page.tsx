@@ -14,6 +14,7 @@ import {
   Users2,
   UserPlus,
 } from "lucide-react"
+import Image from "next/image"
 import { useTranslations } from "next-intl"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import {
@@ -22,17 +23,18 @@ import {
   loginAdmin,
   registerConsole,
   recoverAdmin,
+  restoreAdminSessionInfo,
   sendConsoleRegisterOtp,
   setupAdminPassword,
-  validateAdminSession,
   type AdminStatus,
 } from "@/lib/api"
 import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
 import { Input } from "@/components/tm-form-fields"
 import {
   clearStoredAdminSession,
-  getStoredAdminSession,
+  hasStoredAdminSession,
   setStoredAdminSession,
+  storePendingAdminSession,
   storePendingRevealedAdminKey,
 } from "@/lib/admin-session"
 import { validateEmailAddress } from "@/lib/account-validation"
@@ -118,9 +120,11 @@ export default function AdminEntryPage({
   const [isSubmittingRecovery, setIsSubmittingRecovery] = useState(false)
   const [registerOtpCooldown, setRegisterOtpCooldown] = useState(0)
   const [isSecureAdminContext, setIsSecureAdminContext] = useState(() => !requireSecureTransport)
+  const [isRestoringSession, setIsRestoringSession] = useState(false)
   const [entryMode, setEntryMode] = useState<EntryMode>("login")
   const [showRecovery, setShowRecovery] = useState(false)
   const hasBootstrappedRef = useRef(false)
+  const isMountedRef = useRef(true)
 
   const needsSetup = status?.isBootstrapRequired ?? true
   const canRegister = status?.openRegistrationEnabled ?? false
@@ -134,6 +138,14 @@ export default function AdminEntryPage({
   useEffect(() => {
     setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
   }, [requireSecureTransport])
+
+  useEffect(() => {
+    isMountedRef.current = true
+
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!status?.isRecoveryEnabled) {
@@ -174,27 +186,54 @@ export default function AdminEntryPage({
 
     const bootstrap = async () => {
       setIsBootstrapping(true)
+      const hasStoredSession = hasStoredAdminSession()
+      const canRestoreSession =
+        hasStoredSession && (!requireSecureTransport || isTrustedAdminContext())
 
       try {
-        const nextStatus = await getAdminStatus(DEFAULT_PROVIDER_ID)
-        setStatus(nextStatus)
-        const storedSession = getStoredAdminSession()
+        if (canRestoreSession) {
+          if (isMountedRef.current) {
+            setIsRestoringSession(true)
+          }
 
-        if (storedSession && (!requireSecureTransport || isTrustedAdminContext())) {
           try {
-            const hasValidSession = await validateAdminSession(storedSession, DEFAULT_PROVIDER_ID)
-            if (hasValidSession) {
-              setStoredAdminSession(storedSession)
-              redirectToConsole()
+            await restoreAdminSessionInfo(DEFAULT_PROVIDER_ID)
+            if (!isMountedRef.current) {
               return
             }
 
+            setStoredAdminSession()
+            redirectToConsole()
+            return
+          } catch (error) {
             clearStoredAdminSession()
-          } catch {
-            clearStoredAdminSession()
+            if (!isMountedRef.current) {
+              return
+            }
+
+            toast({
+              title: ta("sessionRestoreFailed"),
+              description: getErrorDescription(error, ta("statusLoadFailedDesc")),
+              color: "warning",
+              variant: "flat",
+            })
+          } finally {
+            if (isMountedRef.current) {
+              setIsRestoringSession(false)
+            }
           }
         }
+
+        const nextStatus = await getAdminStatus(DEFAULT_PROVIDER_ID)
+        if (!isMountedRef.current) {
+          return
+        }
+        setStatus(nextStatus)
       } catch (error) {
+        if (!isMountedRef.current) {
+          return
+        }
+
         toast({
           title: ta("statusLoadFailed"),
           description: getErrorDescription(error, ta("statusLoadFailedDesc")),
@@ -202,18 +241,21 @@ export default function AdminEntryPage({
           variant: "flat",
         })
       } finally {
-        setIsBootstrapping(false)
+        if (isMountedRef.current) {
+          setIsBootstrapping(false)
+        }
       }
     }
 
     void bootstrap()
   }, [redirectToConsole, requireSecureTransport, ta, toast])
 
-  const enterConsole = (sessionToken: string, apiKey?: string) => {
-    setStoredAdminSession(sessionToken)
+  const enterConsole = (apiKey?: string) => {
+    setStoredAdminSession()
     if (apiKey?.trim()) {
       storePendingRevealedAdminKey(apiKey, ADMIN_KEY_VISIBLE_MS)
     }
+
     redirectToConsole()
   }
 
@@ -233,7 +275,7 @@ export default function AdminEntryPage({
       return
     }
 
-    if (setupPassword.trim().length < 6) {
+    if (setupPassword.trim().length < 10) {
       toast({ title: ta("passwordTooShort"), color: "warning", variant: "flat" })
       return
     }
@@ -253,7 +295,10 @@ export default function AdminEntryPage({
         },
         DEFAULT_PROVIDER_ID,
       )
-      clearStoredAdminSession()
+      if (!isMountedRef.current) {
+        return
+      }
+      storePendingAdminSession(response.session)
       setSetupPassword("")
       setSetupPasswordConfirm("")
       toast({
@@ -262,8 +307,9 @@ export default function AdminEntryPage({
         color: "success",
         variant: "flat",
       })
-      enterConsole(response.sessionToken, response.apiKey)
+      enterConsole(response.apiKey)
     } catch (error) {
+      clearStoredAdminSession()
       toast({
         title: ta("setupFailed"),
         description: getErrorDescription(error, ta("setupFailedDescription")),
@@ -306,14 +352,19 @@ export default function AdminEntryPage({
         },
         DEFAULT_PROVIDER_ID,
       )
+      if (!isMountedRef.current) {
+        return
+      }
+      storePendingAdminSession(response.session)
       setLoginPassword("")
       toast({
         title: ta("sessionReady"),
         color: "success",
         variant: "flat",
       })
-      enterConsole(response.sessionToken)
+      enterConsole()
     } catch (error) {
+      clearStoredAdminSession()
       toast({
         title: ta("loginFailed"),
         description: getErrorDescription(error, ta("loginFailedDescription")),
@@ -405,7 +456,7 @@ export default function AdminEntryPage({
       return
     }
 
-    if (registerPassword.trim().length < 6) {
+    if (registerPassword.trim().length < 10) {
       toast({ title: ta("passwordTooShort"), color: "warning", variant: "flat" })
       return
     }
@@ -421,6 +472,10 @@ export default function AdminEntryPage({
         },
         DEFAULT_PROVIDER_ID,
       )
+      if (!isMountedRef.current) {
+        return
+      }
+      storePendingAdminSession(response.session)
       setRegisterPassword("")
       setRegisterOtpCode("")
       setEntryMode("login")
@@ -430,8 +485,9 @@ export default function AdminEntryPage({
         color: "success",
         variant: "flat",
       })
-      enterConsole(response.sessionToken)
+      enterConsole()
     } catch (error) {
+      clearStoredAdminSession()
       toast({
         title: ta("registerFailed"),
         description: getErrorDescription(error, ta("registerFailedDescription")),
@@ -518,7 +574,7 @@ export default function AdminEntryPage({
       return
     }
 
-    if (recoveryPassword.trim().length < 6) {
+    if (recoveryPassword.trim().length < 10) {
       toast({ title: ta("passwordTooShort"), color: "warning", variant: "flat" })
       return
     }
@@ -539,6 +595,10 @@ export default function AdminEntryPage({
         },
         DEFAULT_PROVIDER_ID,
       )
+      if (!isMountedRef.current) {
+        return
+      }
+      storePendingAdminSession(response.session)
       setRecoveryToken("")
       setRecoveryPassword("")
       setRecoveryPasswordConfirm("")
@@ -563,8 +623,9 @@ export default function AdminEntryPage({
         color: "success",
         variant: "flat",
       })
-      enterConsole(response.sessionToken, response.apiKey)
+      enterConsole(response.apiKey)
     } catch (error) {
+      clearStoredAdminSession()
       toast({
         title: ta("recoveryFailed"),
         description: getErrorDescription(error, ta("recoveryFailedDescription")),
@@ -579,15 +640,13 @@ export default function AdminEntryPage({
   const workspaceSignals = [
     {
       icon: ShieldCheck,
-      label: canUseSensitiveAdminActions ? ta("secureContextRequired") : ta("insecureContextTitle"),
-      description: canUseSensitiveAdminActions ? ta("secureContextReadyHint") : ta("insecureContextDescription"),
+      label: canUseSensitiveAdminActions ? ta("secureContextReadyHint") : ta("insecureContextTitle"),
       tone:
         "border-sky-200/80 bg-sky-50/85 text-sky-800 dark:border-sky-900/60 dark:bg-sky-950/30 dark:text-sky-100",
     },
     {
       icon: Globe2,
       label: canRegister ? ta("openRegistrationOn") : ta("openRegistrationOff"),
-      description: ta("entryHint", { path: consolePath }),
       tone:
         canRegister
           ? "border-emerald-200/80 bg-emerald-50/85 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
@@ -596,7 +655,6 @@ export default function AdminEntryPage({
     {
       icon: KeyRound,
       label: canUseLinuxDo ? ta("linuxDoEnabledOn") : ta("linuxDoEnabledOff"),
-      description: canUseLinuxDo ? ta("linuxDoSubmit") : ta("linuxDoUnavailableDescription"),
       tone:
         canUseLinuxDo
           ? "border-emerald-200/80 bg-emerald-50/85 text-emerald-800 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-100"
@@ -608,17 +666,14 @@ export default function AdminEntryPage({
     {
       icon: Mail,
       title: ta("consoleFeatureDomains"),
-      description: ta("consoleFeatureDomainsDesc"),
     },
     {
       icon: Users2,
       title: ta("consoleFeatureUsers"),
-      description: ta("consoleFeatureUsersDesc"),
     },
     {
       icon: Sparkles,
       title: ta("consoleFeatureSystem"),
-      description: ta("consoleFeatureSystemDesc"),
     },
   ]
 
@@ -628,11 +683,6 @@ export default function AdminEntryPage({
     : isRegisterMode
       ? ta("registerTab")
       : ta("loginTab")
-  const authDescription = needsSetup
-    ? ta("setupDescription")
-    : isRegisterMode
-      ? ta("registerDescription")
-      : ta("loginDescription")
 
   return (
     <div className="tm-page-backdrop relative min-h-screen overflow-hidden px-4 text-slate-900 dark:text-slate-100 sm:px-6 lg:px-8">
@@ -644,332 +694,377 @@ export default function AdminEntryPage({
           initial={{ opacity: 0, y: 18 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.35, ease: [0.25, 0.46, 0.45, 0.94] }}
-          className="mx-auto grid w-full max-w-6xl gap-5 lg:grid-cols-[minmax(0,1.08fr)_minmax(22rem,30rem)] lg:items-center"
+          className="mx-auto grid w-full max-w-6xl gap-5 lg:grid-cols-[minmax(0,1.08fr)_minmax(22rem,30rem)] lg:items-stretch"
         >
-          <section className="tm-glass-panel-strong overflow-hidden rounded-[2.4rem] p-6 sm:p-8 lg:p-10">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="tm-chip-strong">
-              <Sparkles size={14} />
-              {BRAND_NAME}
-            </span>
-            <span className="tm-chip">{ta("entryHint", { path: consolePath })}</span>
-          </div>
+          <section className="tm-glass-panel-strong flex h-full flex-col overflow-hidden rounded-[2.4rem] p-6 sm:p-8 lg:p-10">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="tm-chip-strong">
+                <Sparkles size={14} />
+                {ta("workspaceEntry")}
+              </span>
+              <span className="tm-chip">{ta("entryBadge")}</span>
+            </div>
 
-          <div className="mt-8 grid gap-3 md:grid-cols-3">
-            {workspaceSignals.map((signal) => {
-              const Icon = signal.icon
-              return (
-                <div
-                  key={signal.label}
-                  className={`rounded-[1.6rem] border p-4 shadow-sm backdrop-blur ${signal.tone}`}
-                >
-                  <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em]">
-                    <Icon size={14} />
-                    {signal.label}
-                  </div>
-                  <p className="mt-3 text-sm leading-6 opacity-90">{signal.description}</p>
-                </div>
-              )
-            })}
-          </div>
-
-          <div className="mt-8 grid gap-3 sm:grid-cols-3">
-            {workspaceFeatures.map((feature) => {
-              const Icon = feature.icon
-
-              return (
-                <div
-                  key={feature.title}
-                  className="rounded-[1.7rem] border border-white/70 bg-white/76 p-4 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/55"
-                >
-                  <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200">
-                    <Icon size={20} />
-                  </div>
-                  <div className="mt-4 min-w-0">
-                    <div className="text-sm font-semibold text-slate-950 dark:text-white">{feature.title}</div>
-                    <p className="mt-2 text-sm leading-6 text-slate-600 dark:text-slate-300">
-                      {feature.description}
+            <div className="mt-8 flex flex-1 flex-col justify-between gap-8">
+              <div className="space-y-8">
+                <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+                  <div className="max-w-2xl">
+                    <div className="text-xs font-semibold uppercase tracking-[0.28em] text-sky-700/80 dark:text-sky-200/80">
+                      {ta("accessTitle")}
+                    </div>
+                    <h1 className="mt-3 text-5xl font-semibold tracking-[-0.06em] text-slate-950 dark:text-white sm:text-6xl lg:text-7xl">
+                      {BRAND_NAME}
+                    </h1>
+                    <p className="mt-4 max-w-xl text-sm leading-7 text-slate-600 dark:text-slate-300 sm:text-[15px]">
+                      {ta("entryHeroDescription")}
                     </p>
                   </div>
+
+                  <div className="hidden shrink-0 lg:block">
+                    <div className="flex h-24 w-24 items-center justify-center rounded-[2rem] border border-white/80 bg-white/78 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur dark:border-slate-700/70 dark:bg-slate-950/65">
+                      <Image
+                        src="/brand-mark.svg"
+                        alt={`${BRAND_NAME} brand mark`}
+                        width={64}
+                        height={64}
+                        className="h-16 w-16 object-contain"
+                      />
+                    </div>
+                  </div>
                 </div>
-              )
-            })}
-          </div>
+
+                <div className="rounded-[2rem] border border-white/75 bg-white/72 p-5 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/50">
+                  <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
+                    {ta("entryPanelLabel")}
+                  </div>
+                  <div className="mt-3 text-xl font-semibold tracking-[-0.03em] text-slate-950 dark:text-white sm:text-2xl">
+                    {ta("entryPanelTitle")}
+                  </div>
+                  <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600 dark:text-slate-300">
+                    {ta("entryPanelDescription")}
+                  </p>
+                </div>
+
+                <div className="grid gap-3 md:grid-cols-3">
+                  {workspaceSignals.map((signal) => {
+                    const Icon = signal.icon
+                    return (
+                      <div
+                        key={signal.label}
+                        className={`rounded-[1.6rem] border p-4 shadow-sm backdrop-blur ${signal.tone}`}
+                      >
+                        <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.18em]">
+                          <Icon size={14} />
+                          {signal.label}
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-3">
+                {workspaceFeatures.map((feature) => {
+                  const Icon = feature.icon
+
+                  return (
+                    <div
+                      key={feature.title}
+                      className="rounded-[1.7rem] border border-white/70 bg-white/76 p-4 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/55"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-slate-100 text-slate-700 dark:bg-slate-900 dark:text-slate-200">
+                          <Icon size={20} />
+                        </div>
+                        <div className="text-sm font-semibold text-slate-950 dark:text-white">
+                          {feature.title}
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
           </section>
 
-          <section className="tm-glass-panel-strong overflow-hidden rounded-[2.4rem] p-5 sm:p-6 lg:p-7">
-          <div className="flex items-start justify-between gap-4">
-            <div className="min-w-0">
-              <div className="tm-section-label">{needsSetup ? ta("headline") : ta("workspaceEntry")}</div>
-              <div className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">
-                {authTitle}
-              </div>
-              <p className="mt-2 text-sm leading-7 text-slate-500 dark:text-slate-400">
-                {authDescription}
-              </p>
-            </div>
-            <div className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200 sm:flex">
-              {needsSetup ? <KeyRound size={20} /> : isRegisterMode ? <UserPlus size={20} /> : <Mail size={20} />}
-            </div>
-          </div>
-
-          {!canUseSensitiveAdminActions && (
-            <div className="mt-5 flex items-start gap-3 rounded-[1.4rem] border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/35 dark:text-amber-100">
-              <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+          <section className="tm-glass-panel-strong flex h-full flex-col overflow-hidden rounded-[2.4rem] p-5 sm:p-6 lg:p-7">
+            <div className="flex items-start justify-between gap-4">
               <div className="min-w-0">
-                <div className="font-semibold">{ta("insecureContextTitle")}</div>
-                <p className="mt-1 leading-6 opacity-90">{ta("insecureContextDescription")}</p>
+                <div className="tm-section-label">{needsSetup ? ta("headline") : ta("workspaceEntry")}</div>
+                <div className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">
+                  {authTitle}
+                </div>
+              </div>
+              <div className="hidden h-11 w-11 shrink-0 items-center justify-center rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200 sm:flex">
+                {needsSetup ? <KeyRound size={20} /> : isRegisterMode ? <UserPlus size={20} /> : <Mail size={20} />}
               </div>
             </div>
-          )}
 
-          {isBootstrapping ? (
-            <div className="flex h-64 items-center justify-center text-sm text-slate-400">{ta("loadingStatus")}</div>
-          ) : needsSetup ? (
-            <div className="mt-6 space-y-4">
-              <Input
-                label={ta("consoleUsernameLabel")}
-                value={setupUsername}
-                onValueChange={setSetupUsername}
-                variant="bordered"
-                autoComplete="username"
-                classNames={TM_INPUT_CLASSNAMES}
-              />
-              <Input
-                label={ta("setupPasswordLabel")}
-                type="password"
-                value={setupPassword}
-                onValueChange={setSetupPassword}
-                variant="bordered"
-                autoComplete="new-password"
-                classNames={TM_INPUT_CLASSNAMES}
-              />
-              <Input
-                label={ta("confirmPasswordLabel")}
-                type="password"
-                value={setupPasswordConfirm}
-                onValueChange={setSetupPasswordConfirm}
-                variant="bordered"
-                autoComplete="new-password"
-                classNames={TM_INPUT_CLASSNAMES}
-              />
-              <Button
-                color="primary"
-                className="mt-2 h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
-                onPress={handleSetupAdmin}
-                isLoading={isSubmittingSetup}
-                isDisabled={!canUseSensitiveAdminActions}
-                endContent={!isSubmittingSetup ? <ChevronRight size={16} /> : undefined}
-              >
-                {ta("setupSubmit")}
-              </Button>
-            </div>
-          ) : (
-            <div className="mt-6 space-y-4">
-              {canRegister && (
-                <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 p-1 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/45">
-                  <div className="grid grid-cols-2 gap-1">
-                    <button
-                      type="button"
-                      className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
-                        isRegisterMode
-                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                          : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
-                      }`}
-                      onClick={() => {
-                        setEntryMode("register")
-                        setShowRecovery(false)
-                      }}
-                    >
-                      {ta("registerTab")}
-                    </button>
-                    <button
-                      type="button"
-                      className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
-                        !isRegisterMode
-                          ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
-                          : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
-                      }`}
-                      onClick={() => setEntryMode("login")}
-                    >
-                      {ta("loginTab")}
-                    </button>
-                  </div>
+            {!canUseSensitiveAdminActions && (
+              <div className="mt-5 flex items-start gap-3 rounded-[1.4rem] border border-amber-200/80 bg-amber-50/90 px-4 py-3 text-sm text-amber-800 dark:border-amber-900/50 dark:bg-amber-950/35 dark:text-amber-100">
+                <ShieldAlert size={16} className="mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <div className="font-semibold">{ta("insecureContextTitle")}</div>
+                  <p className="mt-1 leading-6 opacity-90">{ta("insecureContextDescription")}</p>
                 </div>
-              )}
+              </div>
+            )}
 
-              <div className="rounded-[1.7rem] border border-slate-200/80 bg-white/68 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/45">
-                {isRegisterMode ? (
-                  <div className="space-y-4">
-                    <Input
-                      label={ta("registerEmailLabel")}
-                      value={registerEmail}
-                      onValueChange={setRegisterEmail}
-                      variant="bordered"
-                      autoComplete="email"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    {emailOtpEnabled && (
-                      <div className="space-y-3">
-                        <div className="flex flex-col gap-3 sm:flex-row">
-                          <Input
-                            label={ta("registerOtpLabel")}
-                            value={registerOtpCode}
-                            onValueChange={setRegisterOtpCode}
-                            variant="bordered"
-                            autoComplete="one-time-code"
-                            classNames={TM_INPUT_CLASSNAMES}
-                          />
-                          <Button
-                            variant="bordered"
-                            className="h-12 rounded-full px-5 sm:mt-7"
-                            onPress={handleSendRegisterOtp}
-                            isLoading={isSendingRegisterOtp}
-                            isDisabled={!canUseSensitiveAdminActions || registerOtpCooldown > 0}
-                          >
-                            {registerOtpCooldown > 0
-                              ? ta("registerOtpSendCooldown", { seconds: registerOtpCooldown })
-                              : ta("registerOtpSend")}
-                          </Button>
-                        </div>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">{ta("registerOtpHint")}</p>
+            {isRestoringSession && !isBootstrapping && (
+              <div className="mt-5 rounded-[1.4rem] border border-sky-200/80 bg-sky-50/90 px-4 py-3 text-sm text-sky-800 dark:border-sky-900/50 dark:bg-sky-950/35 dark:text-sky-100">
+                {ta("loadingStatus")}
+              </div>
+            )}
+
+            <div className="mt-6 flex flex-1 flex-col">
+              {isBootstrapping ? (
+                <div className="flex h-64 flex-1 items-center justify-center text-sm text-slate-400">{ta("loadingStatus")}</div>
+              ) : needsSetup ? (
+                <div className="space-y-4">
+                  <Input
+                    label={ta("consoleUsernameLabel")}
+                    value={setupUsername}
+                    onValueChange={setSetupUsername}
+                    variant="bordered"
+                    autoComplete="username"
+                    classNames={TM_INPUT_CLASSNAMES}
+                  />
+                  <Input
+                    label={ta("setupPasswordLabel")}
+                    type="password"
+                    value={setupPassword}
+                    onValueChange={setSetupPassword}
+                    variant="bordered"
+                    autoComplete="new-password"
+                    classNames={TM_INPUT_CLASSNAMES}
+                  />
+                  <Input
+                    label={ta("confirmPasswordLabel")}
+                    type="password"
+                    value={setupPasswordConfirm}
+                    onValueChange={setSetupPasswordConfirm}
+                    variant="bordered"
+                    autoComplete="new-password"
+                    classNames={TM_INPUT_CLASSNAMES}
+                  />
+                  <Button
+                    color="primary"
+                    className="mt-2 h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
+                    onPress={handleSetupAdmin}
+                    isLoading={isSubmittingSetup}
+                    isDisabled={!canUseSensitiveAdminActions}
+                    endContent={!isSubmittingSetup ? <ChevronRight size={16} /> : undefined}
+                  >
+                    {ta("setupSubmit")}
+                  </Button>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {canRegister && (
+                    <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 p-1 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-900/45">
+                      <div className="grid grid-cols-2 gap-1">
+                        <button
+                          type="button"
+                          className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
+                            isRegisterMode
+                              ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                              : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                          }`}
+                          onClick={() => {
+                            setEntryMode("register")
+                            setShowRecovery(false)
+                          }}
+                        >
+                          {ta("registerTab")}
+                        </button>
+                        <button
+                          type="button"
+                          className={`rounded-[1.25rem] px-4 py-3 text-sm font-semibold transition-colors ${
+                            !isRegisterMode
+                              ? "bg-slate-900 text-white dark:bg-slate-100 dark:text-slate-900"
+                              : "text-slate-600 hover:bg-white/80 dark:text-slate-300 dark:hover:bg-slate-800/70"
+                          }`}
+                          onClick={() => setEntryMode("login")}
+                        >
+                          {ta("loginTab")}
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="rounded-[1.7rem] border border-slate-200/80 bg-white/68 p-4 shadow-sm backdrop-blur dark:border-slate-800 dark:bg-slate-950/45">
+                    {isRegisterMode ? (
+                      <div className="space-y-4">
+                        <Input
+                          label={ta("registerEmailLabel")}
+                          value={registerEmail}
+                          onValueChange={setRegisterEmail}
+                          variant="bordered"
+                          autoComplete="email"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        {emailOtpEnabled && (
+                          <div className="space-y-3">
+                            <div className="flex flex-col gap-3 sm:flex-row">
+                              <Input
+                                label={ta("registerOtpLabel")}
+                                value={registerOtpCode}
+                                onValueChange={setRegisterOtpCode}
+                                variant="bordered"
+                                autoComplete="one-time-code"
+                                classNames={TM_INPUT_CLASSNAMES}
+                              />
+                              <Button
+                                variant="bordered"
+                                className="h-12 rounded-full px-5 sm:mt-7"
+                                onPress={handleSendRegisterOtp}
+                                isLoading={isSendingRegisterOtp}
+                                isDisabled={!canUseSensitiveAdminActions || registerOtpCooldown > 0}
+                              >
+                                {registerOtpCooldown > 0
+                                  ? ta("registerOtpSendCooldown", { seconds: registerOtpCooldown })
+                                  : ta("registerOtpSend")}
+                              </Button>
+                            </div>
+                            <p className="text-xs text-slate-500 dark:text-slate-400">{ta("registerOtpHint")}</p>
+                          </div>
+                        )}
+                        <Input
+                          label={ta("setupPasswordLabel")}
+                          type="password"
+                          value={registerPassword}
+                          onValueChange={setRegisterPassword}
+                          variant="bordered"
+                          autoComplete="new-password"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Button
+                          variant="flat"
+                          className="h-12 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                          onPress={handleRegisterConsole}
+                          isLoading={isSubmittingRegister}
+                          isDisabled={!canUseSensitiveAdminActions}
+                          endContent={!isSubmittingRegister ? <ChevronRight size={16} /> : undefined}
+                        >
+                          {ta("registerSubmit")}
+                        </Button>
+                      </div>
+                    ) : (
+                      <div className="space-y-4">
+                        <Input
+                          label={ta("loginIdentityLabel")}
+                          value={loginIdentifier}
+                          onValueChange={setLoginIdentifier}
+                          variant="bordered"
+                          autoComplete="username"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("loginPasswordLabel")}
+                          type="password"
+                          value={loginPassword}
+                          onValueChange={setLoginPassword}
+                          variant="bordered"
+                          autoComplete="current-password"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Button
+                          color="primary"
+                          className="h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
+                          onPress={handleLoginAdmin}
+                          isLoading={isSubmittingLogin}
+                          isDisabled={!canUseSensitiveAdminActions}
+                          endContent={!isSubmittingLogin ? <ChevronRight size={16} /> : undefined}
+                        >
+                          {ta("loginSubmit")}
+                        </Button>
                       </div>
                     )}
-                    <Input
-                      label={ta("setupPasswordLabel")}
-                      type="password"
-                      value={registerPassword}
-                      onValueChange={setRegisterPassword}
-                      variant="bordered"
-                      autoComplete="new-password"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Button
-                      variant="flat"
-                      className="h-12 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
-                      onPress={handleRegisterConsole}
-                      isLoading={isSubmittingRegister}
-                      isDisabled={!canUseSensitiveAdminActions}
-                      endContent={!isSubmittingRegister ? <ChevronRight size={16} /> : undefined}
-                    >
-                      {ta("registerSubmit")}
-                    </Button>
                   </div>
-                ) : (
-                  <div className="space-y-4">
-                    <Input
-                      label={ta("loginIdentityLabel")}
-                      value={loginIdentifier}
-                      onValueChange={setLoginIdentifier}
-                      variant="bordered"
-                      autoComplete="username"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Input
-                      label={ta("loginPasswordLabel")}
-                      type="password"
-                      value={loginPassword}
-                      onValueChange={setLoginPassword}
-                      variant="bordered"
-                      autoComplete="current-password"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Button
-                      color="primary"
-                      className="h-12 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
-                      onPress={handleLoginAdmin}
-                      isLoading={isSubmittingLogin}
-                      isDisabled={!canUseSensitiveAdminActions}
-                      endContent={!isSubmittingLogin ? <ChevronRight size={16} /> : undefined}
-                    >
-                      {ta("loginSubmit")}
-                    </Button>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {canUseLinuxDo && (
+                      <Button
+                        variant="flat"
+                        className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                        onPress={handleLinuxDoAuth}
+                        isLoading={isSubmittingLinuxDo}
+                        isDisabled={!canUseSensitiveAdminActions}
+                        endContent={!isSubmittingLinuxDo ? <ChevronRight size={16} /> : undefined}
+                      >
+                        {ta("linuxDoSubmit")}
+                      </Button>
+                    )}
+
+                    {status?.isRecoveryEnabled && (
+                      <button
+                        type="button"
+                        className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
+                          showRecovery
+                            ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
+                            : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
+                        }`}
+                        onClick={() => setShowRecovery((value) => !value)}
+                      >
+                        {showRecovery ? ta("recoveryToggleHide") : ta("recoveryToggleShow")}
+                      </button>
+                    )}
                   </div>
-                )}
-              </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                {canUseLinuxDo && (
-                  <Button
-                    variant="flat"
-                    className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
-                    onPress={handleLinuxDoAuth}
-                    isLoading={isSubmittingLinuxDo}
-                    isDisabled={!canUseSensitiveAdminActions}
-                    endContent={!isSubmittingLinuxDo ? <ChevronRight size={16} /> : undefined}
-                  >
-                    {ta("linuxDoSubmit")}
-                  </Button>
-                )}
-
-                {status?.isRecoveryEnabled && (
-                  <button
-                    type="button"
-                    className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${
-                      showRecovery
-                        ? "bg-amber-100 text-amber-800 dark:bg-amber-950/40 dark:text-amber-200"
-                        : "bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800"
-                    }`}
-                    onClick={() => setShowRecovery((value) => !value)}
-                  >
-                    {showRecovery ? ta("recoveryToggleHide") : ta("recoveryToggleShow")}
-                  </button>
-                )}
-              </div>
-
-              {status?.isRecoveryEnabled && showRecovery && (
-                <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/55">
-                  <div className="space-y-4">
-                    <Input
-                      label={ta("recoveryTokenLabel")}
-                      type="password"
-                      value={recoveryToken}
-                      onValueChange={setRecoveryToken}
-                      variant="bordered"
-                      autoComplete="one-time-code"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Input
-                      label={ta("consoleUsernameLabel")}
-                      value={recoveryUsername}
-                      onValueChange={setRecoveryUsername}
-                      variant="bordered"
-                      autoComplete="username"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Input
-                      label={ta("recoveryPasswordLabel")}
-                      type="password"
-                      value={recoveryPassword}
-                      onValueChange={setRecoveryPassword}
-                      variant="bordered"
-                      autoComplete="new-password"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Input
-                      label={ta("recoveryConfirmPasswordLabel")}
-                      type="password"
-                      value={recoveryPasswordConfirm}
-                      onValueChange={setRecoveryPasswordConfirm}
-                      variant="bordered"
-                      autoComplete="new-password"
-                      classNames={TM_INPUT_CLASSNAMES}
-                    />
-                    <Button
-                      variant="flat"
-                      className="h-11 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
-                      onPress={handleRecoverAdmin}
-                      isLoading={isSubmittingRecovery}
-                      isDisabled={!canUseSensitiveAdminActions}
-                      endContent={!isSubmittingRecovery ? <ChevronRight size={16} /> : undefined}
-                    >
-                      {ta("recoverySubmit")}
-                    </Button>
-                  </div>
+                  {status?.isRecoveryEnabled && showRecovery && (
+                    <div className="rounded-[1.7rem] border border-slate-200/80 bg-slate-50/80 px-4 py-4 dark:border-slate-800 dark:bg-slate-900/55">
+                      <div className="space-y-4">
+                        <Input
+                          label={ta("recoveryTokenLabel")}
+                          type="password"
+                          value={recoveryToken}
+                          onValueChange={setRecoveryToken}
+                          variant="bordered"
+                          autoComplete="one-time-code"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("consoleUsernameLabel")}
+                          value={recoveryUsername}
+                          onValueChange={setRecoveryUsername}
+                          variant="bordered"
+                          autoComplete="username"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("recoveryPasswordLabel")}
+                          type="password"
+                          value={recoveryPassword}
+                          onValueChange={setRecoveryPassword}
+                          variant="bordered"
+                          autoComplete="new-password"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("recoveryConfirmPasswordLabel")}
+                          type="password"
+                          value={recoveryPasswordConfirm}
+                          onValueChange={setRecoveryPasswordConfirm}
+                          variant="bordered"
+                          autoComplete="new-password"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Button
+                          variant="flat"
+                          className="h-11 w-full rounded-full bg-slate-900 text-white transition-all duration-200 hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200"
+                          onPress={handleRecoverAdmin}
+                          isLoading={isSubmittingRecovery}
+                          isDisabled={!canUseSensitiveAdminActions}
+                          endContent={!isSubmittingRecovery ? <ChevronRight size={16} /> : undefined}
+                        >
+                          {ta("recoverySubmit")}
+                        </Button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
-          )}
           </section>
         </motion.div>
       </div>

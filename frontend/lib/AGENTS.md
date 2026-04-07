@@ -11,8 +11,9 @@ This directory owns cross-cutting runtime helpers: transport, session, config, s
 - `api.ts` — central client transport surface, request helpers, error shaping, retry/timeout behavior, and admin/API wrappers
 - `provider-config.ts` — default provider, branding, and API-base env helpers
 - `admin-entry.ts` — configurable admin path helpers; source of truth for public/admin route generation
-- `admin-session.ts` — client session, cookie, and sessionStorage helpers
-- `admin-server-session.ts` — server-side session validation against `/admin/session`
+- `admin-session.ts` — client-side admin session presence and ephemeral revealed-key helpers
+- `admin-session-server.ts` — Next route-handler cookie helpers for the HttpOnly admin session
+- `admin-server-session.ts` — server-side admin-session cookie presence helper for workspace SSR
 
 ## Rules
 - Put shared fetch/auth/error/proxy helpers here, not in page components.
@@ -20,8 +21,9 @@ This directory owns cross-cutting runtime helpers: transport, session, config, s
 - Keep browser storage parsing defensive; clear invalid or expired session state instead of trusting it.
 - Prefer env helper functions (`provider-config.ts`, `admin-entry.ts`) over scattered direct `process.env` reads.
 - If you add a new frontend env knob here, update `.env.example`, `compose.yaml`, and `README.md` instead of leaving it code-only.
-- Server-side validation helpers must preserve forwarded proto/host when calling the backend.
-- Admin session state is intentionally split between cookie and sessionStorage; keep both paths in sync.
+- Server-side validation helpers must only trust forwarded proto/host when `TMPMAIL_TRUST_PROXY_HEADERS=true`; direct browser requests must not be able to spoof proxy metadata.
+- Console JWTs must stay inside the Next HttpOnly cookie path; browser code may only track non-sensitive session presence or one-time revealed secrets.
+- Treat `package.json` as pinned operational input, not a place for new `latest` drift; keep access-key wrappers aligned with the backend contract where `GET /admin/access-key` no longer returns a plaintext secret.
 
 ## Verification
 ```bash

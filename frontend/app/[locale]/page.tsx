@@ -1,6 +1,5 @@
-import AdminEntryPage from "@/components/admin-entry-page"
-import DomainManagementPage from "@/components/domain-management-page"
-import { hasValidServerAdminSession } from "@/lib/admin-server-session"
+import WorkspaceRouteClient from "@/components/workspace-route-client"
+import { hasServerAdminSessionCookie } from "@/lib/admin-server-session"
 
 export const dynamic = "force-dynamic"
 
@@ -22,20 +21,13 @@ export default async function LocaleHomePage({
   const { locale } = await params
   const homePath = `/${locale}`
   const requireSecureTransport = isAdminSecureTransportRequired()
-
-  if (await hasValidServerAdminSession()) {
-    return (
-      <DomainManagementPage
-        entryPath={homePath}
-        requireSecureTransport={requireSecureTransport}
-      />
-    )
-  }
+  const initialHasServerSession = await hasServerAdminSessionCookie()
 
   return (
-    <AdminEntryPage
-      consolePath={homePath}
+    <WorkspaceRouteClient
+      entryPath={homePath}
       requireSecureTransport={requireSecureTransport}
+      initialHasServerSession={initialHasServerSession}
     />
   )
 }

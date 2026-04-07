@@ -115,9 +115,6 @@ export default function EmptyState({
                 <h2 className="text-balance text-3xl font-semibold tracking-tight text-slate-950 dark:text-white md:text-5xl">
                   {t("title")}
                 </h2>
-                <p className="mt-4 max-w-xl text-sm leading-7 text-slate-600 dark:text-slate-300 md:text-base">
-                  {t("description")}
-                </p>
               </div>
 
               <div className="mt-6 flex flex-wrap items-center gap-2">

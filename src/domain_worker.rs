@@ -26,14 +26,14 @@ pub fn spawn_domain_verifier(state: AppState) {
 }
 
 async fn verify_pending_domains(state: &AppState) -> crate::error::AppResult<()> {
-    let Some(mut store) = state
+    let Some(_permit) = state
         .try_lock_store_for_background("domain-verification")
         .await
     else {
         return Ok(());
     };
-    let pending = store.pending_domain_checks().await?;
-    drop(store);
+    let pending = state.store.pending_domain_checks().await?;
+    drop(_permit);
 
     let mut failures = 0_usize;
     for domain in pending {
@@ -42,13 +42,14 @@ async fn verify_pending_domains(state: &AppState) -> crate::error::AppResult<()>
         if result.is_err() {
             failures += 1;
         }
-        let Some(mut store) = state
+        let Some(_permit) = state
             .try_lock_store_for_background("domain-verification")
             .await
         else {
             continue;
         };
-        let _ = store
+        let _ = state
+            .store
             .update_domain_verification_status(domain.id, result.is_ok(), result.err())
             .await?;
     }

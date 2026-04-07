@@ -4,7 +4,9 @@ use axum::{
     extract::{Path, Query, State},
     http::{
         HeaderMap, HeaderValue, StatusCode,
-        header::{CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, PRAGMA},
+        header::{
+            CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, PRAGMA, X_CONTENT_TYPE_OPTIONS,
+        },
     },
     response::Response,
 };
@@ -33,8 +35,7 @@ pub async fn list_messages(
 ) -> AppResult<Json<HydraCollection<MessageSummary>>> {
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let page = query.page.unwrap_or(1);
-    let mut store = state.store.lock().await;
-    let (mut messages, total) = store.list_messages(account_id, page).await?;
+    let (mut messages, total) = state.store.list_messages(account_id, page).await?;
     for message in &mut messages {
         normalize_message_summary_asset_urls(message);
     }
@@ -50,8 +51,7 @@ pub async fn get_message(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let mut store = state.store.lock().await;
-    let mut message = store.get_message(account_id, message_id).await?;
+    let mut message = state.store.get_message(account_id, message_id).await?;
     normalize_message_detail_asset_urls(&mut message);
 
     Ok(Json(message))
@@ -65,9 +65,7 @@ pub async fn download_message_raw(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let mut store = state.store.lock().await;
-    let message = store.get_message(account_id, message_id).await?;
-    drop(store);
+    let message = state.store.get_message(account_id, message_id).await?;
 
     if is_upstream_download_url(&message.summary.download_url) {
         return download_upstream_asset(
@@ -89,9 +87,7 @@ pub async fn download_attachment(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let mut store = state.store.lock().await;
-    let message = store.get_message(account_id, message_id).await?;
-    drop(store);
+    let message = state.store.get_message(account_id, message_id).await?;
 
     let attachment = message
         .attachments
@@ -117,8 +113,8 @@ pub async fn patch_message(
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
     let seen = payload.seen.unwrap_or(true);
-    let mut store = state.store.lock().await;
-    let response = store
+    let response = state
+        .store
         .mark_message_seen(account_id, message_id, seen)
         .await?;
     state.realtime.publish(
@@ -139,8 +135,7 @@ pub async fn delete_message(
     let account_id = auth::account_id_from_headers(&headers, &state.config)?;
     let message_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid message id"))?;
-    let mut store = state.store.lock().await;
-    store.delete_message(account_id, message_id).await?;
+    state.store.delete_message(account_id, message_id).await?;
     state.realtime.publish(
         &state.metrics,
         "message.deleted",
@@ -201,12 +196,11 @@ fn build_binary_response(asset: DownloadedAsset, fallback_filename: &str) -> Res
     let content_type = asset
         .content_type
         .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let content_disposition = asset.content_disposition.unwrap_or_else(|| {
-        format!(
-            "attachment; filename=\"{}\"",
-            sanitize_filename(fallback_filename)
-        )
-    });
+    let _ = asset.content_disposition;
+    let content_disposition = format!(
+        "attachment; filename=\"{}\"",
+        sanitize_filename(fallback_filename)
+    );
 
     build_response(asset.body, &content_type, Some(content_disposition))
 }
@@ -221,6 +215,7 @@ fn build_response(
     let headers = response.headers_mut();
     headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store, private"));
     headers.insert(PRAGMA, HeaderValue::from_static("no-cache"));
+    headers.insert(X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
     headers.insert(
         CONTENT_TYPE,
         HeaderValue::from_str(content_type)
@@ -338,14 +333,15 @@ fn sanitize_boundary(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::env;
-
     use axum::{
         Router,
         body::{Body, to_bytes},
         http::{
             Request, StatusCode,
-            header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, PRAGMA},
+            header::{
+                AUTHORIZATION, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_TYPE, PRAGMA,
+                X_CONTENT_TYPE_OPTIONS,
+            },
         },
         routing::get,
     };
@@ -353,11 +349,12 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
 
-    use super::render_eml;
+    use super::{build_binary_response, render_eml};
     use crate::{
         app::build_router,
         auth,
         config::Config,
+        inbucket::DownloadedAsset,
         models::{Attachment, ImportedMessage, MessageAddress, MessageDetail, MessageSummary},
         state::AppState,
     };
@@ -404,6 +401,13 @@ mod tests {
                 .get(PRAGMA)
                 .and_then(|value| value.to_str().ok()),
             Some("no-cache")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
         );
         assert_eq!(
             response
@@ -466,6 +470,13 @@ mod tests {
             Some("attachment; filename=\"report.pdf\"")
         );
         assert_eq!(
+            response
+                .headers()
+                .get(X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
             to_bytes(response.into_body(), usize::MAX)
                 .await
                 .expect("read attachment body")
@@ -474,6 +485,33 @@ mod tests {
         );
 
         server.abort();
+    }
+
+    #[test]
+    fn binary_download_ignores_inline_content_disposition_from_upstream() {
+        let response = build_binary_response(
+            DownloadedAsset {
+                body: b"attachment-body".to_vec(),
+                content_type: Some("text/html; charset=utf-8".to_owned()),
+                content_disposition: Some("inline".to_owned()),
+            },
+            "report.html",
+        );
+
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_DISPOSITION)
+                .and_then(|value| value.to_str().ok()),
+            Some("attachment; filename=\"report.html\"")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(X_CONTENT_TYPE_OPTIONS)
+                .and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
     }
 
     #[test]
@@ -523,8 +561,6 @@ mod tests {
 
     fn test_config() -> Config {
         Config {
-            admin_state_path: temp_file_path("admin"),
-            store_state_path: temp_file_path("store"),
             cleanup_interval_seconds: 0,
             domain_verification_poll_interval_seconds: 0,
             public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
@@ -532,21 +568,14 @@ mod tests {
         }
     }
 
-    fn temp_file_path(prefix: &str) -> String {
-        env::temp_dir()
-            .join(format!("tmpmail-messages-{prefix}-{}.json", Uuid::new_v4()))
-            .to_string_lossy()
-            .into_owned()
-    }
-
     async fn test_state(config: Config) -> AppState {
-        AppState::new(config).await.expect("build test state")
+        crate::test_support::build_test_state(config, "routes-messages").await
     }
 
     async fn create_account_and_token(state: &AppState, address: &str) -> (Uuid, String, String) {
-        let mut store = state.store.lock().await;
-        let account = store
-            .create_account(address, "secret123", None)
+        let account = state
+            .store
+            .create_account(address, "secret1234", None)
             .await
             .expect("create account");
         let account_id = Uuid::parse_str(&account.id).expect("account uuid");
@@ -557,8 +586,8 @@ mod tests {
     }
 
     async fn first_message_id(state: &AppState, account_id: Uuid) -> String {
-        let mut store = state.store.lock().await;
-        let (messages, total) = store
+        let (messages, total) = state
+            .store
             .list_messages(account_id, 1)
             .await
             .expect("list messages");
@@ -603,8 +632,8 @@ mod tests {
             attachments: vec![attachment],
         };
 
-        let mut store = state.store.lock().await;
-        store
+        state
+            .store
             .import_message_for_recipients(&[recipient.to_owned()], imported)
             .await
             .expect("import message")

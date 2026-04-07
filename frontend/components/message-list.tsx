@@ -23,17 +23,20 @@ interface MessageListProps {
 }
 
 type FetchMode = "initial" | "refresh"
+const INITIAL_INBOX_LOAD_GUARD_MS = 10_000
 
 function LoadingSkeleton({ isMobile }: { isMobile: boolean }) {
   return (
     <div className={`h-full w-full overflow-y-auto ${isMobile ? "p-2" : "p-4"}`}>
-      <div className="rounded-[1.8rem] border border-white/70 bg-white/82 p-5 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none">
+      <div className="rounded-[1.8rem] border border-white/70 bg-white/82 p-4 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none">
         <div className="h-5 w-28 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
-        <div className="mt-3 h-9 w-44 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
-        <div className="mt-3 h-4 w-64 animate-pulse rounded-full bg-slate-100 dark:bg-slate-900/80" />
-        <div className="mt-5 grid gap-3 sm:grid-cols-3">
-          {Array.from({ length: 3 }).map((_, index) => (
-            <div key={index} className="h-24 animate-pulse rounded-[1.4rem] bg-slate-100 dark:bg-slate-900/80" />
+        <div className="mt-3 flex items-center justify-between gap-3">
+          <div className="h-8 w-24 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
+          <div className="h-8 w-20 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
+        </div>
+        <div className="mt-4 flex flex-wrap gap-2">
+          {Array.from({ length: 5 }).map((_, index) => (
+            <div key={index} className="h-8 w-20 animate-pulse rounded-full bg-slate-100 dark:bg-slate-900/80" />
           ))}
         </div>
       </div>
@@ -89,6 +92,8 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
   const locale = useLocale()
   const messageCountRef = useRef(0)
   const fetchRequestIdRef = useRef(0)
+  const lastHandledRefreshKeyRef = useRef(refreshKey ?? 0)
+  const lastAccountIdRef = useRef(currentAccount?.id ?? null)
 
   useEffect(() => {
     messageCountRef.current = messages.length
@@ -103,6 +108,7 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
   const fetchInbox = useCallback(
     async (mode: FetchMode) => {
       const requestId = ++fetchRequestIdRef.current
+      let initialLoadGuardId: ReturnType<typeof globalThis.setTimeout> | null = null
       if (!token || !currentAccount) {
         setMessages([])
         setError(null)
@@ -113,6 +119,14 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
 
       if (mode === "initial") {
         setIsInitialLoading(true)
+        initialLoadGuardId = globalThis.setTimeout(() => {
+          if (fetchRequestIdRef.current !== requestId) {
+            return
+          }
+
+          setIsInitialLoading(false)
+          setError(t("fetchError"))
+        }, INITIAL_INBOX_LOAD_GUARD_MS)
       } else {
         setIsRefreshing(true)
       }
@@ -139,6 +153,10 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
           setMessages([])
         }
       } finally {
+        if (initialLoadGuardId) {
+          globalThis.clearTimeout(initialLoadGuardId)
+        }
+
         if (fetchRequestIdRef.current !== requestId) {
           return
         }
@@ -189,10 +207,29 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
   }, [fetchInbox, currentAccount?.id])
 
   useEffect(() => {
-    if (refreshKey && refreshKey > 0) {
-      void manualRefresh()
+    const nextRefreshKey = refreshKey ?? 0
+    const accountId = currentAccount?.id ?? null
+
+    if (lastAccountIdRef.current !== accountId) {
+      lastAccountIdRef.current = accountId
+      lastHandledRefreshKeyRef.current = nextRefreshKey
     }
-  }, [manualRefresh, refreshKey])
+
+    if (nextRefreshKey <= 0) {
+      return
+    }
+
+    if (isInitialLoading) {
+      return
+    }
+
+    if (nextRefreshKey === lastHandledRefreshKeyRef.current) {
+      return
+    }
+
+    lastHandledRefreshKeyRef.current = nextRefreshKey
+    void manualRefresh()
+  }, [currentAccount?.id, isInitialLoading, manualRefresh, refreshKey])
 
   const activityLocale = locale === "en" ? enUS : zhCN
   const relativeLastCheck = lastCheckTime
@@ -226,8 +263,8 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
 
   const renderHeader = () => (
     <div className={`sticky ${isMobile ? "top-0 -mx-2 px-2" : "top-0 -mx-4 px-4"} z-10 mb-4 bg-gradient-to-b from-slate-50/95 via-slate-50/90 to-transparent pb-4 pt-1 backdrop-blur-sm dark:from-slate-950/95 dark:via-slate-950/85`}>
-      <div className="tm-glass-panel-strong rounded-[1.9rem] p-4 sm:p-5">
-        <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="tm-glass-panel-strong rounded-[1.75rem] p-3.5 sm:p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             {currentAccount && (
               <div className="tm-chip-strong max-w-full">
@@ -235,11 +272,14 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
                 <span className="truncate">{currentAccount.address}</span>
               </div>
             )}
-            <div className="mt-4">
-              <h2 className={`${isMobile ? "text-xl" : "text-2xl"} font-bold text-slate-900 dark:text-slate-100`}>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <h2 className={`${isMobile ? "text-lg" : "text-xl"} font-bold text-slate-900 dark:text-slate-100`}>
                 {t("inbox")}
               </h2>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">{streamLabel}</p>
+              <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold ${streamTone}`}>
+                <span className={`h-2 w-2 rounded-full ${isEnabled ? "bg-current" : "bg-slate-400"}`} />
+                {streamLabel}
+              </div>
             </div>
           </div>
 
@@ -255,11 +295,7 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
           </Button>
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-          <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 font-semibold ${streamTone}`}>
-            <span className={`h-2.5 w-2.5 rounded-full ${isEnabled ? "bg-current" : "bg-slate-400"}`} />
-            {streamLabel}
-          </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
           {relativeLastCheck && (
             <span className="tm-chip">
               <Clock3 size={12} />
@@ -271,24 +307,21 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
               {t("newMessagesBadge", { count: newMessageCount })}
             </span>
           )}
-        </div>
-
-        <div className="mt-5 grid gap-3 sm:grid-cols-3">
-          <div className="tm-stat-card">
-            <div className="tm-section-label">{t("messageCount")}</div>
-            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{messages.length}</div>
-            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t("inbox")}</div>
-          </div>
-          <div className="tm-stat-card">
-            <div className="tm-section-label">{t("new")}</div>
-            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{unreadCount}</div>
-            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{t("newEmail")}</div>
-          </div>
-          <div className="tm-stat-card">
-            <div className="tm-section-label">{td("attachments")}</div>
-            <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-slate-100">{attachmentCount}</div>
-            <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">{td("attachments")}</div>
-          </div>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/80 bg-white/75 px-3 py-1 text-slate-700 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-200">
+            <FileText size={12} />
+            <span className="font-semibold">{messages.length}</span>
+            <span>{t("messageCount")}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/80 bg-white/75 px-3 py-1 text-slate-700 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-200">
+            <Mail size={12} />
+            <span className="font-semibold">{unreadCount}</span>
+            <span>{t("new")}</span>
+          </span>
+          <span className="inline-flex items-center gap-1.5 rounded-full border border-slate-200/80 bg-white/75 px-3 py-1 text-slate-700 dark:border-slate-800 dark:bg-slate-950/70 dark:text-slate-200">
+            <Paperclip size={12} />
+            <span className="font-semibold">{attachmentCount}</span>
+            <span>{td("attachments")}</span>
+          </span>
         </div>
       </div>
     </div>

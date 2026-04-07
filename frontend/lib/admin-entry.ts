@@ -52,7 +52,6 @@ export function replaceBrowserPath(targetPath: string): void {
   }
 
   if (window.location.pathname === targetPath) {
-    window.location.reload()
     return
   }
 

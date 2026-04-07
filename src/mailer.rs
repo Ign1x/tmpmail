@@ -1,10 +1,12 @@
 use lettre::{
-    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor,
-    message::Mailbox,
+    AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::Mailbox,
     transport::smtp::authentication::Credentials,
 };
 
-use crate::{config::Config, error::{ApiError, AppResult}};
+use crate::{
+    config::Config,
+    error::{ApiError, AppResult},
+};
 
 pub struct MailSender {
     from: Mailbox,
@@ -53,8 +55,8 @@ impl MailSender {
 
             builder.build()
         } else {
-            let mut builder =
-                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host).port(config.smtp_port);
+            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+                .port(config.smtp_port);
 
             if let Some(username) = config
                 .smtp_username
@@ -71,16 +73,18 @@ impl MailSender {
             builder.build()
         };
 
-        Some(Self {
-            from,
-            transport,
-        })
+        Some(Self { from, transport })
     }
 
-    pub async fn send_text_email(&self, to_email: &str, subject: &str, body: &str) -> AppResult<()> {
-        let to_mailbox: Mailbox = to_email
-            .parse()
-            .map_err(|error| ApiError::validation(format!("invalid recipient email address: {error}")))?;
+    pub async fn send_text_email(
+        &self,
+        to_email: &str,
+        subject: &str,
+        body: &str,
+    ) -> AppResult<()> {
+        let to_mailbox: Mailbox = to_email.parse().map_err(|error| {
+            ApiError::validation(format!("invalid recipient email address: {error}"))
+        })?;
         let message = Message::builder()
             .from(self.from.clone())
             .to(to_mailbox)

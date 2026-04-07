@@ -1,35 +1,21 @@
-id,phase,track,task,depends_on,deliverable,status,notes
-WF-001,P0,planning,锁定 DuckMail 最小兼容接口,-,"/domains,/accounts,/token,/me,/messages,/messages/:id,/accounts/:id",done,"已核对设计文档与 DuckMail/lib/api.ts"
-WF-002,P0,project,创建 Rust API 工程骨架,WF-001,"Cargo.toml, src/, axum 服务入口",done,"已在当前目录建立可运行 Rust 服务"
-WF-003,P0,observability,实现健康检查与基础 tracing,WF-002,"GET /healthz, GET /readyz, TraceLayer",done,"健康检查、优雅退出与 HTTP tracing 已接入"
-WF-004,P0,domains,实现 GET /domains Hydra 集合,WF-001,"公共域名查询与 isVerified 字段",done,"当前回合先用内存仓储提供公共域名"
-WF-005,P0,accounts,实现 POST /accounts,WF-001,"账户创建、密码散列、expiresIn 处理",done,"已支持邮箱创建、重复校验与过期策略"
-WF-006,P0,auth,实现 POST /token 与 GET /me,WF-005,"JWT 登录与当前账户信息",done,"已支持 Bearer JWT 主流程"
-WF-007,P0,messages,实现 GET /messages 与 GET /messages/:id,WF-006,"Hydra 列表、详情、欢迎邮件种子数据",done,"已提供欢迎邮件种子数据支撑联调"
-WF-008,P0,messages,实现 PATCH /messages/:id 与 DELETE /messages/:id,WF-007,"已读与软删除",done,"已支持已读更新与软删除"
-WF-009,P0,accounts,实现 DELETE /accounts/:id,WF-006,"账户删除与 token 归属校验",done,"已限制 token 只能删除自身账户"
-WF-010,P0,frontend,编写 DuckMail 联调配置与 smoke case,WF-004|WF-009,"tmpmail 默认 provider、frontend compose、本地 smoke 与主流程联调记录",done,"已完成 provider 抽象、前端容器化与 smoke 探活；当前可直接在 3000 端口联调本地 tmpmail 前后端"
-WF-017,P0,ops,补齐最小部署产物,WF-002,"Dockerfile, compose.yaml, scripts/",done,"已支持单容器部署当前最小 API"
-WF-018,P0,ingest,准备 Inbucket 独立测试部署栈,WF-017,"scripts/inbucket-deploy.sh",done,"已收敛为单脚本生成 compose 与环境文件"
-WF-019,P0,ingest,实现远端 Inbucket 基础轮询导入,WF-018,"后台 poller、消息导入与去重",done,"已验证远端 SMTP 投递后可经 /messages 读取"
-WF-011,P1,storage,接入 PostgreSQL 与 sqlx 仓储层,WF-002,"替换内存仓储，补 migrations",done,"已接入可选 PostgreSQL/sqlx 仓储；新增 migrations 与 TMPMAIL_DATABASE_URL；统一 AppStore 同时支持 Memory/JSON 快照与 Postgres 两种后端"
-WF-012,P1,domains,实现 API Key 与私有域名过滤,WF-004,"ownerId 私有域名返回与权限控制",done,"已支持管理型 API Key、公共/私有域名过滤，以及私有域名下创建账户权限控制"
-WF-013,P1,domains,实现域名添加、DNS 记录生成、验证任务,WF-012,"domains 管理接口与 verification worker",done,"已实现 POST /domains、GET /domains/:id/records、POST /domains/:id/verify、自动验证 worker 与前端设置面板联调"
-WF-014,P1,ingest,对接 Inbucket 邮件接收链路,WF-011,"mail worker 导入、解析、落库",done,"已完成 Inbucket 导入、附件字段透传、上游删除同步、审计写入与实时事件广播；当前仍基于内存仓储，持久化留待 WF-011"
-WF-020,P1,stability,执行前后端稳定性硬化批次,WF-010|WF-013,"严格输入校验、安全代理转发、localStorage 容错、日志降噪、lint/test/build 验证",done,"已完成邮箱/域名校验收紧、代理 endpoint 与自定义上游校验、表单前置校验、缓存解析兜底与严格验证"
-WF-021,P1,frontend,重构前端应用导航与设置入口,WF-010|WF-013,"左侧收件箱/刷新/设置/域名管理导航，设置页与域名管理页拆分，移除右上角设置弹窗",done,"已完成共享应用壳、独立设置页、独立域名管理页与移动端抽屉同步"
-WF-022,P1,frontend,改为账户生成式管理 API Key 流程,WF-021,"设置页为当前登录账户生成/同步管理 API Key，域名页自动复用，侧边栏保持域名管理在上/设置在下",done,"已补齐 /api-keys/current 与 /api-keys/generate 联调、设置页生成与复制、域名页自动同步、文档与 API docs 更新，并移除默认 demo 静态 key"
-WF-023,P1,admin,切换为管理员域名后台与全局域名模型,WF-021|WF-022,"/admin 管理后台、TMPMAIL_ADMIN_API_KEY 鉴权、域名对所有用户开放、移除 DuckMail 预置上游",done,"已将域名管理从账号级 key 模型切回管理员模型；域名激活后全局可用；侧边栏改为 Admin 入口；/domains 重定向到 /admin；前端代理与文档去除 DuckMail 预置上游"
-WF-024,P1,cleanup,清理旧私有域名与 DuckMail 残留,WF-023,"移除 ownerId/私有域名暗示、清理旧环境变量与品牌文案、收口单本地 provider 默认行为",done,"已删除未使用的旧设置弹窗与 ownerId 字段，侧边栏改为 admin 在上 settings 在下，移除 TMPMAIL_API_KEYS、Mail.tm/duckmail 预置残留并同步文档"
-WF-025,P1,frontend,清理旧浏览器 key 注入与 Mercure 残留,WF-024,"公共请求不再自动读取 legacy api-key，本地清理旧 key，删除未使用的 Mercure 测试/钩子与无效表单字段",done,"已移除 api-provider-context 中的 legacy api-key 状态；公共请求只接受显式管理员 key；删除未使用的 Mercure 文件；自定义 provider 表单收口到当前实际使用字段"
-WF-026,P1,frontend,修复 API 文档字体与排版稳定性,WF-025,"API docs 改为稳定字体体系、中文排版收口、小屏标签无横向穿模、响应/代码区溢出约束",done,"已切换 API docs 到受控卡片布局，补齐中英文字体与代码字体，中文场景去掉过激 tracking，小屏标签改为可换行，构建与真页面截图已验证"
-WF-027,P1,admin,改造独立 /admin 密码后台与生成式管理员 Key,WF-023|WF-025,"独立 /admin 页面、管理员密码初始化/登录、服务端生成与轮换管理员 Key、管理员状态持久化卷",done,"已移除侧栏 Admin 入口；/admin 改为独立页面；首次访问需设置密码；服务端持久化生成管理员 Key 并支持复制/轮换；域名接口同时接受管理员会话或管理员 Key"
-WF-028,P1,admin,支持自定义管理员入口路径,WF-027,"TMPMAIL_ADMIN_ENTRY_PATH、可配置入口重写、/domains 跳转到当前管理员入口、文档同步",done,"已支持默认 /admin 和自定义入口路径；前端代理按当前入口重写到独立管理台；/domains 与管理页提示统一跟随当前配置"
-WF-029,P1,domains,修复公网 DNS 记录推导与校验逻辑,WF-013|WF-019,"自动从远端 Inbucket 推导公网 MX 路由，按 A/AAAA/CNAME 生成并校验 DNS 记录，文档与示例配置同步",done,"已忽略 legacy mail.tmpmail.local 占位值；未显式配置时默认生成 MX -> mail.<domain>，再依据 TMPMAIL_INBUCKET_BASE_URL 推导公网 A/AAAA/CNAME；域名验证改为同时校验 TXT、MX 与路由记录"
-WF-030,P1,storage,实现本地快照持久化仓储,WF-014|WF-016,"TMPMAIL_STORE_STATE_PATH、自动落盘/恢复 domains/accounts/messages/audit_logs/imported_source_keys、文档与部署配置同步",done,"已接入内存仓储 JSON 快照持久化；启动时自动恢复数据，写操作原子落盘到 data/storage；补齐默认公共域名回填，作为 PostgreSQL/sqlx 之前的可部署过渡层"
-WF-031,P1,admin,允许本地测试关闭 HTTPS 强制校验,WF-027|WF-030,"TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT 开关、本地 .env 默认关闭、鉴权逻辑与文档同步",done,"管理员密码、会话和管理员 key 鉴权现在支持按环境切换 HTTPS 强制校验；默认仍开启，仅本地开发 .env 关闭以便 HTTP 调试"
-WF-032,P1,frontend,修复 /admin 页面误拦截内网 HTTP 管理操作,WF-031,"管理台前端跟随 TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT 运行时配置，局域网 HTTP 调试可正常初始化密码/登录/复制 Key",done,"已移除前端对 localhost 之外地址的硬编码拦截；/admin 现在按服务端运行时配置决定是否禁用敏感操作，并补齐非 HTTPS 的复制回退"
-WF-033,P1,storage,补齐切库导入与真实就绪检查,WF-011,"PostgreSQL 空库首启自动导入 JSON 快照，/readyz 真实检测当前存储后端，Compose API 健康检查切到 readyz",done,"已实现从 TMPMAIL_STORE_STATE_PATH 自动导入 domains/accounts/messages/imported_source_keys/audit_logs 到 PostgreSQL；readyz 在 Postgres 模式下执行真实数据库探测"
-WF-034,P1,admin,补齐管理员忘记密码恢复流程,WF-027|WF-031,"TMPMAIL_ADMIN_RECOVERY_TOKEN、/admin/recover、独立恢复表单、恢复后自动轮换管理员 Key",done,"已支持通过环境变量临时启用恢复令牌，在 /admin 安全重置管理员密码并返回新会话和新管理员 Key；同时补齐前端恢复入口与更清晰的 401/403 错误提示"
-WF-015,P2,realtime,实现 SSE 或 Webhook 实时收件推送,WF-014,"前端摆脱轮询的订阅能力",done,"已提供 /events SSE、前端流式订阅与自动重连；修正 accountId 参数兼容与代理长连接稳定性；通过 PATCH/DELETE 真请求验证 message.updated/message.deleted"
-WF-016,P2,ops,补齐清理任务、指标、审计日志,WF-011,"cleanup worker、metrics、audit_logs",done,"已补齐 cleanup worker、/metrics、/admin/metrics、/admin/audit-logs、/admin/cleanup 与 /admin 运维面板；curl 真请求验证通过"
+id,priority,area,title,status,notes
+01,P0,backend,Restrict upstream asset downloads to the configured Inbucket origin,completed,Prevent SSRF through imported attachment or raw message download URLs
+02,P0,backend,Force safe download headers for raw and attachment responses,completed,Always download as attachment and add nosniff on binary delivery
+03,P0,backend+frontend,Add request body size limits to Axum and the Next proxy,completed,Reject oversized JSON payloads before they consume excessive memory
+04,P0,frontend,Add baseline browser security headers in Next.js,completed,Ship CSP plus standard anti-clickjacking and anti-MIME-sniffing headers
+05,P0,frontend+backend,Move admin session handling to HttpOnly cookie or BFF-only auth,completed,Console JWT now stays in a Next-managed HttpOnly cookie and /api/mail injects auth server-side while redacting sessionToken from login/setup responses
+06,P0,auth,Make console sessions revocable after password or recovery changes,completed,Console JWTs now carry a server-validated session version so password and recovery resets invalidate older sessions immediately
+07,P0,auth,Add login and recovery rate limiting,completed,Protect /admin/login /admin/recover and /token with fixed-window IP and IP+identity throttling
+08,P0,otp,Add OTP attempt caps and IP-scoped send throttling,completed,OTP codes now expire after repeated wrong attempts and send endpoints enforce IP-scoped fixed-window throttling
+09,P1,ops,Gate or disable public /metrics by default,completed,Current metrics endpoint is public and touches the store on every scrape
+10,P1,sse,Add SSE connection quotas and abuse protections,completed,/events now enforces a config-driven global SSE connection ceiling and releases slots on early disconnects
+11,P1,storage,Reduce contention from the global AppStore mutex,completed,AppStore now internalizes backend-specific concurrency and background jobs share a lightweight scheduling gate instead of serializing every request on one outer mutex
+12,P1,otp,Back OTP storage with shared persistence,completed,OTP codes now persist only as hashed records in the shared PostgreSQL otp_codes table so restarts and multi-instance deploys keep working
+13,P1,admin,Remove side effects from GET /admin/access-key,completed,GET now returns existing access-key metadata only and no longer mints a new plaintext secret on read
+14,P1,oauth,Harden Linux Do OAuth with callback allowlisting and stricter validation,completed,Redirect URIs must match the configured callback allowlist or current admin origin and Linux Do URLs now reject credentials plus insecure non-local http
+15,P1,config,Enforce strong JWT secrets instead of relying on weak placeholders,completed,Config startup now rejects placeholder or too-short JWT secrets unless TMPMAIL_ALLOW_INSECURE_DEV_SECRETS is explicitly enabled for local development
+16,P1,admin,Limit TMPMAIL_ADMIN_PASSWORD to explicit bootstrap or dev flows,completed,TMPMAIL_ADMIN_PASSWORD is now gated by TMPMAIL_ADMIN_PASSWORD_MODE so bootstrap is safe by default and force reset requires an explicit opt-in
+17,P1,auth,Raise password policy and pin Argon2 parameters,completed,Mailbox and console passwords now require 10 characters and password hashing uses pinned Argon2id parameters instead of implicit defaults
+18,P2,ops,Run containers as non-root with tighter runtime permissions,completed,API and frontend runtime images now default to non-root users and compose adds no-new-privileges read-only rootfs tmpfs /tmp and dropped Linux capabilities
+19,P2,dependencies,Patch vulnerable and floating frontend dependencies,completed,Frontend latest dependencies are pinned to verified versions and a lodash override clears the prior npm audit vulnerability chain
+20,P2,ops,Improve deployment defaults for PostgreSQL credentials and exposure,completed,PostgreSQL compose defaults now bind to localhost and require an explicit strong password instead of shipping weak public-facing defaults

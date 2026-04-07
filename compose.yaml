@@ -11,16 +11,31 @@ services:
     image: tmpmail-api:local
     container_name: tmpmail-api
     restart: unless-stopped
+    user: "${TMPMAIL_CONTAINER_UID:-1000}:${TMPMAIL_CONTAINER_GID:-1000}"
     env_file:
       - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      inbucket:
+        condition: service_started
+    networks:
+      - public
+      - backend
     environment:
-      TMPMAIL_DATABASE_URL: "${TMPMAIL_DATABASE_URL:-}"
-      TMPMAIL_ADMIN_STATE_PATH: "${TMPMAIL_ADMIN_STATE_PATH:-data/config/admin-state.json}"
-      TMPMAIL_STORE_STATE_PATH: "${TMPMAIL_STORE_STATE_PATH:-data/storage/store-state.json}"
-    volumes:
-      - ./data:/app/data
+      TMPMAIL_INGEST_MODE: "remote-inbucket"
+      TMPMAIL_INBUCKET_BASE_URL: "http://inbucket:9000"
+      TMPMAIL_INBUCKET_USERNAME: ""
+      TMPMAIL_INBUCKET_PASSWORD: ""
     ports:
       - "${TMPMAIL_API_BIND_IP:-127.0.0.1}:${TMPMAIL_PORT:-8080}:${TMPMAIL_PORT:-8080}"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:${TMPMAIL_PORT:-8080}/readyz"]
       interval: 10s
@@ -33,26 +48,41 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
+        TMPMAIL_NPM_REGISTRY: "${TMPMAIL_NPM_REGISTRY:-}"
+        TMPMAIL_NPM_FETCH_TIMEOUT: "${TMPMAIL_NPM_FETCH_TIMEOUT:-300000}"
         NEXT_PUBLIC_TMPMAIL_BRAND_NAME: "${NEXT_PUBLIC_TMPMAIL_BRAND_NAME:-TmpMail}"
+        NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN:-}"
         NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN:-}"
         NEXT_PUBLIC_TMPMAIL_REPO_URL: "${NEXT_PUBLIC_TMPMAIL_REPO_URL:-}"
     image: tmpmail-frontend:local
     container_name: tmpmail-frontend
     restart: unless-stopped
+    user: "${TMPMAIL_CONTAINER_UID:-1000}:${TMPMAIL_CONTAINER_GID:-1000}"
     depends_on:
       api:
         condition: service_healthy
+    networks:
+      - public
     environment:
       PORT: 3000
       TMPMAIL_SERVER_API_BASE_URL: "http://api:${TMPMAIL_PORT:-8080}"
       TMPMAIL_ADMIN_ENTRY_PATH: "${TMPMAIL_ADMIN_ENTRY_PATH:-/admin}"
       TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT: "${TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT:-true}"
+      TMPMAIL_TRUST_PROXY_HEADERS: "${TMPMAIL_TRUST_PROXY_HEADERS:-false}"
       NEXT_PUBLIC_TMPMAIL_BRAND_NAME: "${NEXT_PUBLIC_TMPMAIL_BRAND_NAME:-TmpMail}"
+      NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN:-}"
       NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN: "${NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN:-}"
       NEXT_PUBLIC_TMPMAIL_REPO_URL: "${NEXT_PUBLIC_TMPMAIL_REPO_URL:-}"
       NEXT_TELEMETRY_DISABLED: "1"
     ports:
       - "${TMPMAIL_FRONTEND_BIND_IP:-0.0.0.0}:${TMPMAIL_FRONTEND_PORT:-3000}:3000"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/en').then((response) => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
       interval: 15s
@@ -64,18 +94,57 @@ services:
     image: postgres:17-alpine
     container_name: tmpmail-postgres
     restart: unless-stopped
-    profiles: ["postgres"]
+    networks:
+      - backend
     environment:
       POSTGRES_DB: "${TMPMAIL_POSTGRES_DB:-tmpmail}"
       POSTGRES_USER: "${TMPMAIL_POSTGRES_USER:-tmpmail}"
-      POSTGRES_PASSWORD: "${TMPMAIL_POSTGRES_PASSWORD:-tmpmail}"
+      POSTGRES_PASSWORD: "${TMPMAIL_POSTGRES_PASSWORD:?TMPMAIL_POSTGRES_PASSWORD must be set to a strong value for the bundled postgres service}"
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
     ports:
-      - "${TMPMAIL_POSTGRES_PORT:-5432}:5432"
+      - "${TMPMAIL_POSTGRES_BIND_IP:-127.0.0.1}:${TMPMAIL_POSTGRES_PORT:-5432}:5432"
+    security_opt:
+      - no-new-privileges:true
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${TMPMAIL_POSTGRES_USER:-tmpmail} -d ${TMPMAIL_POSTGRES_DB:-tmpmail}"]
       interval: 10s
       timeout: 5s
       retries: 10
       start_period: 10s
+
+  inbucket:
+    image: inbucket/inbucket@sha256:4a4c4cf553967e1863e4f48c828774786ac9ee73c53b3a3ecef10f66e5a2cdfb
+    container_name: tmpmail-inbucket
+    restart: unless-stopped
+    networks:
+      - backend
+    environment:
+      INBUCKET_LOGLEVEL: info
+      INBUCKET_MAILBOXNAMING: local
+      INBUCKET_SMTP_ADDR: 0.0.0.0:2500
+      INBUCKET_SMTP_DOMAIN: "${TMPMAIL_MAIL_EXCHANGE_HOST:-mail.tmpmail.local}"
+      INBUCKET_SMTP_DEFAULTACCEPT: "true"
+      INBUCKET_SMTP_DEFAULTSTORE: "true"
+      INBUCKET_POP3_ADDR: 0.0.0.0:1100
+      INBUCKET_WEB_ADDR: 0.0.0.0:9000
+      INBUCKET_WEB_MONITORVISIBLE: "false"
+      INBUCKET_WEB_MONITORHISTORY: "50"
+      INBUCKET_STORAGE_TYPE: file
+      INBUCKET_STORAGE_PARAMS: path:/storage
+      INBUCKET_STORAGE_RETENTIONPERIOD: 168h
+      INBUCKET_STORAGE_MAILBOXMSGCAP: 2000
+    ports:
+      - "25:2500"
+    volumes:
+      - ./data/inbucket/config:/config
+      - ./data/inbucket/storage:/storage
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+networks:
+  public:
+  backend:
+    internal: true

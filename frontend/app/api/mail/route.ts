@@ -1,11 +1,31 @@
 import { type NextRequest, NextResponse } from "next/server";
 
+import { ADMIN_SESSION_PROXY_HEADER } from "@/lib/admin-session-cookie";
+import {
+  clearAdminSessionCookie,
+  readAdminSessionCookie,
+  setAdminSessionCookie,
+} from "@/lib/admin-session-server";
 import { DEFAULT_PROVIDER_BASE_URL } from "@/lib/provider-config";
 
 const UPSTREAM_TIMEOUT_MS = 15_000;
+const BODY_LIMIT_BYTES = 1024 * 1024;
+const ADMIN_SESSION_ESTABLISH_ENDPOINTS = new Set([
+  "POST /admin/setup",
+  "POST /admin/login",
+  "POST /admin/register",
+  "POST /admin/linux-do/complete",
+  "POST /admin/recover",
+]);
+const ADMIN_SESSION_CLEAR_ENDPOINTS = new Set(["POST /admin/password"]);
 
 function getApiBaseUrl(): string {
   return process.env.TMPMAIL_SERVER_API_BASE_URL?.trim() || DEFAULT_PROVIDER_BASE_URL;
+}
+
+function trustProxyHeaders(): boolean {
+  const value = process.env.TMPMAIL_TRUST_PROXY_HEADERS?.trim().toLowerCase()
+  return ["1", "true", "yes", "on"].includes(value || "")
 }
 
 function normalizeEndpoint(endpoint: string | null): string | null {
@@ -37,6 +57,8 @@ function buildForwardHeaders(headersInit?: HeadersInit): Headers {
   if (!headers.has("User-Agent")) {
     headers.set("User-Agent", "TmpMail/1.0 (Next Proxy)");
   }
+
+  headers.delete(ADMIN_SESSION_PROXY_HEADER);
 
   return headers;
 }
@@ -85,13 +107,21 @@ async function proxyRequest(
       logUpstreamFailure(endpoint, response);
     }
 
-    return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
-      headers: buildResponseHeaders(response),
-    });
+    const requestKey = createRequestKey(options.method, endpoint);
+    if (
+      response.ok &&
+      ADMIN_SESSION_ESTABLISH_ENDPOINTS.has(requestKey) &&
+      isJsonLikeResponse(response)
+    ) {
+      return await buildAdminSessionResponse(originalRequest, response);
+    }
+
+    return buildProxyResponse(originalRequest, endpoint, response);
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
+      console.error(
+        `[mail-proxy] Request timed out endpoint=${endpoint} upstream=${getApiBaseUrl().replace(/\/+$/, "")}${endpoint} timeoutMs=${UPSTREAM_TIMEOUT_MS}`,
+      );
       return NextResponse.json(
         { error: `Failed to fetch from API: Request to ${endpoint} timed out` },
         { status: 504 },
@@ -112,6 +142,94 @@ async function proxyRequest(
   }
 }
 
+function createRequestKey(method: string | undefined, endpoint: string): string {
+  return `${(method || "GET").toUpperCase()} ${endpoint}`;
+}
+
+function isAdminSessionProxyRequest(request: NextRequest): boolean {
+  const headerValue = request.headers
+    .get(ADMIN_SESSION_PROXY_HEADER)
+    ?.trim()
+    .toLowerCase()
+
+  return ["1", "true", "yes", "on"].includes(headerValue || "")
+}
+
+function isJsonLikeResponse(response: Response): boolean {
+  const contentType = response.headers.get("content-type")?.toLowerCase() || ""
+  return (
+    contentType.includes("application/json") ||
+    contentType.includes("application/ld+json")
+  )
+}
+
+function buildProxyResponse(
+  originalRequest: NextRequest,
+  endpoint: string,
+  response: Response,
+): Response {
+  const proxiedResponse = new NextResponse(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: buildResponseHeaders(response),
+  });
+
+  if (
+    (isAdminSessionProxyRequest(originalRequest) &&
+      (response.status === 401 || response.status === 403)) ||
+    (response.ok &&
+      ADMIN_SESSION_CLEAR_ENDPOINTS.has(
+        createRequestKey(originalRequest.method, endpoint),
+      ))
+  ) {
+    clearAdminSessionCookie(proxiedResponse, originalRequest);
+  }
+
+  return proxiedResponse;
+}
+
+async function buildAdminSessionResponse(
+  originalRequest: NextRequest,
+  response: Response,
+): Promise<Response> {
+  const payload = await response
+    .clone()
+    .json()
+    .catch(() => null);
+
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    return buildProxyResponse(originalRequest, "", response);
+  }
+
+  const sessionToken =
+    typeof (payload as { sessionToken?: unknown }).sessionToken === "string"
+      ? (payload as { sessionToken: string }).sessionToken.trim()
+      : "";
+  if (!sessionToken) {
+    return buildProxyResponse(originalRequest, "", response);
+  }
+
+  const redactedPayload = { ...(payload as Record<string, unknown>) };
+  delete redactedPayload.sessionToken;
+
+  const proxiedResponse = NextResponse.json(redactedPayload, {
+    status: response.status,
+    statusText: response.statusText,
+  });
+
+  for (const [name, value] of buildResponseHeaders(response).entries()) {
+    if (name.toLowerCase() === "content-type") {
+      continue;
+    }
+
+    proxiedResponse.headers.set(name, value);
+  }
+
+  setAdminSessionCookie(proxiedResponse, originalRequest, sessionToken);
+
+  return proxiedResponse;
+}
+
 function getEndpointOrResponse(request: NextRequest): string | Response {
   const endpoint = normalizeEndpoint(
     new URL(request.url).searchParams.get("endpoint"),
@@ -124,9 +242,27 @@ function getEndpointOrResponse(request: NextRequest): string | Response {
 }
 
 async function readJsonBody(request: NextRequest): Promise<string | Response> {
+  const declaredLength = Number.parseInt(
+    request.headers.get("content-length")?.trim() || "",
+    10,
+  );
+  if (Number.isFinite(declaredLength) && declaredLength > BODY_LIMIT_BYTES) {
+    return NextResponse.json(
+      { error: "Request body is too large" },
+      { status: 413 },
+    );
+  }
+
   const rawBody = await request.text();
   if (!rawBody.trim()) {
     return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+  }
+
+  if (Buffer.byteLength(rawBody, "utf8") > BODY_LIMIT_BYTES) {
+    return NextResponse.json(
+      { error: "Request body is too large" },
+      { status: 413 },
+    );
   }
 
   try {
@@ -141,17 +277,26 @@ function createAuthHeaders(
   contentType?: string,
 ): HeadersInit {
   const authHeader = request.headers.get("Authorization");
-  const forwardedProto =
-    request.headers.get("X-Forwarded-Proto")?.trim() ||
-    request.nextUrl.protocol.replace(":", "");
-  const forwardedHost =
-    request.headers.get("X-Forwarded-Host")?.trim() ||
-    request.headers.get("Host")?.trim() ||
-    request.nextUrl.host;
+  const sessionToken =
+    !authHeader && isAdminSessionProxyRequest(request)
+      ? readAdminSessionCookie(request)
+      : "";
+  const forwardedProto = trustProxyHeaders()
+    ? request.headers.get("X-Forwarded-Proto")?.trim() ||
+      request.nextUrl.protocol.replace(":", "")
+    : request.nextUrl.protocol.replace(":", "")
+  const forwardedHost = trustProxyHeaders()
+    ? request.headers.get("X-Forwarded-Host")?.trim() ||
+      request.nextUrl.host ||
+      request.headers.get("Host")?.trim() ||
+      ""
+    : request.nextUrl.host || request.headers.get("Host")?.trim() || ""
   const headers: Record<string, string> = {};
 
   if (authHeader) {
     headers.Authorization = authHeader;
+  } else if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
   }
 
   if (forwardedProto) {

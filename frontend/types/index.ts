@@ -29,9 +29,9 @@ export interface Account {
   isDeleted: boolean
   createdAt: string
   updatedAt: string
-  // 添加本地存储的认证信息
-  password?: string // 存储密码用于重新获取token
-  token?: string // 存储该账户的token
+  // 仅在当前浏览器会话的内存中保留，不写入持久化存储
+  password?: string
+  token?: string
   // 添加API提供商信息
   providerId?: string // 账户所属的API提供商ID，用于向后兼容，默认使用内置 tmpmail provider
 }

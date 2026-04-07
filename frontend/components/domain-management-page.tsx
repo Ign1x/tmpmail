@@ -1,6 +1,15 @@
 "use client"
 
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useTransition,
+  useSyncExternalStore,
+} from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@heroui/button"
 import {
@@ -11,6 +20,7 @@ import {
   Globe2,
   Inbox,
   KeyRound,
+  Languages,
   LogOut,
   Mail,
   Menu,
@@ -25,14 +35,16 @@ import {
   Users2,
   X,
 } from "lucide-react"
-import { useTranslations } from "next-intl"
+import { useLocale, useTranslations } from "next-intl"
 import { useAuth } from "@/contexts/auth-context"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
+import { usePathname, useRouter } from "@/i18n/navigation"
 import {
   type AdminAccessKey,
   createAdminAccessKey,
   createAdminUser,
+  deleteAdminSession,
   type AdminMetricsResponse,
   type AdminSessionInfo,
   type AdminSystemSettings,
@@ -66,27 +78,31 @@ import {
   updateAdminPassword,
   updateAdminSystemSettings,
   updateAdminUser,
+  restoreAdminSessionInfo,
   verifyManagedDomain,
 } from "@/lib/api"
 import {
   clearStoredAdminSession,
   clearStoredPendingRevealedAdminKey,
   clearStoredRevealedAdminKey,
-  getStoredAdminSession,
+  hasStoredAdminSession,
   getStoredPendingRevealedAdminKey,
   getStoredRevealedAdminKeys,
+  setStoredAdminSession,
+  takePendingAdminSession,
   storeRevealedAdminKey,
+  subscribeToAdminSession,
   type StoredAdminKey,
   type StoredAdminKeyMap,
 } from "@/lib/admin-session"
 import MessageDetail from "@/components/message-detail"
 import MessageList from "@/components/message-list"
+import ConsoleActionModal from "@/components/console-action-modal"
 import type { Account, Domain, DomainDnsRecord, Message } from "@/types"
 import { BRAND_LABEL, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import ThemeModeToggle from "@/components/theme-mode-toggle"
 import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
 import { Input, Select, SelectItem, Textarea } from "@/components/tm-form-fields"
-import { replaceBrowserPath } from "@/lib/admin-entry"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
 const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
@@ -94,6 +110,13 @@ const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
   apiTokenConfigured: false,
   autoSyncEnabled: true,
 }
+
+const normalizeCloudflareSettings = (
+  settings: ConsoleCloudflareSettings,
+): ConsoleCloudflareSettings => ({
+  ...DEFAULT_CLOUDFLARE_SETTINGS,
+  ...settings,
+})
 const DEFAULT_SETTINGS: AdminSystemSettings = {
   systemEnabled: true,
   registrationSettings: {
@@ -124,6 +147,33 @@ interface DomainManagementPageProps {
 
 type ConsoleView = "mailboxes" | "overview" | "settings" | "domains" | "users" | "security" | "logs"
 type SettingsSection = "core" | "registration" | "limits" | "integrations" | "cloudflare"
+type ActionDialogTone = "primary" | "danger"
+
+type ConfirmActionDialogState = {
+  kind: "confirm"
+  title: string
+  description?: string
+  confirmLabel: string
+  tone: ActionDialogTone
+  resolve: (confirmed: boolean) => void
+}
+
+type InputActionDialogState = {
+  kind: "input"
+  title: string
+  description?: string
+  confirmLabel: string
+  tone: ActionDialogTone
+  inputLabel: string
+  inputType?: "text" | "password" | "number"
+  inputMode?: "text" | "numeric" | "decimal" | "email" | "search" | "tel" | "url" | "none"
+  inputPlaceholder?: string
+  value: string
+  validate?: (value: string) => string | null
+  resolve: (value: string | null) => void
+}
+
+type ActionDialogState = ConfirmActionDialogState | InputActionDialogState
 
 function parseSuffixList(value: string): string[] {
   return value
@@ -173,6 +223,12 @@ function formatRatioPercent(part: number | undefined, total: number | undefined)
   }
 
   return Math.max(0, Math.min(100, (part / total) * 100))
+}
+
+function getConsoleRoleBadgeClassName(role: ConsoleUser["role"]): string {
+  return role === "admin"
+    ? "border-amber-200 bg-amber-50 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200"
+    : "border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-950/35 dark:text-emerald-200"
 }
 
 function isTrustedAdminContext(): boolean {
@@ -239,14 +295,17 @@ function buildSettingsSavePayload(
 ): AdminUpdateSystemSettingsRequest {
   const payload: AdminUpdateSystemSettingsRequest = {}
 
+  if (draft.systemEnabled !== saved.systemEnabled) {
+    payload.systemEnabled = draft.systemEnabled
+  }
   if (draft.mailExchangeHost !== saved.mailExchangeHost) {
-    payload.mailExchangeHost = draft.mailExchangeHost
+    payload.mailExchangeHost = draft.mailExchangeHost ?? ""
   }
   if (draft.mailRouteTarget !== saved.mailRouteTarget) {
-    payload.mailRouteTarget = draft.mailRouteTarget
+    payload.mailRouteTarget = draft.mailRouteTarget ?? ""
   }
   if (draft.domainTxtPrefix !== saved.domainTxtPrefix) {
-    payload.domainTxtPrefix = draft.domainTxtPrefix
+    payload.domainTxtPrefix = draft.domainTxtPrefix ?? ""
   }
   if (!areSettingsEqual(draft.registrationSettings, saved.registrationSettings)) {
     payload.registrationSettings = draft.registrationSettings
@@ -274,6 +333,15 @@ function sortMailboxAccounts(accounts: Account[]): Account[] {
   return [...accounts].sort((left, right) => left.address.localeCompare(right.address))
 }
 
+function mailboxDomain(address: string): string {
+  const separatorIndex = address.lastIndexOf("@")
+  if (separatorIndex < 0) {
+    return ""
+  }
+
+  return address.slice(separatorIndex + 1).trim().toLowerCase()
+}
+
 function matchesMaskedAdminKey(apiKey: string, maskedKey: string): boolean {
   const trimmedApiKey = apiKey.trim()
   const trimmedMaskedKey = maskedKey.trim()
@@ -292,6 +360,7 @@ export default function DomainManagementPage({
   entryPath,
   requireSecureTransport,
 }: DomainManagementPageProps) {
+  const [isLocalePending, startLocaleTransition] = useTransition()
   const { toast } = useHeroUIToast()
   const {
     currentAccount,
@@ -301,14 +370,17 @@ export default function DomainManagementPage({
     clearAccounts,
     syncAccounts,
   } = useAuth()
+  const locale = useLocale()
+  const router = useRouter()
+  const pathname = usePathname()
   const ta = useTranslations("admin")
   const ts = useTranslations("settings")
   const tc = useTranslations("common")
+  const th = useTranslations("header")
+  const tm = useTranslations("mainPage")
 
   const [view, setView] = useState<ConsoleView>("mailboxes")
-  const [sessionToken, setSessionToken] = useState("")
   const [isBootstrapping, setIsBootstrapping] = useState(true)
-  const [isRedirectingToEntry, setIsRedirectingToEntry] = useState(false)
   const [sessionInfo, setSessionInfo] = useState<AdminSessionInfo | null>(null)
   const [serviceStatus, setServiceStatus] = useState<{
     status: "ready" | "degraded" | "offline"
@@ -366,20 +438,123 @@ export default function DomainManagementPage({
     DEFAULT_CLOUDFLARE_SETTINGS,
   )
   const [cloudflareApiTokenInput, setCloudflareApiTokenInput] = useState("")
+  const [savedCloudflareSettings, setSavedCloudflareSettings] = useState<ConsoleCloudflareSettings>(
+    DEFAULT_CLOUDFLARE_SETTINGS,
+  )
   const [cloudflareSaving, setCloudflareSaving] = useState(false)
   const [cloudflareTesting, setCloudflareTesting] = useState(false)
   const [cloudflareSyncingDomainId, setCloudflareSyncingDomainId] = useState<string | null>(null)
   const [isSecureAdminContext, setIsSecureAdminContext] = useState(() => !requireSecureTransport)
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
+  const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null)
+  const [actionDialogError, setActionDialogError] = useState<string | null>(null)
   const currentMailboxAccountRef = useRef(currentAccount)
   const mailboxTokenRef = useRef(mailboxToken)
   const hasBootstrappedRef = useRef(false)
+  const hasLoadedUsersRef = useRef(false)
+  const hasLoadedOpsRef = useRef(false)
+  const hasLoadedAccessKeysRef = useRef(false)
+  const hasLoadedCloudflareSettingsRef = useRef(false)
+  const isMountedRef = useRef(true)
+  const hasClientSession = useSyncExternalStore(
+    subscribeToAdminSession,
+    hasStoredAdminSession,
+    () => true,
+  )
 
   const currentUser = sessionInfo?.user ?? null
   const isAdmin = currentUser?.role === "admin"
-  const hasAdminSession = sessionToken.trim().length > 0
+  const hasAdminSession = Boolean(sessionInfo)
   const canUseSensitiveAdminActions = !requireSecureTransport || isSecureAdminContext
   const hasReachedAccessKeyLimit = adminAccessKeys.length >= settingsDraft.userLimits.apiKeyLimit
+  const currentUserRoleBadgeClassName = currentUser
+    ? getConsoleRoleBadgeClassName(currentUser.role)
+    : ""
+
+  const closeActionDialog = useCallback(() => {
+    setActionDialog((current) => {
+      if (!current) {
+        return null
+      }
+
+      if (current.kind === "confirm") {
+        current.resolve(false)
+      } else {
+        current.resolve(null)
+      }
+
+      return null
+    })
+    setActionDialogError(null)
+  }, [])
+
+  const requestConfirmation = useCallback(
+    (
+      dialog: Omit<ConfirmActionDialogState, "kind" | "resolve">,
+    ): Promise<boolean> =>
+      new Promise((resolve) => {
+        setActionDialogError(null)
+        setActionDialog({
+          kind: "confirm",
+          ...dialog,
+          resolve,
+        })
+      }),
+    [],
+  )
+
+  const requestInputValue = useCallback(
+    (
+      dialog: Omit<InputActionDialogState, "kind" | "resolve">,
+    ): Promise<string | null> =>
+      new Promise((resolve) => {
+        setActionDialogError(null)
+        setActionDialog({
+          kind: "input",
+          ...dialog,
+          resolve,
+        })
+      }),
+    [],
+  )
+
+  const handleActionDialogValueChange = useCallback((value: string) => {
+    setActionDialog((current) => {
+      if (!current || current.kind !== "input") {
+        return current
+      }
+
+      return {
+        ...current,
+        value,
+      }
+    })
+    setActionDialogError(null)
+  }, [])
+
+  const handleActionDialogConfirm = useCallback(() => {
+    const dialog = actionDialog
+    if (!dialog) {
+      return
+    }
+
+    if (dialog.kind === "input") {
+      const validationError = dialog.validate?.(dialog.value) ?? null
+      if (validationError) {
+        setActionDialogError(validationError)
+        return
+      }
+
+      setActionDialog(null)
+      setActionDialogError(null)
+      dialog.resolve(dialog.value)
+      return
+    }
+
+    setActionDialog(null)
+    setActionDialogError(null)
+    dialog.resolve(true)
+  }, [actionDialog])
   const usersById = useMemo(
     () => Object.fromEntries(adminUsers.map((user) => [user.id, user])),
     [adminUsers],
@@ -472,11 +647,18 @@ export default function DomainManagementPage({
     setSessionInfo((current) => (current ? { ...current, systemSettings: normalizedSettings } : current))
   }, [normalizeSettings])
 
+  const applyAdminSession = useCallback((session: AdminSessionInfo) => {
+    const normalizedSettings = normalizeSettings(session.systemSettings)
+    setStoredAdminSession()
+    setSessionInfo({ ...session, systemSettings: normalizedSettings })
+    setSettingsDraft(normalizedSettings)
+    setNewUserDomainLimit(String(normalizedSettings.userLimits.defaultDomainLimit))
+  }, [normalizeSettings])
+
   const applyCloudflareSettings = useCallback((settings: ConsoleCloudflareSettings) => {
-    setCloudflareSettings({
-      ...DEFAULT_CLOUDFLARE_SETTINGS,
-      ...settings,
-    })
+    const normalized = normalizeCloudflareSettings(settings)
+    setCloudflareSettings(normalized)
+    setSavedCloudflareSettings(normalized)
     setCloudflareApiTokenInput("")
   }, [])
 
@@ -500,6 +682,14 @@ export default function DomainManagementPage({
   useEffect(() => {
     mailboxTokenRef.current = mailboxToken
   }, [mailboxToken])
+
+  useEffect(() => {
+    isMountedRef.current = true
+
+    return () => {
+      isMountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
@@ -530,24 +720,31 @@ export default function DomainManagementPage({
     return () => window.clearTimeout(timeoutId)
   }, [pendingRevealedAdminKey, revealedAdminKeys, syncRevealedAdminKeysFromStorage])
 
-  const clearAdminSession = useCallback(() => {
+  const clearAdminSession = useCallback(async (options?: { revokeServerSession?: boolean }) => {
+    hasLoadedUsersRef.current = false
+    hasLoadedOpsRef.current = false
+    hasLoadedAccessKeysRef.current = false
+    hasLoadedCloudflareSettingsRef.current = false
     clearStoredAdminSession()
     clearStoredRevealedAdminKey()
     clearAccounts()
-    setSessionToken("")
     setSessionInfo(null)
     setAdminAccessKeys([])
     setRevealedAdminKeys({})
     setPendingRevealedAdminKey(null)
     setCopiedKeyId(null)
     setCloudflareSettings(DEFAULT_CLOUDFLARE_SETTINGS)
+    setSavedCloudflareSettings(DEFAULT_CLOUDFLARE_SETTINGS)
     setCloudflareApiTokenInput("")
     setCloudflareTesting(false)
     setMailboxAccounts([])
     setSelectedMessage(null)
-    setIsRedirectingToEntry(true)
-    replaceBrowserPath(entryPath)
-  }, [clearAccounts, entryPath])
+    if (options?.revokeServerSession !== false) {
+      try {
+        await deleteAdminSession()
+      } catch {}
+    }
+  }, [clearAccounts])
 
   useEffect(() => {
     if (!isAdmin && ["overview", "users", "logs"].includes(view)) {
@@ -555,14 +752,22 @@ export default function DomainManagementPage({
     }
   }, [isAdmin, view])
 
+  useEffect(() => {
+    if (isBootstrapping || !sessionInfo || hasClientSession) {
+      return
+    }
+
+    void clearAdminSession()
+  }, [clearAdminSession, hasClientSession, isBootstrapping, sessionInfo])
+
   const loadManagedDomains = async (silent = false) => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
     setManagedDomainsLoading(true)
     try {
-      const domains = await fetchManagedDomains(DEFAULT_PROVIDER_ID, sessionToken)
+      const domains = await fetchManagedDomains(DEFAULT_PROVIDER_ID)
       setManagedDomains(sortManagedDomains(domains))
     } catch (error) {
       if (!silent) {
@@ -578,74 +783,96 @@ export default function DomainManagementPage({
     }
   }
 
-  const loadUsers = async (silent = false) => {
-    if (!sessionToken.trim() || !isAdmin) {
-      return
-    }
-
-    setUsersLoading(true)
-    try {
-      setAdminUsers(await fetchAdminUsers(sessionToken, DEFAULT_PROVIDER_ID))
-    } catch (error) {
-      if (!silent) {
-        toast({
-          title: ta("userLoadFailed"),
-          description: getErrorDescription(error, ta("userLoadFailedDescription")),
-          color: "danger",
-          variant: "flat",
-        })
-      }
-    } finally {
-      setUsersLoading(false)
-    }
-  }
-
-  const loadOps = async (silent = false) => {
-    if (!sessionToken.trim() || !isAdmin) {
-      return
-    }
-
-    setLogsLoading(true)
-    try {
-      const [metrics, logs, status] = await Promise.all([
-        getAdminMetrics(sessionToken, DEFAULT_PROVIDER_ID),
-        getAdminAuditLogs(sessionToken, DEFAULT_PROVIDER_ID, 60),
-        fetchServiceStatus(DEFAULT_PROVIDER_ID),
-      ])
-      setAdminMetrics(metrics)
-      setAdminAuditLogs(logs.entries)
-      setServiceStatus(status)
-    } catch (error) {
-      if (!silent) {
-        toast({
-          title: ta("opsLoadFailed"),
-          description: getErrorDescription(error, ta("opsLoadFailedDescription")),
-          color: "danger",
-          variant: "flat",
-        })
-      }
-    } finally {
-      setLogsLoading(false)
-    }
-  }
-
-  const loadAccessKeys = useCallback(
-    async (silent = false, sessionTokenOverride = sessionToken) => {
-      const effectiveSessionToken = sessionTokenOverride.trim()
-      if (!effectiveSessionToken) {
+  const loadUsers = useCallback(
+    async (silent = false) => {
+      if (!hasAdminSession || !isAdmin) {
         return
       }
 
-    setAccessKeysLoading(true)
-    try {
-      const response = await fetchAdminAccessKeys(effectiveSessionToken, DEFAULT_PROVIDER_ID)
-      setAdminAccessKeys(response.keys)
-      setCopiedKeyId((current) =>
-        current && response.keys.some((key) => key.id === current) ? current : null,
-      )
-    } catch (error) {
-      if (!silent) {
-        toast({
+      setUsersLoading(true)
+      try {
+        setAdminUsers(await fetchAdminUsers(DEFAULT_PROVIDER_ID))
+      } catch (error) {
+        if (!silent) {
+          toast({
+            title: ta("userLoadFailed"),
+            description: getErrorDescription(error, ta("userLoadFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      } finally {
+        setUsersLoading(false)
+      }
+    },
+    [hasAdminSession, isAdmin, ta, toast],
+  )
+
+  const loadOps = useCallback(
+    async (silent = false) => {
+      if (!hasAdminSession || !isAdmin) {
+        return
+      }
+
+      setLogsLoading(true)
+      try {
+        const [metricsResult, logsResult, statusResult] = await Promise.allSettled([
+          getAdminMetrics(DEFAULT_PROVIDER_ID),
+          getAdminAuditLogs(DEFAULT_PROVIDER_ID, 60),
+          fetchServiceStatus(DEFAULT_PROVIDER_ID),
+        ])
+
+        let hasCriticalFailure = false
+
+        if (metricsResult.status === "fulfilled") {
+          setAdminMetrics(metricsResult.value)
+        } else {
+          hasCriticalFailure = true
+        }
+
+        if (logsResult.status === "fulfilled") {
+          setAdminAuditLogs(logsResult.value.entries)
+        } else {
+          hasCriticalFailure = true
+        }
+
+        if (statusResult.status === "fulfilled") {
+          setServiceStatus(statusResult.value)
+        } else {
+          setServiceStatus({ status: "offline" })
+        }
+
+        if (!silent && hasCriticalFailure) {
+          toast({
+            title: ta("opsLoadFailed"),
+            description: ta("opsLoadFailedDescription"),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      } finally {
+        setLogsLoading(false)
+      }
+    },
+    [hasAdminSession, isAdmin, ta, toast],
+  )
+
+  const loadAccessKeys = useCallback(
+    async (silent = false) => {
+      if (!hasAdminSession) {
+        return
+      }
+
+      setAccessKeysLoading(true)
+      try {
+        const response = await fetchAdminAccessKeys(DEFAULT_PROVIDER_ID)
+        setAdminAccessKeys(response.keys)
+        setCopiedKeyId((current) =>
+          current && response.keys.some((key) => key.id === current) ? current : null,
+        )
+      } catch (error) {
+        if (!silent) {
+          toast({
             title: ta("keyListLoadFailed"),
             description: getErrorDescription(error, ta("keyListLoadFailedDescription")),
             color: "danger",
@@ -656,20 +883,17 @@ export default function DomainManagementPage({
         setAccessKeysLoading(false)
       }
     },
-    [sessionToken, ta, toast],
+    [hasAdminSession, ta, toast],
   )
 
   const loadCloudflareSettings = useCallback(
-    async (silent = false, sessionTokenOverride = sessionToken) => {
-      const effectiveSessionToken = sessionTokenOverride.trim()
-      if (!effectiveSessionToken) {
+    async (silent = false) => {
+      if (!hasAdminSession) {
         return
       }
 
       try {
-        applyCloudflareSettings(
-          await fetchConsoleCloudflareSettings(effectiveSessionToken, DEFAULT_PROVIDER_ID),
-        )
+        applyCloudflareSettings(await fetchConsoleCloudflareSettings(DEFAULT_PROVIDER_ID))
       } catch (error) {
         if (!silent) {
           toast({
@@ -681,26 +905,28 @@ export default function DomainManagementPage({
         }
       }
     },
-    [applyCloudflareSettings, sessionToken, ta, toast],
+    [applyCloudflareSettings, hasAdminSession, ta, toast],
   )
 
   const syncMailboxAccountState = useCallback(
     (accounts: Account[]) => {
       const normalizedAccounts = sortMailboxAccounts(
-        accounts.map((account) => ({
-          ...account,
-          password:
-            storedMailboxAccounts.find((item) => item.id === account.id)?.password ||
-            storedMailboxAccounts.find((item) => item.address === account.address)?.password,
-          token:
-            storedMailboxAccounts.find((item) => item.id === account.id)?.token ||
-            storedMailboxAccounts.find((item) => item.address === account.address)?.token,
-          providerId:
-            account.providerId ||
-            storedMailboxAccounts.find((item) => item.id === account.id)?.providerId ||
-            storedMailboxAccounts.find((item) => item.address === account.address)?.providerId ||
-            DEFAULT_PROVIDER_ID,
-        })),
+        accounts
+          .filter((account) => !account.isDeleted)
+          .map((account) => ({
+            ...account,
+            password:
+              storedMailboxAccounts.find((item) => item.id === account.id)?.password ||
+              storedMailboxAccounts.find((item) => item.address === account.address)?.password,
+            token:
+              storedMailboxAccounts.find((item) => item.id === account.id)?.token ||
+              storedMailboxAccounts.find((item) => item.address === account.address)?.token,
+            providerId:
+              account.providerId ||
+              storedMailboxAccounts.find((item) => item.id === account.id)?.providerId ||
+              storedMailboxAccounts.find((item) => item.address === account.address)?.providerId ||
+              DEFAULT_PROVIDER_ID,
+          })),
       )
 
       setMailboxAccounts(normalizedAccounts)
@@ -718,9 +944,8 @@ export default function DomainManagementPage({
   )
 
   const activateMailbox = useCallback(
-    async (account: Account, silent = false, sessionTokenOverride = sessionToken) => {
-      const effectiveSessionToken = sessionTokenOverride.trim()
-      if (!effectiveSessionToken) {
+    async (account: Account, silent = false) => {
+      if (!hasAdminSession) {
         return false
       }
 
@@ -730,11 +955,7 @@ export default function DomainManagementPage({
         let response: { token: string; id: string }
 
         try {
-          response = await issueOwnedAccountToken(
-            effectiveSessionToken,
-            account.id,
-            providerId,
-          )
+          response = await issueOwnedAccountToken(account.id, providerId)
         } catch (issueError) {
           if (!account.password) {
             throw issueError
@@ -751,7 +972,6 @@ export default function DomainManagementPage({
           response.token,
         )
         setSelectedMessage(null)
-        setMailboxRefreshKey((current) => current + 1)
 
         if (!silent) {
           toast({
@@ -776,27 +996,26 @@ export default function DomainManagementPage({
         setActivatingMailboxId((current) => (current === account.id ? null : current))
       }
     },
-    [activateAccount, sessionToken, ta, toast],
+    [activateAccount, hasAdminSession, ta, toast],
   )
 
   const loadMailboxAccounts = useCallback(
-    async (
-      silent = false,
-      sessionTokenOverride = sessionToken,
-      options?: { forceActivate?: boolean },
-    ) => {
-      const effectiveSessionToken = sessionTokenOverride.trim()
-      if (!effectiveSessionToken) {
+    async (silent = false, options?: { forceActivate?: boolean }) => {
+      if (!hasAdminSession) {
         return
       }
 
       setMailboxAccountsLoading(true)
       try {
-        const accounts = await fetchOwnedAccounts(effectiveSessionToken, DEFAULT_PROVIDER_ID)
+        const accounts = await fetchOwnedAccounts(DEFAULT_PROVIDER_ID)
         const normalizedAccounts = syncMailboxAccountState(accounts)
+        const activeAccounts = normalizedAccounts.filter(
+          (account) => !account.isDeleted && !account.isDisabled,
+        )
         const preferredAccount =
           (currentMailboxAccountRef.current &&
             normalizedAccounts.find((account) => account.id === currentMailboxAccountRef.current?.id)) ||
+          activeAccounts[0] ||
           normalizedAccounts[0]
         const shouldActivatePreferredAccount =
           Boolean(preferredAccount) &&
@@ -808,7 +1027,7 @@ export default function DomainManagementPage({
           )
 
         if (preferredAccount && shouldActivatePreferredAccount) {
-          await activateMailbox(preferredAccount, true, effectiveSessionToken)
+          await activateMailbox(preferredAccount, true)
         }
       } catch (error) {
         if (!silent) {
@@ -825,7 +1044,7 @@ export default function DomainManagementPage({
     },
     [
       activateMailbox,
-      sessionToken,
+      hasAdminSession,
       syncMailboxAccountState,
       ta,
       toast,
@@ -841,56 +1060,127 @@ export default function DomainManagementPage({
     const bootstrap = async () => {
       setIsBootstrapping(true)
 
-      const storedToken = getStoredAdminSession()
       syncRevealedAdminKeysFromStorage()
 
-      if (!storedToken) {
-        setIsRedirectingToEntry(true)
-        setIsBootstrapping(false)
-        replaceBrowserPath(entryPath)
-        return
-      }
-
       if (requireSecureTransport && !isTrustedAdminContext()) {
-        clearAdminSession()
+        await clearAdminSession()
         return
       }
-
-      setSessionToken(storedToken)
 
       try {
-        const [session, domains, status] = await Promise.all([
-          getAdminSessionInfo(storedToken, DEFAULT_PROVIDER_ID),
-          fetchManagedDomains(DEFAULT_PROVIDER_ID, storedToken),
-          fetchServiceStatus(DEFAULT_PROVIDER_ID),
-        ])
-
-        const normalizedSettings = normalizeSettings(session.systemSettings)
-        setSessionInfo({ ...session, systemSettings: normalizedSettings })
-        setSettingsDraft(normalizedSettings)
-        setNewUserDomainLimit(String(normalizedSettings.userLimits.defaultDomainLimit))
-        setManagedDomains(sortManagedDomains(domains))
-        setServiceStatus(status)
-        await Promise.all([
-          loadCloudflareSettings(true, storedToken),
-          loadMailboxAccounts(true, storedToken, { forceActivate: true }),
-          loadAccessKeys(true, storedToken),
-        ])
-
-        if (session.user.role === "admin") {
-          const [users, metrics, logs] = await Promise.all([
-            fetchAdminUsers(storedToken, DEFAULT_PROVIDER_ID),
-            getAdminMetrics(storedToken, DEFAULT_PROVIDER_ID),
-            getAdminAuditLogs(storedToken, DEFAULT_PROVIDER_ID, 60),
-          ])
-          setAdminUsers(users)
-          setAdminMetrics(metrics)
-          setAdminAuditLogs(logs.entries)
-        } else {
-          setAdminUsers([])
-          setAdminMetrics(null)
-          setAdminAuditLogs([])
+        const pendingSession = takePendingAdminSession<AdminSessionInfo>()
+        if (pendingSession && isMountedRef.current) {
+          applyAdminSession(pendingSession)
+          setIsBootstrapping(false)
         }
+
+        const session = await restoreAdminSessionInfo(DEFAULT_PROVIDER_ID)
+
+        if (!isMountedRef.current) {
+          return
+        }
+
+        applyAdminSession(session)
+        setIsBootstrapping(false)
+
+        setManagedDomainsLoading(true)
+        void (async () => {
+          try {
+            const domains = await fetchManagedDomains(DEFAULT_PROVIDER_ID)
+            if (!isMountedRef.current) {
+              return
+            }
+            setManagedDomains(sortManagedDomains(domains))
+          } catch (error) {
+            if (!isMountedRef.current) {
+              return
+            }
+            toast({
+              title: ts("managedDomainsLoadFailed"),
+              description: getErrorDescription(error, ts("managedDomainsLoadFailed")),
+              color: "danger",
+              variant: "flat",
+            })
+          } finally {
+            if (isMountedRef.current) {
+              setManagedDomainsLoading(false)
+            }
+          }
+        })()
+
+        void (async () => {
+          try {
+            const status = await fetchServiceStatus(DEFAULT_PROVIDER_ID)
+            if (!isMountedRef.current) {
+              return
+            }
+            setServiceStatus(status)
+          } catch {}
+        })()
+
+        setMailboxAccountsLoading(true)
+        void (async () => {
+          try {
+            const accounts = await fetchOwnedAccounts(DEFAULT_PROVIDER_ID)
+            if (!isMountedRef.current) {
+              return
+            }
+
+            const normalizedAccounts = syncMailboxAccountState(accounts)
+            const activeAccounts = normalizedAccounts.filter(
+              (account) => !account.isDeleted && !account.isDisabled,
+            )
+            const preferredAccount =
+              (currentMailboxAccountRef.current &&
+                normalizedAccounts.find(
+                  (account) => account.id === currentMailboxAccountRef.current?.id,
+                )) ||
+              activeAccounts[0] ||
+              normalizedAccounts[0]
+
+            if (preferredAccount) {
+              const providerId = preferredAccount.providerId || DEFAULT_PROVIDER_ID
+              let issuedToken: string | null = null
+
+              try {
+                issuedToken = (
+                  await issueOwnedAccountToken(preferredAccount.id, providerId)
+                ).token
+              } catch (issueError) {
+                if (preferredAccount.password) {
+                  issuedToken = (
+                    await getToken(
+                      preferredAccount.address,
+                      preferredAccount.password,
+                      providerId,
+                    )
+                  ).token
+                } else {
+                  void issueError
+                }
+              }
+
+              if (issuedToken && isMountedRef.current) {
+                activateAccount(
+                  {
+                    ...preferredAccount,
+                    providerId,
+                  },
+                  issuedToken,
+                )
+                setSelectedMessage(null)
+              }
+            }
+          } catch {} finally {
+            if (isMountedRef.current) {
+              setMailboxAccountsLoading(false)
+            }
+          }
+        })()
+
+        setAdminUsers([])
+        setAdminMetrics(null)
+        setAdminAuditLogs([])
       } catch (error) {
         toast({
           title: ta("sessionRestoreFailed"),
@@ -898,26 +1188,80 @@ export default function DomainManagementPage({
           color: "danger",
           variant: "flat",
         })
-        clearAdminSession()
+        await clearAdminSession()
         return
       } finally {
-        setIsBootstrapping(false)
+        if (isMountedRef.current) {
+          setIsBootstrapping(false)
+        }
       }
     }
 
     void bootstrap()
   }, [
+    activateAccount,
+    applyAdminSession,
     clearAdminSession,
     entryPath,
-    loadCloudflareSettings,
-    loadAccessKeys,
-    loadMailboxAccounts,
-    normalizeSettings,
     requireSecureTransport,
+    syncMailboxAccountState,
     syncRevealedAdminKeysFromStorage,
     ta,
+    ts,
     toast,
   ])
+
+  useEffect(() => {
+    if (!hasAdminSession || !isAdmin || !["overview", "logs"].includes(view)) {
+      return
+    }
+
+    if (hasLoadedOpsRef.current) {
+      return
+    }
+
+    hasLoadedOpsRef.current = true
+    void loadOps(true)
+  }, [hasAdminSession, isAdmin, loadOps, view])
+
+  useEffect(() => {
+    if (!hasAdminSession || !isAdmin || view !== "users") {
+      return
+    }
+
+    if (hasLoadedUsersRef.current) {
+      return
+    }
+
+    hasLoadedUsersRef.current = true
+    void loadUsers(true)
+  }, [hasAdminSession, isAdmin, loadUsers, view])
+
+  useEffect(() => {
+    if (!hasAdminSession || view !== "security") {
+      return
+    }
+
+    if (hasLoadedAccessKeysRef.current) {
+      return
+    }
+
+    hasLoadedAccessKeysRef.current = true
+    void loadAccessKeys(true)
+  }, [hasAdminSession, loadAccessKeys, view])
+
+  useEffect(() => {
+    if (!hasAdminSession || view !== "settings") {
+      return
+    }
+
+    if (hasLoadedCloudflareSettingsRef.current) {
+      return
+    }
+
+    hasLoadedCloudflareSettingsRef.current = true
+    void loadCloudflareSettings(true)
+  }, [hasAdminSession, loadCloudflareSettings, view])
 
   const handleCopyAdminKey = async (key: AdminAccessKey) => {
     const apiKey = getVisibleAdminKeyValue(key)
@@ -973,14 +1317,13 @@ export default function DomainManagementPage({
   }
 
   const handleGenerateAdminKey = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession || isCreatingAccessKey || isBootstrapping || accessKeysLoading) {
       return
     }
 
     setIsCreatingAccessKey(true)
     try {
       const response = await createAdminAccessKey(
-        sessionToken,
         {
           name: newAccessKeyName.trim() || undefined,
         },
@@ -1000,6 +1343,7 @@ export default function DomainManagementPage({
           .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime()),
       )
       setNewAccessKeyName("")
+      void loadAccessKeys(true)
       toast({
         title: ta("keyCreated"),
         description: ta("keyCreatedDescription", { name: response.key.name }),
@@ -1019,13 +1363,19 @@ export default function DomainManagementPage({
   }
 
   const handleDeleteAccessKey = async (key: AdminAccessKey) => {
-    if (!window.confirm(ta("keyDeleteConfirm", { name: key.name }))) {
+    const confirmed = await requestConfirmation({
+      title: ta("deleteKey"),
+      description: ta("keyDeleteConfirm", { name: key.name }),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    })
+    if (!confirmed) {
       return
     }
 
     setDeletingAccessKeyId(key.id)
     try {
-      await deleteAdminAccessKey(sessionToken, key.id, DEFAULT_PROVIDER_ID)
+      await deleteAdminAccessKey(key.id, DEFAULT_PROVIDER_ID)
       setAdminAccessKeys((current) => current.filter((item) => item.id !== key.id))
       setRevealedAdminKeys((current) => {
         if (!(key.id in current)) {
@@ -1064,7 +1414,7 @@ export default function DomainManagementPage({
   }
 
   const handleUpdatePassword = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1073,19 +1423,14 @@ export default function DomainManagementPage({
       return
     }
 
-    if (nextPassword.trim().length < 6) {
+    if (nextPassword.trim().length < 10) {
       toast({ title: ta("passwordTooShort"), color: "warning", variant: "flat" })
       return
     }
 
     setIsUpdatingPassword(true)
     try {
-      await updateAdminPassword(
-        sessionToken,
-        currentPassword,
-        nextPassword,
-        DEFAULT_PROVIDER_ID,
-      )
+      await updateAdminPassword(currentPassword, nextPassword, DEFAULT_PROVIDER_ID)
       setCurrentPassword("")
       setNextPassword("")
       toast({
@@ -1107,7 +1452,7 @@ export default function DomainManagementPage({
   }
 
   const handleCreateMailbox = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1135,7 +1480,6 @@ export default function DomainManagementPage({
     setIsCreatingMailbox(true)
     try {
       const createdAccount = await createOwnedAccount(
-        sessionToken,
         mailboxAddress,
         DEFAULT_PROVIDER_ID,
       )
@@ -1179,13 +1523,17 @@ export default function DomainManagementPage({
   }
 
   const handleDeleteMailbox = async (account: Account) => {
-    if (!window.confirm(ta("mailboxDeleteConfirm", { address: account.address }))) {
+    const confirmed = await requestConfirmation({
+      title: account.address,
+      description: ta("mailboxDeleteConfirm", { address: account.address }),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    })
+    if (!confirmed) {
       return
     }
 
-    setDeletingMailboxId(account.id)
-    try {
-      await deleteOwnedAccount(sessionToken, account.id, DEFAULT_PROVIDER_ID)
+    const applyDeletedMailboxState = async () => {
       const nextAccounts = mailboxAccounts.filter((item) => item.id !== account.id)
       setMailboxAccounts(nextAccounts)
       syncAccounts(nextAccounts)
@@ -1197,6 +1545,13 @@ export default function DomainManagementPage({
       } else if (currentAccount?.id === account.id) {
         await activateMailbox(nextAccounts[0], true)
       }
+      void loadMailboxAccounts(true)
+    }
+
+    setDeletingMailboxId(account.id)
+    try {
+      await deleteOwnedAccount(account.id, DEFAULT_PROVIDER_ID)
+      await applyDeletedMailboxState()
       toast({
         title: ta("mailboxDeleted"),
         description: account.address,
@@ -1204,6 +1559,17 @@ export default function DomainManagementPage({
         variant: "flat",
       })
     } catch (error) {
+      if (error instanceof Error && error.message.includes("HTTP 404")) {
+        await applyDeletedMailboxState()
+        toast({
+          title: ta("mailboxDeleted"),
+          description: account.address,
+          color: "success",
+          variant: "flat",
+        })
+        return
+      }
+
       toast({
         title: ta("mailboxDeleteFailed"),
         description: getErrorDescription(error, ta("mailboxDeleteFailedDescription")),
@@ -1216,7 +1582,7 @@ export default function DomainManagementPage({
   }
 
   const handleCreateDomain = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1230,7 +1596,6 @@ export default function DomainManagementPage({
       const createdDomain = await createManagedDomain(
         managedDomainInput.trim(),
         DEFAULT_PROVIDER_ID,
-        sessionToken,
       )
       setManagedDomains((current) =>
         sortManagedDomains([createdDomain, ...current.filter((item) => item.id !== createdDomain.id)]),
@@ -1294,7 +1659,7 @@ export default function DomainManagementPage({
     if (!recordsByDomainId[domainId]) {
       setRecordsLoadingById((current) => ({ ...current, [domainId]: true }))
       try {
-        const records = await getManagedDomainRecords(domainId, DEFAULT_PROVIDER_ID, sessionToken)
+        const records = await getManagedDomainRecords(domainId, DEFAULT_PROVIDER_ID)
         setRecordsByDomainId((current) => ({ ...current, [domainId]: records }))
       } catch (error) {
         toast({
@@ -1315,7 +1680,7 @@ export default function DomainManagementPage({
   const handleVerifyDomain = async (domainId: string) => {
     setVerifyingDomainId(domainId)
     try {
-      const updatedDomain = await verifyManagedDomain(domainId, DEFAULT_PROVIDER_ID, sessionToken)
+      const updatedDomain = await verifyManagedDomain(domainId, DEFAULT_PROVIDER_ID)
       setManagedDomains((current) =>
         sortManagedDomains(
           current.map((domain) => (domain.id === domainId ? { ...domain, ...updatedDomain } : domain)),
@@ -1340,14 +1705,34 @@ export default function DomainManagementPage({
   }
 
   const handleDeleteDomain = async (domain: Domain) => {
-    if (!window.confirm(ts("domainDeleteConfirm", { domain: domain.domain }))) {
+    const confirmed = await requestConfirmation({
+      title: domain.domain,
+      description: ts("domainDeleteConfirm", { domain: domain.domain }),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    })
+    if (!confirmed) {
       return
     }
 
     setDeletingDomainId(domain.id)
     try {
-      await deleteManagedDomain(domain.id, DEFAULT_PROVIDER_ID, sessionToken)
+      await deleteManagedDomain(domain.id, DEFAULT_PROVIDER_ID)
       setManagedDomains((current) => current.filter((item) => item.id !== domain.id))
+      const nextAccounts = mailboxAccounts.filter(
+        (account) => mailboxDomain(account.address) !== domain.domain.toLowerCase(),
+      )
+      setMailboxAccounts(nextAccounts)
+      syncAccounts(nextAccounts)
+      if (currentAccount && mailboxDomain(currentAccount.address) === domain.domain.toLowerCase()) {
+        setSelectedMessage(null)
+        if (nextAccounts.length === 0) {
+          clearAccounts()
+        } else {
+          void activateMailbox(nextAccounts[0], true)
+        }
+      }
+      void loadMailboxAccounts(true)
       toast({
         title: ts("domainDeleted"),
         description: domain.domain,
@@ -1367,7 +1752,7 @@ export default function DomainManagementPage({
   }
 
   const handleCreateUser = async () => {
-    if (!sessionToken.trim() || !isAdmin) {
+    if (!hasAdminSession || !isAdmin) {
       return
     }
 
@@ -1389,7 +1774,6 @@ export default function DomainManagementPage({
     setIsCreatingUser(true)
     try {
       const createdUser = await createAdminUser(
-        sessionToken,
         {
           username: newUsername.trim(),
           password: newUserPassword,
@@ -1424,13 +1808,12 @@ export default function DomainManagementPage({
   }
 
   const handlePatchUser = async (user: ConsoleUser, patch: Partial<ConsoleUser>) => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
     try {
       const updated = await updateAdminUser(
-        sessionToken,
         user.id,
         {
           role: patch.role,
@@ -1456,12 +1839,18 @@ export default function DomainManagementPage({
   }
 
   const handleDeleteUser = async (user: ConsoleUser) => {
-    if (!window.confirm(ta("userDeleteConfirm", { username: user.username }))) {
+    const confirmed = await requestConfirmation({
+      title: user.username,
+      description: ta("userDeleteConfirm", { username: user.username }),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    })
+    if (!confirmed) {
       return
     }
 
     try {
-      await deleteAdminUser(sessionToken, user.id, DEFAULT_PROVIDER_ID)
+      await deleteAdminUser(user.id, DEFAULT_PROVIDER_ID)
       setAdminUsers((current) => current.filter((item) => item.id !== user.id))
       toast({
         title: ta("userDeleted"),
@@ -1480,14 +1869,32 @@ export default function DomainManagementPage({
   }
 
   const handleResetUserPassword = async (user: ConsoleUser) => {
-    const nextPassword = window.prompt(ta("userResetPasswordPrompt", { username: user.username }))
+    const nextPassword = await requestInputValue({
+      title: ta("resetUserPassword"),
+      description: ta("userResetPasswordPrompt", { username: user.username }),
+      inputLabel: tc("password"),
+      inputType: "password",
+      confirmLabel: tc("save"),
+      tone: "primary",
+      value: "",
+      validate: (value) => {
+        if (!value.trim()) {
+          return tc("required")
+        }
+
+        if (value.trim().length < 10) {
+          return ta("passwordTooShort")
+        }
+
+        return null
+      },
+    })
     if (!nextPassword?.trim()) {
       return
     }
 
     try {
       await resetAdminUserPassword(
-        sessionToken,
         user.id,
         { newPassword: nextPassword },
         DEFAULT_PROVIDER_ID,
@@ -1509,10 +1916,24 @@ export default function DomainManagementPage({
   }
 
   const handleEditUserLimit = async (user: ConsoleUser) => {
-    const nextValue = window.prompt(
-      ta("userDomainLimitPrompt", { username: user.username }),
-      String(user.domainLimit),
-    )
+    const nextValue = await requestInputValue({
+      title: ta("editDomainLimit"),
+      description: ta("userDomainLimitPrompt", { username: user.username }),
+      inputLabel: ta("domainLimitLabel"),
+      inputType: "number",
+      inputMode: "numeric",
+      confirmLabel: tc("save"),
+      tone: "primary",
+      value: String(user.domainLimit),
+      validate: (value) => {
+        const parsed = Number(value)
+        if (!Number.isFinite(parsed) || parsed < 0) {
+          return ta("userLimitInvalid")
+        }
+
+        return null
+      },
+    })
     if (nextValue === null) {
       return
     }
@@ -1532,16 +1953,12 @@ export default function DomainManagementPage({
   }
 
   const saveSettings = async (payload: AdminUpdateSystemSettingsRequest) => {
-    if (!sessionToken.trim() || !isAdmin) {
+    if (!hasAdminSession || !isAdmin) {
       return null
     }
 
-    await updateAdminSystemSettings(
-      sessionToken,
-      payload,
-      DEFAULT_PROVIDER_ID,
-    )
-    const session = await getAdminSessionInfo(sessionToken, DEFAULT_PROVIDER_ID)
+    await updateAdminSystemSettings(payload, DEFAULT_PROVIDER_ID)
+    const session = await getAdminSessionInfo(DEFAULT_PROVIDER_ID)
     applySavedSettings(session.systemSettings)
     setSessionInfo((current) => ({
       ...(current ?? session),
@@ -1553,7 +1970,7 @@ export default function DomainManagementPage({
   }
 
   const handleToggleSystemEnabled = async (nextEnabled: boolean) => {
-    if (!sessionToken.trim() || !isAdmin || isUpdatingSystemEnabled) {
+    if (!hasAdminSession || !isAdmin || isUpdatingSystemEnabled) {
       return
     }
 
@@ -1582,7 +1999,7 @@ export default function DomainManagementPage({
   }
 
   const handleSaveSettings = async () => {
-    if (!sessionToken.trim() || !isAdmin) {
+    if (!hasAdminSession || !isAdmin) {
       return
     }
 
@@ -1613,17 +2030,13 @@ export default function DomainManagementPage({
 
   const runCloudflareDomainSync = useCallback(
     async (domain: Domain, options?: { silentSuccess?: boolean; silentError?: boolean }) => {
-      if (!sessionToken.trim()) {
+      if (!hasAdminSession) {
         return null
       }
 
       setCloudflareSyncingDomainId(domain.id)
       try {
-        const response = await syncManagedDomainCloudflare(
-          domain.id,
-          sessionToken,
-          DEFAULT_PROVIDER_ID,
-        )
+        const response = await syncManagedDomainCloudflare(domain.id, DEFAULT_PROVIDER_ID)
         if (!options?.silentSuccess) {
           toast({
             title: ta("cloudflareSyncSuccess"),
@@ -1652,11 +2065,11 @@ export default function DomainManagementPage({
         setCloudflareSyncingDomainId((current) => (current === domain.id ? null : current))
       }
     },
-    [sessionToken, ta, toast],
+    [hasAdminSession, ta, toast],
   )
 
   const handleSaveCloudflareSettings = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1677,7 +2090,6 @@ export default function DomainManagementPage({
     try {
       applyCloudflareSettings(
         await updateConsoleCloudflareSettings(
-          sessionToken,
           {
             enabled: cloudflareSettings.enabled,
             apiToken: cloudflareApiTokenInput.trim() || undefined,
@@ -1704,7 +2116,7 @@ export default function DomainManagementPage({
   }
 
   const handleTestCloudflareToken = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1720,7 +2132,6 @@ export default function DomainManagementPage({
     setCloudflareTesting(true)
     try {
       const response = await testConsoleCloudflareToken(
-        sessionToken,
         cloudflareApiTokenInput.trim() || undefined,
         DEFAULT_PROVIDER_ID,
       )
@@ -1747,13 +2158,13 @@ export default function DomainManagementPage({
   }
 
   const handleRunCleanup = async () => {
-    if (!sessionToken.trim()) {
+    if (!hasAdminSession) {
       return
     }
 
     setIsRunningCleanup(true)
     try {
-      const report = await runAdminCleanup(sessionToken, DEFAULT_PROVIDER_ID)
+      const report = await runAdminCleanup(DEFAULT_PROVIDER_ID)
       toast({
         title: ta("cleanupCompleted"),
         description: ta("cleanupCompletedDescription", {
@@ -1778,13 +2189,13 @@ export default function DomainManagementPage({
   }
 
   const handleClearAuditLogs = async () => {
-    if (!sessionToken.trim() || !isAdmin || isClearingLogs || adminAuditLogs.length === 0) {
+    if (!hasAdminSession || !isAdmin || isClearingLogs || adminAuditLogs.length === 0) {
       return
     }
 
     setIsClearingLogs(true)
     try {
-      await clearAdminAuditLogs(sessionToken, DEFAULT_PROVIDER_ID)
+      await clearAdminAuditLogs(DEFAULT_PROVIDER_ID)
       await loadOps(true)
       toast({
         title: ta("clearLogsCompleted"),
@@ -1837,36 +2248,61 @@ export default function DomainManagementPage({
     () => normalizeSettings(settingsDraft),
     [normalizeSettings, settingsDraft],
   )
-  const hasUnsavedChanges = useMemo(
+  const normalizedCloudflareSettings = useMemo(
+    () => normalizeCloudflareSettings(cloudflareSettings),
+    [cloudflareSettings],
+  )
+  const hasUnsavedCoreSettings = useMemo(
     () => !areSettingsEqual(normalizedSettingsDraft, savedSettings),
     [normalizedSettingsDraft, savedSettings],
   )
-  const saveSettingsLabel = hasUnsavedChanges ? ta("settingsSaveAction") : ta("settingsSavedState")
-
+  const hasUnsavedCloudflareChanges = useMemo(
+    () =>
+      normalizedCloudflareSettings.enabled !== savedCloudflareSettings.enabled ||
+      normalizedCloudflareSettings.autoSyncEnabled !== savedCloudflareSettings.autoSyncEnabled ||
+      cloudflareApiTokenInput.trim().length > 0,
+    [cloudflareApiTokenInput, normalizedCloudflareSettings, savedCloudflareSettings],
+  )
+  const hasUnsavedChanges = hasUnsavedCoreSettings || hasUnsavedCloudflareChanges
   const discardUnsavedChanges = useCallback(() => {
     setSettingsDraft(savedSettings)
-  }, [savedSettings])
+    setCloudflareSettings(savedCloudflareSettings)
+    setCloudflareApiTokenInput("")
+  }, [savedCloudflareSettings, savedSettings])
 
-  const confirmDiscardUnsavedChanges = useCallback(() => {
+  const confirmDiscardUnsavedChanges = useCallback(async () => {
     if (!hasUnsavedChanges) {
       return true
     }
 
-    const shouldDiscard = window.confirm(ta("settingsUnsavedChangesConfirm"))
+    const shouldDiscard = await requestConfirmation({
+      title: ta("settingsPanelTitle"),
+      description: ta("settingsUnsavedChangesConfirm"),
+      confirmLabel: tc("discard"),
+      tone: "danger",
+    })
     if (shouldDiscard) {
       discardUnsavedChanges()
     }
 
     return shouldDiscard
-  }, [discardUnsavedChanges, hasUnsavedChanges, ta])
+  }, [discardUnsavedChanges, hasUnsavedChanges, requestConfirmation, ta, tc])
+
+  const maybeDiscardUnsavedSettings = useCallback(async () => {
+    if (view !== "settings") {
+      return true
+    }
+
+    return await confirmDiscardUnsavedChanges()
+  }, [confirmDiscardUnsavedChanges, view])
 
   const handleSelectView = useCallback(
-    (nextView: ConsoleView) => {
+    async (nextView: ConsoleView) => {
       if (nextView === view) {
         return true
       }
 
-      if (view === "settings" && !confirmDiscardUnsavedChanges()) {
+      if (view === "settings" && !(await confirmDiscardUnsavedChanges())) {
         return false
       }
 
@@ -1877,12 +2313,12 @@ export default function DomainManagementPage({
   )
 
   const handleSelectSettingsSection = useCallback(
-    (nextSection: SettingsSection) => {
+    async (nextSection: SettingsSection) => {
       if (nextSection === settingsSection) {
         return
       }
 
-      if (!confirmDiscardUnsavedChanges()) {
+      if (!(await confirmDiscardUnsavedChanges())) {
         return
       }
 
@@ -1911,6 +2347,31 @@ export default function DomainManagementPage({
     return () => window.removeEventListener("beforeunload", handleBeforeUnload)
   }, [hasUnsavedChanges, ta])
 
+  const handleClearAdminSession = useCallback(async () => {
+    if (!(await maybeDiscardUnsavedSettings())) {
+      return
+    }
+
+    void clearAdminSession()
+  }, [clearAdminSession, maybeDiscardUnsavedSettings])
+
+  const handleLocaleChange = useCallback(async () => {
+    if (!(await maybeDiscardUnsavedSettings())) {
+      return
+    }
+
+    const nextLocale = locale === "en" ? "zh" : "en"
+    startLocaleTransition(() => {
+      router.replace(pathname, { locale: nextLocale })
+    })
+    toast({
+      title: nextLocale === "en" ? tm("switchedToEn") : tm("switchedToZh"),
+      color: "primary",
+      variant: "flat",
+      icon: <Languages size={16} />,
+    })
+  }, [locale, maybeDiscardUnsavedSettings, pathname, router, startLocaleTransition, tm, toast])
+
   if (isBootstrapping) {
     return (
       <div className="relative flex min-h-screen overflow-hidden bg-[linear-gradient(180deg,#f8fbff_0%,#eef4ff_45%,#f6f8fb_100%)] dark:bg-[linear-gradient(180deg,#020617_0%,#0f172a_55%,#111827_100%)]">
@@ -1926,7 +2387,7 @@ export default function DomainManagementPage({
     )
   }
 
-  if (isRedirectingToEntry || !hasAdminSession || !sessionInfo || !currentUser) {
+  if (!hasAdminSession || !sessionInfo || !currentUser) {
     return null
   }
 
@@ -1980,11 +2441,25 @@ export default function DomainManagementPage({
                 </div>
               </div>
 
-              <ThemeModeToggle
-                showLabel={false}
-                variant="light"
-                buttonClassName="h-8 w-8 min-w-0 text-slate-600 dark:text-slate-300"
-              />
+              <div className="flex items-center gap-1">
+                <Button
+                  isIconOnly
+                  variant="light"
+                  size="sm"
+                  className="h-8 w-8 min-w-0 text-slate-600 dark:text-slate-300"
+                  aria-label={locale === "en" ? th("switchToChinese") : th("switchToEnglish")}
+                  title={locale === "en" ? th("switchToChinese") : th("switchToEnglish")}
+                  onPress={() => void handleLocaleChange()}
+                  isDisabled={isLocalePending}
+                >
+                  <Languages size={17} />
+                </Button>
+                <ThemeModeToggle
+                  showLabel={false}
+                  variant="light"
+                  buttonClassName="h-8 w-8 min-w-0 text-slate-600 dark:text-slate-300"
+                />
+              </div>
             </div>
           </div>
 
@@ -2004,6 +2479,19 @@ export default function DomainManagementPage({
               </div>
 
               <div className="flex flex-wrap items-center gap-2">
+                {view === "settings" && !isCloudflareSection && (
+                  <Button
+                    size="sm"
+                    startContent={<Check size={14} />}
+                    className="rounded-full bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
+                    onPress={handleSaveSettings}
+                    isLoading={settingsSaving}
+                    isDisabled={!hasUnsavedChanges || settingsSaving}
+                  >
+                    {ta("settingsSaveAction")}
+                  </Button>
+                )}
+
                 {!canUseSensitiveAdminActions && (
                   <div className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-3 py-1.5 text-xs font-semibold text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/40 dark:text-amber-200">
                     <ShieldAlert size={13} />
@@ -2014,7 +2502,7 @@ export default function DomainManagementPage({
                 <span className="hidden rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300 sm:inline-flex">
                   {currentUser.username}
                 </span>
-                <span className="hidden rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-xs font-semibold text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300 md:inline-flex">
+                <span className={`hidden rounded-full border px-3 py-1.5 text-xs font-semibold shadow-sm md:inline-flex ${currentUserRoleBadgeClassName}`}>
                   {currentUser.role === "admin" ? ta("roleAdmin") : ta("roleUser")}
                 </span>
 
@@ -2030,10 +2518,23 @@ export default function DomainManagementPage({
                   isIconOnly
                   variant="light"
                   size="sm"
+                  className="h-9 w-9 min-w-0 rounded-full border border-slate-200 bg-white/75 text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-200"
+                  aria-label={locale === "en" ? th("switchToChinese") : th("switchToEnglish")}
+                  title={locale === "en" ? th("switchToChinese") : th("switchToEnglish")}
+                  onPress={() => void handleLocaleChange()}
+                  isDisabled={isLocalePending}
+                >
+                  <Languages size={16} />
+                </Button>
+
+                <Button
+                  isIconOnly
+                  variant="light"
+                  size="sm"
                   className="h-9 w-9 min-w-0 rounded-full border border-slate-200 bg-white/75 text-slate-700 shadow-sm hover:text-red-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-200 dark:hover:text-red-400"
                   aria-label={ta("logout")}
                   title={ta("logout")}
-                  onPress={clearAdminSession}
+                  onPress={handleClearAdminSession}
                 >
                   <LogOut size={15} />
                 </Button>
@@ -2058,7 +2559,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("mailboxPanelTitle")}
-                  description={ta("mailboxPanelDescription")}
                   action={
                     <IconActionButton
                       icon={<RefreshCw size={14} />}
@@ -2270,7 +2770,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("systemPanelTitle")}
-                  description={ta("systemPanelDescription")}
                   action={
                     isAdmin ? (
                       <IconActionButton
@@ -2362,20 +2861,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("settingsPanelTitle")}
-                  description={isCloudflareSection ? undefined : ta("settingsPanelDescription")}
-                  action={
-                    isCloudflareSection ? undefined : (
-                        <IconActionButton
-                          icon={<Check size={14} />}
-                          label={saveSettingsLabel}
-                          tooltip={saveSettingsLabel}
-                          className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
-                          onPress={handleSaveSettings}
-                          isLoading={settingsSaving}
-                          disabled={!hasUnsavedChanges || settingsSaving}
-                        />
-                    )
-                  }
                 />
 
                 <Panel className="p-1">
@@ -2388,7 +2873,7 @@ export default function DomainManagementPage({
                           size="sm"
                           variant={active ? "flat" : "light"}
                           className={`rounded-2xl px-4 ${active ? "bg-sky-100 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100" : "text-slate-600 dark:text-slate-300"}`}
-                          onPress={() => handleSelectSettingsSection(section.id)}
+                          onPress={() => void handleSelectSettingsSection(section.id)}
                         >
                           {section.label}
                         </Button>
@@ -2770,91 +3255,62 @@ export default function DomainManagementPage({
                 )}
 
                 {settingsSection === "limits" && (
-                  <div className="grid gap-6 xl:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.75fr)]">
-                    <Panel>
-                      <PanelHeader title={ta("userLimitsTitle")} />
-                      <div className="grid gap-4 p-5 md:grid-cols-3">
-                        <Input
-                          label={ta("defaultDomainLimitLabel")}
-                          type="number"
-                          value={String(settingsDraft.userLimits.defaultDomainLimit)}
-                          onValueChange={(value) =>
-                            setSettingsDraft((current) => ({
-                              ...current,
-                              userLimits: {
-                                ...current.userLimits,
-                                defaultDomainLimit: parseIntegerInput(value, current.userLimits.defaultDomainLimit, 0, 500),
-                              },
-                            }))
-                          }
-                          variant="bordered"
-                          size="sm"
-                          classNames={TM_INPUT_CLASSNAMES}
-                        />
-                        <Input
-                          label={ta("mailboxLimitLabel")}
-                          type="number"
-                          value={String(settingsDraft.userLimits.mailboxLimit)}
-                          onValueChange={(value) =>
-                            setSettingsDraft((current) => ({
-                              ...current,
-                              userLimits: {
-                                ...current.userLimits,
-                                mailboxLimit: parseIntegerInput(value, current.userLimits.mailboxLimit, 0, 200),
-                              },
-                            }))
-                          }
-                          variant="bordered"
-                          size="sm"
-                          classNames={TM_INPUT_CLASSNAMES}
-                        />
-                        <Input
-                          label={ta("apiKeyLimitLabel")}
-                          type="number"
-                          value={String(settingsDraft.userLimits.apiKeyLimit)}
-                          onValueChange={(value) =>
-                            setSettingsDraft((current) => ({
-                              ...current,
-                              userLimits: {
-                                ...current.userLimits,
-                                apiKeyLimit: parseIntegerInput(value, current.userLimits.apiKeyLimit, 0, 50),
-                              },
-                            }))
-                          }
-                          variant="bordered"
-                          size="sm"
-                          classNames={TM_INPUT_CLASSNAMES}
-                        />
-                      </div>
-                    </Panel>
-
-                    <Panel>
-                      <PanelHeader title={ta("userLimitsSummaryTitle")} />
-                      <div className="space-y-3 p-5">
-                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
-                          {ta("userLimitsSummaryDescription")}
-                        </div>
-                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
-                          <div className="tm-section-label">{ta("defaultDomainLimitLabel")}</div>
-                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
-                            {settingsDraft.userLimits.defaultDomainLimit}
-                          </div>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
-                          <div className="tm-section-label">{ta("mailboxLimitLabel")}</div>
-                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
-                            {settingsDraft.userLimits.mailboxLimit}
-                          </div>
-                        </div>
-                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
-                          <div className="tm-section-label">{ta("apiKeyLimitLabel")}</div>
-                          <div className="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">
-                            {settingsDraft.userLimits.apiKeyLimit}
-                          </div>
-                        </div>
-                      </div>
-                    </Panel>
-                  </div>
+                  <Panel>
+                    <PanelHeader title={ta("userLimitsTitle")} />
+                    <div className="grid gap-4 p-5 md:grid-cols-3">
+                      <Input
+                        label={ta("defaultDomainLimitLabel")}
+                        type="number"
+                        value={String(settingsDraft.userLimits.defaultDomainLimit)}
+                        onValueChange={(value) =>
+                          setSettingsDraft((current) => ({
+                            ...current,
+                            userLimits: {
+                              ...current.userLimits,
+                              defaultDomainLimit: parseIntegerInput(value, current.userLimits.defaultDomainLimit, 0, 500),
+                            },
+                          }))
+                        }
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                      <Input
+                        label={ta("mailboxLimitLabel")}
+                        type="number"
+                        value={String(settingsDraft.userLimits.mailboxLimit)}
+                        onValueChange={(value) =>
+                          setSettingsDraft((current) => ({
+                            ...current,
+                            userLimits: {
+                              ...current.userLimits,
+                              mailboxLimit: parseIntegerInput(value, current.userLimits.mailboxLimit, 0, 200),
+                            },
+                          }))
+                        }
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                      <Input
+                        label={ta("apiKeyLimitLabel")}
+                        type="number"
+                        value={String(settingsDraft.userLimits.apiKeyLimit)}
+                        onValueChange={(value) =>
+                          setSettingsDraft((current) => ({
+                            ...current,
+                            userLimits: {
+                              ...current.userLimits,
+                              apiKeyLimit: parseIntegerInput(value, current.userLimits.apiKeyLimit, 0, 50),
+                            },
+                          }))
+                        }
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                    </div>
+                  </Panel>
                 )}
 
                 {settingsSection === "integrations" && (
@@ -2992,7 +3448,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("domainPanelTitle")}
-                  description={ta("domainPanelDescription")}
                   action={
                     <IconActionButton
                       icon={<RefreshCw size={14} />}
@@ -3145,7 +3600,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("userPanelTitle")}
-                  description={ta("userPanelDescription")}
                   action={
                     <IconActionButton
                       icon={<RefreshCw size={14} />}
@@ -3285,7 +3739,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("securityPanelTitle")}
-                  description={ta("securityPanelDescription")}
                 />
 
                 <div className="grid gap-6 xl:grid-cols-[minmax(0,1.3fr)_minmax(18rem,0.9fr)]">
@@ -3320,7 +3773,12 @@ export default function DomainManagementPage({
                               className="h-10 rounded-2xl bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
                               onPress={() => void handleGenerateAdminKey()}
                               isLoading={isCreatingAccessKey}
-                              isDisabled={hasReachedAccessKeyLimit}
+                              isDisabled={
+                                hasReachedAccessKeyLimit ||
+                                !hasAdminSession ||
+                                isBootstrapping ||
+                                accessKeysLoading
+                              }
                             >
                               {ta("apiKeyGenerate")}
                             </Button>
@@ -3437,7 +3895,6 @@ export default function DomainManagementPage({
               <>
                 <SectionHeader
                   title={ta("logsPanelTitle")}
-                  description={ta("logsPanelDescription")}
                   action={
                     <div className="flex gap-2">
                       <IconActionButton
@@ -3502,10 +3959,11 @@ export default function DomainManagementPage({
               menuItems={menuItems}
               activeView={view}
               onSelectView={(nextView) => {
-                const didNavigate = handleSelectView(nextView)
-                if (didNavigate) {
-                  setIsSidebarOpen(false)
-                }
+                void handleSelectView(nextView).then((didNavigate) => {
+                  if (didNavigate) {
+                    setIsSidebarOpen(false)
+                  }
+                })
               }}
               currentUser={currentUser}
               serviceStatus={serviceStatus}
@@ -3535,6 +3993,28 @@ export default function DomainManagementPage({
           </div>
         </div>
       )}
+
+      <ConsoleActionModal
+        isOpen={Boolean(actionDialog)}
+        onClose={closeActionDialog}
+        onConfirm={handleActionDialogConfirm}
+        title={actionDialog?.title ?? ""}
+        description={actionDialog?.description}
+        cancelLabel={tc("cancel")}
+        confirmLabel={actionDialog?.confirmLabel ?? tc("save")}
+        tone={actionDialog?.tone ?? "primary"}
+        inputLabel={actionDialog?.kind === "input" ? actionDialog.inputLabel : undefined}
+        inputType={actionDialog?.kind === "input" ? actionDialog.inputType : undefined}
+        inputValue={actionDialog?.kind === "input" ? actionDialog.value : undefined}
+        inputPlaceholder={
+          actionDialog?.kind === "input" ? actionDialog.inputPlaceholder : undefined
+        }
+        inputMode={actionDialog?.kind === "input" ? actionDialog.inputMode : undefined}
+        errorMessage={actionDialogError}
+        onInputValueChange={
+          actionDialog?.kind === "input" ? handleActionDialogValueChange : undefined
+        }
+      />
     </div>
   )
 }
@@ -3566,7 +4046,7 @@ function AdminConsoleSidebar({
     icon: typeof Server
   }>
   activeView: ConsoleView
-  onSelectView: (view: ConsoleView) => void
+  onSelectView: (view: ConsoleView) => void | Promise<boolean>
   currentUser: NonNullable<AdminSessionInfo["user"]>
   serviceStatus: {
     status: "ready" | "degraded" | "offline"
@@ -3641,7 +4121,7 @@ function AdminConsoleSidebar({
                 {ta("consolePanelTitle")}
               </div>
             </div>
-            <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
+            <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold ${getConsoleRoleBadgeClassName(currentUser.role)}`}>
               <Users2 size={12} />
               {currentUser.role === "admin" ? ta("roleAdmin") : ta("roleUser")}
             </div>
@@ -3718,7 +4198,7 @@ function AdminConsoleSidebar({
                             ? "bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
                             : "bg-white/65 text-slate-700 hover:bg-white/85 dark:bg-slate-950/45 dark:text-slate-300 dark:hover:bg-slate-900/80"
                         }`}
-                        onPress={() => onSelectView(item.id)}
+                        onPress={() => void onSelectView(item.id)}
                       >
                         <div className="flex w-full flex-col items-center justify-center gap-1.5">
                           <div
@@ -3763,7 +4243,7 @@ function AdminConsoleSidebar({
                     <Icon size={18} />
                   </div>
                 }
-                onPress={() => onSelectView(item.id)}
+                onPress={() => void onSelectView(item.id)}
               >
                 {item.label}
               </Button>
@@ -3777,22 +4257,15 @@ function AdminConsoleSidebar({
 
 function SectionHeader({
   title,
-  description,
   action,
 }: {
   title: string
-  description?: string
   action?: ReactNode
 }) {
   return (
     <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
       <div>
         <h2 className="text-lg font-medium text-slate-900 dark:text-white">{title}</h2>
-        {description ? (
-          <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-            {description}
-          </p>
-        ) : null}
       </div>
       {action}
     </div>

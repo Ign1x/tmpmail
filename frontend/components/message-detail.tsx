@@ -32,15 +32,6 @@ import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import type { Message, MessageDetail as MessageDetailType } from "@/types"
 
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;")
-}
-
 function formatFileSize(size: number) {
   if (size < 1024) {
     return `${size} B`
@@ -57,6 +48,7 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeHeight, setIframeHeight] = useState(240)
   const resizeTimeoutIdsRef = useRef<number[]>([])
+  const hasHtml = Boolean(html && html.some((part) => part.trim()))
 
   const clearResizeTimeouts = useCallback(() => {
     resizeTimeoutIdsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
@@ -76,13 +68,15 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
   }, [])
 
   useEffect(() => {
+    if (!hasHtml) {
+      clearResizeTimeouts()
+      return
+    }
+
     const iframe = iframeRef.current
     if (!iframe) return
 
-    const hasHtml = html && html.length > 0 && html.join("").trim()
-    const content = hasHtml
-      ? html.join("")
-      : `<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(text || "")}</pre>`
+    const content = html?.join("") ?? ""
 
     const wrappedContent = `
       <!DOCTYPE html>
@@ -175,7 +169,21 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
       clearResizeTimeouts()
       iframe.onload = null
     }
-  }, [adjustIframeHeight, clearResizeTimeouts, html, isMobile, text])
+  }, [adjustIframeHeight, clearResizeTimeouts, hasHtml, html, isMobile])
+
+  if (!hasHtml) {
+    return (
+      <div className="overflow-hidden rounded-[1.25rem] border border-slate-200/80 bg-white shadow-inner dark:border-slate-800 dark:bg-slate-950/70">
+        <div
+          className={`whitespace-pre-wrap break-words text-slate-900 dark:text-slate-100 ${
+            isMobile ? "px-4 py-4 text-sm leading-7" : "px-5 py-5 text-[15px] leading-8"
+          }`}
+        >
+          {text?.trim() || " "}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="overflow-hidden rounded-[1.25rem] border border-slate-200/80 bg-white shadow-inner dark:border-slate-800">
@@ -229,6 +237,21 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
   useEffect(() => {
     let active = true
 
+    const markSeenInBackground = async (sessionToken: string, messageId: string) => {
+      try {
+        await markMessageAsRead(sessionToken, messageId, providerId)
+        if (!active) {
+          return
+        }
+
+        setMessageDetail((current) =>
+          current && current.id === messageId ? { ...current, seen: true } : current,
+        )
+      } catch (err) {
+        console.error("Failed to mark message as read:", err)
+      }
+    }
+
     const fetchMessageDetail = async () => {
       if (!token) {
         if (active) {
@@ -241,6 +264,8 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
       try {
         if (active) {
           setLoading(true)
+          setError(null)
+          setMessageDetail(null)
         }
 
         const detail = await getMessage(token, message.id, providerId)
@@ -249,18 +274,22 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
         }
 
         setMessageDetail(detail)
-
-        if (!message.seen) {
-          await markMessageAsRead(token, message.id, providerId)
-        }
-
+        setLoading(false)
         setError(null)
+
+        if (!detail.seen) {
+          setMessageDetail((current) =>
+            current && current.id === detail.id ? { ...current, seen: true } : current,
+          )
+          void markSeenInBackground(token, detail.id)
+        }
       } catch (err) {
         if (!active) {
           return
         }
         console.error("Failed to fetch message detail:", err)
         setError(t("fetchError"))
+        setMessageDetail(null)
       } finally {
         if (active) {
           setLoading(false)
@@ -273,7 +302,7 @@ export default function MessageDetail({ message, onBack, onDelete }: MessageDeta
     return () => {
       active = false
     }
-  }, [message.id, message.seen, providerId, t, token])
+  }, [message.id, providerId, t, token])
 
   const handleDelete = async () => {
     if (!token || !messageDetail) return

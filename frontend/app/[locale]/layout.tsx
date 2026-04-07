@@ -11,6 +11,12 @@ import { BRAND_NAME } from "@/lib/provider-config"
 import { MailStatusProvider } from "@/contexts/mail-status-context"
 import { AuthProvider } from "@/contexts/auth-context"
 
+type AppLocale = (typeof routing.locales)[number]
+
+function isAppLocale(value: string): value is AppLocale {
+  return routing.locales.includes(value as AppLocale)
+}
+
 const inter = Inter({
   subsets: ["latin"],
   display: "swap",
@@ -74,7 +80,7 @@ export default async function LocaleLayout({
   const { locale } = await params
 
   // 验证 locale 有效性
-  if (!routing.locales.includes(locale as any)) {
+  if (!isAppLocale(locale)) {
     notFound()
   }
 

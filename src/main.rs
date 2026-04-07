@@ -10,16 +10,17 @@ mod domain_worker;
 mod error;
 mod inbucket;
 mod ingest;
-mod metrics;
 mod mailer;
+mod metrics;
 mod models;
 mod otp;
-mod persistence;
 mod pg_store;
+mod rate_limit;
 mod realtime;
 mod routes;
 mod state;
-mod store;
+#[cfg(test)]
+mod test_support;
 
 use anyhow::Context;
 use tokio::net::TcpListener;
@@ -35,7 +36,7 @@ use crate::{
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    let config = Config::from_env();
+    let config = Config::from_env()?;
     let bind_address = config.bind_address();
     let ingest_mode = config.ingest_mode.clone();
     let inbucket_base_url = config.inbucket_base_url.clone();

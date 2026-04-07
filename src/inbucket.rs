@@ -2,7 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Utc};
-use reqwest::{Client, StatusCode};
+use reqwest::{Client, StatusCode, Url};
 use serde::Deserialize;
 use tokio::time::sleep;
 
@@ -64,13 +64,9 @@ impl InbucketClient {
     }
 
     pub async fn download_asset(&self, url: &str) -> Result<DownloadedAsset> {
-        let resolved_url = if url.starts_with("http://") || url.starts_with("https://") {
-            url.to_owned()
-        } else {
-            format!("{}{}", self.base_url, url)
-        };
+        let resolved_url = self.resolve_asset_url(url)?;
         let response = self
-            .send_get_with_retry(resolved_url, "asset download")
+            .send_get_with_retry(resolved_url.to_string(), "asset download")
             .await?;
         let content_type = response
             .headers()
@@ -169,6 +165,34 @@ impl InbucketClient {
     fn retry_delay(&self, attempt: usize) -> Duration {
         let exponent = (attempt as u32).min(6);
         self.retry_backoff.saturating_mul(1_u32 << exponent)
+    }
+
+    fn resolve_asset_url(&self, value: &str) -> Result<Url> {
+        let base_url =
+            Url::parse(&self.base_url).context("failed to parse configured inbucket base url")?;
+        let resolved = match Url::parse(value.trim()) {
+            Ok(url) => url,
+            Err(_) => base_url
+                .join(value)
+                .with_context(|| format!("invalid inbucket asset path {value}"))?,
+        };
+
+        if !matches!(resolved.scheme(), "http" | "https") {
+            return Err(anyhow!(
+                "inbucket asset download rejected because the URL scheme is unsupported"
+            ));
+        }
+
+        if resolved.scheme() != base_url.scheme()
+            || resolved.host_str() != base_url.host_str()
+            || resolved.port_or_known_default() != base_url.port_or_known_default()
+        {
+            return Err(anyhow!(
+                "inbucket asset download rejected because the URL is outside the configured origin"
+            ));
+        }
+
+        Ok(resolved)
     }
 }
 
@@ -441,6 +465,50 @@ mod tests {
         assert_eq!(
             mailbox_name_from_address("Smoke@tmpmail.local"),
             Some("smoke".to_owned())
+        );
+    }
+
+    #[test]
+    fn resolve_asset_url_accepts_relative_paths_on_same_origin() {
+        let client = InbucketClient::new(
+            "http://127.0.0.1:9000".to_owned(),
+            None,
+            None,
+            Duration::from_secs(2),
+            0,
+            Duration::from_millis(50),
+        )
+        .expect("build inbucket client");
+
+        let resolved = client
+            .resolve_asset_url("/api/v1/mailbox/demo/msg-1/source")
+            .expect("resolve relative asset url");
+
+        assert_eq!(
+            resolved.as_str(),
+            "http://127.0.0.1:9000/api/v1/mailbox/demo/msg-1/source"
+        );
+    }
+
+    #[test]
+    fn resolve_asset_url_rejects_foreign_origins() {
+        let client = InbucketClient::new(
+            "http://127.0.0.1:9000".to_owned(),
+            None,
+            None,
+            Duration::from_secs(2),
+            0,
+            Duration::from_millis(50),
+        )
+        .expect("build inbucket client");
+
+        let error = client
+            .resolve_asset_url("https://example.com/asset")
+            .expect_err("foreign origin should be rejected");
+
+        assert!(
+            error.to_string().contains("outside the configured origin"),
+            "unexpected error: {error}"
         );
     }
 

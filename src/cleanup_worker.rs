@@ -26,16 +26,17 @@ pub fn spawn_cleanup_worker(state: AppState) {
     });
 }
 
-pub async fn run_cleanup_once(state: &AppState) -> AppResult<crate::store::CleanupReport> {
+pub async fn run_cleanup_once(state: &AppState) -> AppResult<crate::app_store::CleanupReport> {
     let stale_domain_retention =
         ChronoDuration::seconds(state.config.pending_domain_retention_seconds.max(60));
 
-    let Some(mut store) = state.try_lock_store_for_background("cleanup-worker").await else {
-        return Ok(crate::store::CleanupReport::default());
+    let Some(_permit) = state.try_lock_store_for_background("cleanup-worker").await else {
+        return Ok(crate::app_store::CleanupReport::default());
     };
     let report = {
-        let mut report = store.cleanup_expired_accounts().await?;
-        report.deleted_domains = store
+        let mut report = state.store.cleanup_expired_accounts().await?;
+        report.deleted_domains = state
+            .store
             .cleanup_stale_pending_domains(stale_domain_retention)
             .await?;
         report

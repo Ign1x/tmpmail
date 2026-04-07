@@ -6,6 +6,7 @@ use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions, type
 use uuid::Uuid;
 
 use crate::{
+    app_store::{CleanupReport, ImportedMessageReceipt, PendingDomainCheck, StoreStats},
     auth,
     config::Config,
     domain_management::build_dns_records,
@@ -13,10 +14,6 @@ use crate::{
     models::{
         Account, Attachment, Domain, DomainDnsRecord, ImportedMessage, MessageAddress,
         MessageDetail, MessageSeenResponse, MessageSummary,
-    },
-    store::{
-        CleanupReport, ImportedMessageReceipt, PendingDomainCheck, StoreSnapshot, StoreStats,
-        StoredMessage, load_snapshot_for_import, snapshot_has_records,
     },
 };
 
@@ -166,9 +163,6 @@ impl PgStore {
             pool,
             default_account_ttl_seconds: config.default_account_ttl_seconds,
         };
-        store
-            .import_snapshot_if_needed(&config.store_state_path)
-            .await?;
         store.ensure_configured_public_domains(config).await?;
 
         Ok(store)
@@ -255,9 +249,9 @@ impl PgStore {
         &self,
         domain: &str,
         #[allow(dead_code)]
-    #[allow(dead_code)]
-    #[allow(dead_code)]
-    owner_user_id: Option<Uuid>,
+        #[allow(dead_code)]
+        #[allow(dead_code)]
+        owner_user_id: Option<Uuid>,
     ) -> AppResult<Domain> {
         let normalized_domain = normalize_domain(domain)?;
         let now = Utc::now();
@@ -505,20 +499,12 @@ impl PgStore {
         password: &str,
         expires_in: Option<i64>,
         #[allow(dead_code)]
-    #[allow(dead_code)]
-    #[allow(dead_code)]
-    owner_user_id: Option<Uuid>,
+        #[allow(dead_code)]
+        #[allow(dead_code)]
+        owner_user_id: Option<Uuid>,
     ) -> AppResult<Account> {
         let normalized_address = normalize_address(address)?;
-        if password.trim().is_empty() {
-            return Err(ApiError::validation("password must not be empty"));
-        }
-
-        if password.chars().count() < 6 {
-            return Err(ApiError::validation(
-                "password must be at least 6 characters",
-            ));
-        }
+        auth::validate_password(password, "password")?;
 
         let (_, domain) = split_address(&normalized_address)?;
         let is_domain_available = sqlx::query_scalar::<_, bool>(
@@ -622,11 +608,11 @@ impl PgStore {
                 accounts.created_at,
                 accounts.updated_at,
                 COALESCE((
-                    SELECT SUM(messages.size)
+                    SELECT SUM(messages.size)::bigint
                     FROM messages
                     WHERE messages.account_id = accounts.id
                       AND messages.is_deleted = FALSE
-                ), 0) AS used
+                ), 0::bigint) AS used
             FROM accounts
             WHERE accounts.id = $1
             "#,
@@ -676,13 +662,14 @@ impl PgStore {
                 accounts.created_at,
                 accounts.updated_at,
                 COALESCE((
-                    SELECT SUM(messages.size)
+                    SELECT SUM(messages.size)::bigint
                     FROM messages
                     WHERE messages.account_id = accounts.id
                       AND messages.is_deleted = FALSE
-                ), 0) AS used
+                ), 0::bigint) AS used
             FROM accounts
             WHERE accounts.owner_user_id = $1
+              AND accounts.is_deleted = FALSE
             ORDER BY accounts.address
             "#,
         )
@@ -714,6 +701,7 @@ impl PgStore {
             SELECT COUNT(*)
             FROM accounts
             WHERE owner_user_id = $1
+              AND is_deleted = FALSE
             "#,
         )
         .bind(owner_user_id)
@@ -754,7 +742,21 @@ impl PgStore {
         .await
         .map_err(map_sqlx_error)?
         .ok_or_else(|| ApiError::not_found("account not found"))?;
-        ensure_account_active(&account)?;
+        if account.is_deleted {
+            return Ok(());
+        }
+
+        if account.is_disabled {
+            return Err(ApiError::forbidden("account is disabled"));
+        }
+
+        if account
+            .expires_at
+            .map(|expires_at| expires_at <= Utc::now())
+            .unwrap_or(false)
+        {
+            return Err(ApiError::unauthorized("account has expired"));
+        }
 
         let now = Utc::now();
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
@@ -1358,180 +1360,6 @@ impl PgStore {
         Ok(())
     }
 
-    async fn import_snapshot_if_needed(&self, snapshot_path: &str) -> AppResult<()> {
-        if !self.is_database_empty().await? {
-            return Ok(());
-        }
-
-        let Some(snapshot) = load_snapshot_for_import(snapshot_path)? else {
-            return Ok(());
-        };
-        if !snapshot_has_records(&snapshot) {
-            return Ok(());
-        }
-
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        self.import_domains_tx(&mut tx, &snapshot).await?;
-        self.import_accounts_tx(&mut tx, &snapshot).await?;
-        self.import_imported_sources_tx(&mut tx, &snapshot).await?;
-        self.import_messages_tx(&mut tx, &snapshot).await?;
-        self.import_audit_logs_tx(&mut tx, &snapshot).await?;
-        tx.commit().await.map_err(map_sqlx_error)?;
-
-        tracing::info!(
-            domains = snapshot.domains.len(),
-            accounts = snapshot.accounts.len(),
-            mailbox_count = snapshot.messages.len(),
-            audit_logs = snapshot.audit_logs.len(),
-            "imported JSON snapshot into PostgreSQL store"
-        );
-
-        Ok(())
-    }
-
-    async fn is_database_empty(&self) -> AppResult<bool> {
-        let has_records = sqlx::query_scalar::<_, bool>(
-            r#"
-            SELECT
-                EXISTS(SELECT 1 FROM domains LIMIT 1)
-                OR EXISTS(SELECT 1 FROM accounts LIMIT 1)
-                OR EXISTS(SELECT 1 FROM messages LIMIT 1)
-                OR EXISTS(SELECT 1 FROM imported_source_keys LIMIT 1)
-                OR EXISTS(SELECT 1 FROM audit_logs LIMIT 1)
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(map_sqlx_error)?;
-
-        Ok(!has_records)
-    }
-
-    async fn import_domains_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        snapshot: &StoreSnapshot,
-    ) -> AppResult<()> {
-        for domain in &snapshot.domains {
-            sqlx::query(
-                r#"
-                INSERT INTO domains (
-                    id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                ON CONFLICT (domain) DO NOTHING
-                "#,
-            )
-            .bind(domain.id)
-            .bind(&domain.domain)
-            .bind(domain.is_verified)
-            .bind(&domain.status)
-            .bind(domain.owner_user_id)
-            .bind(domain.verification_token.clone())
-            .bind(domain.verification_error.clone())
-            .bind(domain.created_at)
-            .bind(domain.updated_at)
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn import_accounts_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        snapshot: &StoreSnapshot,
-    ) -> AppResult<()> {
-        for account in snapshot.accounts.values() {
-            sqlx::query(
-                r#"
-                INSERT INTO accounts (
-                    id, address, owner_user_id, password_hash, quota, is_disabled, is_deleted, created_at, updated_at, expires_at
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-                ON CONFLICT (id) DO NOTHING
-                "#,
-            )
-            .bind(account.id)
-            .bind(&account.address)
-            .bind(account.owner_user_id)
-            .bind(&account.password_hash)
-            .bind(u64_to_i64(account.quota, "quota")?)
-            .bind(account.is_disabled)
-            .bind(account.is_deleted)
-            .bind(account.created_at)
-            .bind(account.updated_at)
-            .bind(account.expires_at)
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn import_imported_sources_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        snapshot: &StoreSnapshot,
-    ) -> AppResult<()> {
-        for source_key in &snapshot.imported_source_keys {
-            sqlx::query(
-                r#"
-                INSERT INTO imported_source_keys (source_key, created_at)
-                VALUES ($1, $2)
-                ON CONFLICT (source_key) DO NOTHING
-                "#,
-            )
-            .bind(source_key)
-            .bind(Utc::now())
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-
-        Ok(())
-    }
-
-    async fn import_messages_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        snapshot: &StoreSnapshot,
-    ) -> AppResult<()> {
-        for (account_id, messages) in &snapshot.messages {
-            for message in messages {
-                let prepared = prepared_message_from_snapshot(message);
-                self.insert_message_tx(tx, *account_id, &prepared).await?;
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn import_audit_logs_tx(
-        &self,
-        tx: &mut Transaction<'_, Postgres>,
-        snapshot: &StoreSnapshot,
-    ) -> AppResult<()> {
-        for entry in &snapshot.audit_logs {
-            sqlx::query(
-                r#"
-                INSERT INTO audit_logs (entry, created_at)
-                VALUES ($1, $2)
-                "#,
-            )
-            .bind(entry)
-            .bind(parse_audit_log_timestamp(entry))
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-        }
-
-        trim_audit_logs_tx(tx).await
-    }
-
     async fn fetch_domain(&self, domain_id: Uuid) -> AppResult<DomainRow> {
         sqlx::query_as::<_, DomainRow>(
             r#"
@@ -1759,28 +1587,6 @@ fn build_imported_message(imported: &ImportedMessage) -> PreparedMessageRecord {
     }
 }
 
-fn prepared_message_from_snapshot(message: &StoredMessage) -> PreparedMessageRecord {
-    PreparedMessageRecord {
-        id: message.id,
-        source_key: message.source_key.clone(),
-        msgid: message.msgid.clone(),
-        from_address: message.from.clone(),
-        to_addresses: message.to.clone(),
-        subject: message.subject.clone(),
-        intro: message.intro.clone(),
-        seen: message.seen,
-        is_deleted: message.is_deleted,
-        has_attachments: message.has_attachments,
-        size: message.size,
-        download_url: message.download_url.clone(),
-        created_at: message.created_at,
-        updated_at: message.updated_at,
-        text_content: message.text.clone(),
-        html_parts: message.html.clone(),
-        attachments: message.attachments.clone(),
-    }
-}
-
 async fn insert_audit_log_tx(
     tx: &mut Transaction<'_, Postgres>,
     action: &str,
@@ -1837,15 +1643,6 @@ fn format_audit_entry(
         "{} action={action} entity={entity_type}:{entity_id} actor={actor} detail={detail}",
         Utc::now().to_rfc3339(),
     )
-}
-
-fn parse_audit_log_timestamp(entry: &str) -> DateTime<Utc> {
-    entry
-        .split_whitespace()
-        .next()
-        .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-        .map(|value| value.with_timezone(&Utc))
-        .unwrap_or_else(Utc::now)
 }
 
 fn normalize_address(address: &str) -> AppResult<String> {

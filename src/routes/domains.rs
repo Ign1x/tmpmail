@@ -6,12 +6,13 @@ use axum::{
 use uuid::Uuid;
 
 use crate::{
-    admin_state,
-    cloudflare,
+    admin_state, cloudflare,
     domain_management::verify_domain_dns,
     error::ApiError,
     error::AppResult,
-    models::{CloudflareDnsSyncResponse, CreateDomainRequest, Domain, DomainDnsRecord, HydraCollection},
+    models::{
+        CloudflareDnsSyncResponse, CreateDomainRequest, Domain, DomainDnsRecord, HydraCollection,
+    },
     state::AppState,
 };
 
@@ -20,11 +21,10 @@ pub async fn list_domains(
     headers: HeaderMap,
 ) -> AppResult<Json<HydraCollection<Domain>>> {
     let domains = if let Some(user) = admin_state::optional_console_user(&headers, &state).await {
-        let mut store = state.store.lock().await;
         if user.is_admin() {
-            store.list_all_domains().await?
+            state.store.list_all_domains().await?
         } else {
-            store.list_domains_for_owner(user.id).await?
+            state.store.list_domains_for_owner(user.id).await?
         }
     } else {
         let (registration_enabled, allowed_suffixes) = {
@@ -37,8 +37,7 @@ pub async fn list_domains(
         if !registration_enabled {
             Vec::new()
         } else {
-            let mut store = state.store.lock().await;
-            let domains = store.list_domains().await?;
+            let domains = state.store.list_domains().await?;
             if allowed_suffixes.is_empty() {
                 domains
             } else {
@@ -74,14 +73,16 @@ pub async fn create_domain(
     }
 
     let owner_user_id = if user.is_admin() { None } else { Some(user.id) };
-    let mut store = state.store.lock().await;
     if !user.is_admin() {
-        let owned = store.count_domains_owned_by(user.id).await?;
+        let owned = state.store.count_domains_owned_by(user.id).await?;
         if owned >= user.domain_limit as usize {
             return Err(ApiError::validation("managed domain limit reached"));
         }
     }
-    let domain = store.create_domain(&payload.domain, owner_user_id).await?;
+    let domain = state
+        .store
+        .create_domain(&payload.domain, owner_user_id)
+        .await?;
 
     Ok((StatusCode::CREATED, Json(domain)))
 }
@@ -95,8 +96,7 @@ pub async fn get_domain_records(
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
     ensure_domain_access(&state, user, domain_id).await?;
     let config = state.effective_runtime_config().await;
-    let mut store = state.store.lock().await;
-    let records = store.domain_dns_records(domain_id, &config).await?;
+    let records = state.store.domain_dns_records(domain_id, &config).await?;
 
     Ok(Json(records))
 }
@@ -110,13 +110,10 @@ pub async fn verify_domain(
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
     ensure_domain_access(&state, user, domain_id).await?;
     let config = state.effective_runtime_config().await;
-    let (domain_name, token) = {
-        let mut store = state.store.lock().await;
-        store.domain_verification_context(domain_id).await?
-    };
+    let (domain_name, token) = state.store.domain_verification_context(domain_id).await?;
     let result = verify_domain_dns(&domain_name, &token, &config).await;
-    let mut store = state.store.lock().await;
-    let domain = store
+    let domain = state
+        .store
         .update_domain_verification_status(domain_id, result.is_ok(), result.err())
         .await?;
 
@@ -131,8 +128,7 @@ pub async fn delete_domain(
     let user = admin_state::require_console_access(&headers, &state).await?;
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
     ensure_domain_access(&state, user, domain_id).await?;
-    let mut store = state.store.lock().await;
-    store.delete_domain(domain_id).await?;
+    state.store.delete_domain(domain_id).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -159,12 +155,9 @@ pub async fn sync_domain_cloudflare(
             .cloudflare_api_token(user.id)?
             .ok_or_else(|| ApiError::validation("cloudflare api token is not configured"))?
     };
-    let (domain_name, records) = {
-        let mut store = state.store.lock().await;
-        let domain = store.domain_verification_context(domain_id).await?;
-        let records = store.domain_dns_records(domain_id, &config).await?;
-        (domain.0, records)
-    };
+    let domain = state.store.domain_verification_context(domain_id).await?;
+    let records = state.store.domain_dns_records(domain_id, &config).await?;
+    let domain_name = domain.0;
 
     let response = cloudflare::sync_domain_records(
         &api_token,
@@ -174,24 +167,22 @@ pub async fn sync_domain_cloudflare(
     )
     .await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "domain.cloudflare.sync",
-                "domain",
-                domain_id.to_string(),
-                Some(user.id.to_string()),
-                format!(
-                    "zone_name={} created_records={} updated_records={} unchanged_records={}",
-                    response.zone_name,
-                    response.created_records,
-                    response.updated_records,
-                    response.unchanged_records,
-                ),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "domain.cloudflare.sync",
+            "domain",
+            domain_id.to_string(),
+            Some(user.id.to_string()),
+            format!(
+                "zone_name={} created_records={} updated_records={} unchanged_records={}",
+                response.zone_name,
+                response.created_records,
+                response.updated_records,
+                response.unchanged_records,
+            ),
+        )
+        .await?;
 
     Ok(Json(response))
 }
@@ -205,8 +196,7 @@ async fn ensure_domain_access(
         return Ok(());
     }
 
-    let mut store = state.store.lock().await;
-    let owner_user_id = store.domain_owner_user_id(domain_id).await?;
+    let owner_user_id = state.store.domain_owner_user_id(domain_id).await?;
     if owner_user_id != Some(user.id) {
         return Err(ApiError::forbidden(
             "you do not have access to this managed domain",

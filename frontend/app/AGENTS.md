@@ -27,8 +27,10 @@ This directory owns localized page routes and Next server route handlers. Keep p
 
 ## API proxy rules
 - `/api/mail` only forwards safe relative `?endpoint=/...` values: no scheme, no `//`, no whitespace.
-- Preserve `Authorization`, `X-Forwarded-Proto`, and `X-Forwarded-Host` when proxying to backend.
+- Preserve `Authorization` when proxying to backend. Only forward `X-Forwarded-*` values when `TMPMAIL_TRUST_PROXY_HEADERS=true`; direct browser requests must not be able to spoof secure transport or origin metadata.
+- Console-auth browser requests should use the shared admin-session header path so `/api/mail` can inject the HttpOnly cookie server-side and redact returned `sessionToken` fields before they reach JavaScript.
 - Keep `cache: "no-store"` behavior and strip hop-by-hop response headers.
+- `/api/admin/session` is the dedicated logout surface for clearing the HttpOnly console-session cookie.
 - `/api/sse` is `force-dynamic`, requires auth plus `accountId`, and proxies backend `/events`.
 
 ## Verification

@@ -1,5 +1,6 @@
 import type {
   Account,
+  AuthState,
   Domain,
   DomainDnsRecord,
   Message,
@@ -8,12 +9,21 @@ import type {
 import {
   DEFAULT_PROVIDER_ID,
 } from "@/lib/provider-config";
-import { getStoredAdminSession } from "@/lib/admin-session";
+import { clearStoredAdminSession } from "@/lib/admin-session";
+import { ADMIN_SESSION_PROXY_HEADER } from "@/lib/admin-session-cookie";
 import { normalizeEmailAddress } from "@/lib/account-validation";
-import { readStoredJson } from "@/lib/storage";
+import { removeStoredValue } from "@/lib/storage";
 
 const CLIENT_FETCH_TIMEOUT_MS = 15_000;
+const ADMIN_SESSION_READY_ATTEMPTS = 12;
+const ADMIN_SESSION_READY_DELAY_MS = 250;
+const ADMIN_SESSION_RESTORE_ATTEMPTS = 2;
+const ADMIN_SESSION_RESTORE_DELAY_MS = 150;
+const ADMIN_SESSION_REQUEST_TIMEOUT_MS = 4_000;
+const SERVICE_STATUS_REQUEST_TIMEOUT_MS = 4_000;
 const nativeFetch = globalThis.fetch.bind(globalThis);
+const LEGACY_MAILBOX_AUTH_STORAGE_KEY = "auth";
+export const MAILBOX_TOKEN_REFRESHED_EVENT = "token-refreshed";
 
 interface FetchDomainsFromProviderOptions {
   apiKeyOverride?: string;
@@ -50,7 +60,6 @@ export interface AdminSystemSettings {
   domainTxtPrefix?: string
   registrationSettings: AdminRegistrationSettings
   userLimits: AdminUserLimitsSettings
-  updateNotice?: PublicUpdateNotice
 }
 
 export interface AdminUserLimitsSettings {
@@ -88,7 +97,7 @@ export interface AdminSessionInfo {
 }
 
 export interface AdminSessionResponse {
-  sessionToken: string;
+  sessionToken?: string;
   session: AdminSessionInfo;
 }
 
@@ -153,7 +162,6 @@ export interface AdminUpdateSystemSettingsRequest {
   domainTxtPrefix?: string
   registrationSettings?: AdminRegistrationSettings
   userLimits?: AdminUserLimitsSettings
-  updateNotice?: PublicUpdateNotice
 }
 
 export interface AdminAccessKey {
@@ -166,6 +174,10 @@ export interface AdminAccessKey {
 export interface AdminAccessKeyListResponse {
   keys: AdminAccessKey[]
   limit: number
+}
+
+export interface AdminAccessKeyInfoResponse {
+  key: AdminAccessKey
 }
 
 export interface AdminAccessKeyResponse {
@@ -249,6 +261,10 @@ export interface PublicUpdateNotice {
   en: LocalizedUpdateNoticeContent
 }
 
+type HydraCollection<T> = {
+  "hydra:member"?: T[]
+}
+
 export interface AdminRuntimeMetrics {
   cpuUsagePercent: number;
   memoryUsedBytes: number;
@@ -300,7 +316,7 @@ type ApiErrorPayload = {
   token?: string;
 };
 
-type StoredAuthAccount = {
+type RuntimeMailboxAuthAccount = {
   id?: string;
   address: string;
   password?: string;
@@ -308,30 +324,58 @@ type StoredAuthAccount = {
   providerId?: string;
 };
 
-type StoredAuthPayload = {
-  token?: string;
-  currentAccount?: unknown;
-  accounts?: unknown;
+type RuntimeMailboxAuthState = {
+  token: string | null;
+  currentAccount: RuntimeMailboxAuthAccount | null;
+  accounts: RuntimeMailboxAuthAccount[];
+};
+
+let runtimeMailboxAuthState: RuntimeMailboxAuthState = {
+  token: null,
+  currentAccount: null,
+  accounts: [],
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-function normalizeStoredAuthAccount(value: unknown): StoredAuthAccount | null {
-  if (
-    !isRecord(value) ||
-    typeof value.address !== "string"
-  ) {
+function normalizeRuntimeMailboxAuthAccount(
+  value: Account | RuntimeMailboxAuthAccount | null | undefined,
+): RuntimeMailboxAuthAccount | null {
+  if (!value || typeof value.address !== "string") {
     return null;
   }
 
   return {
     id: typeof value.id === "string" ? value.id : undefined,
-    address: value.address,
-    password: typeof value.password === "string" ? value.password : undefined,
-    token: typeof value.token === "string" ? value.token : undefined,
-    providerId: typeof value.providerId === "string" ? value.providerId : undefined,
+    address: value.address.trim(),
+    password:
+      typeof value.password === "string" && value.password.trim()
+        ? value.password
+        : undefined,
+    token:
+      typeof value.token === "string" && value.token.trim()
+        ? value.token
+        : undefined,
+    providerId:
+      typeof value.providerId === "string" && value.providerId.trim()
+        ? value.providerId
+        : DEFAULT_PROVIDER_ID,
+  };
+}
+
+export function clearLegacyStoredMailboxAuth(): void {
+  removeStoredValue(LEGACY_MAILBOX_AUTH_STORAGE_KEY);
+}
+
+export function syncRuntimeMailboxAuthState(authState: AuthState): void {
+  runtimeMailboxAuthState = {
+    token: authState.token?.trim() || null,
+    currentAccount: normalizeRuntimeMailboxAuthAccount(authState.currentAccount),
+    accounts: authState.accounts
+      .map((account) => normalizeRuntimeMailboxAuthAccount(account))
+      .filter((account): account is RuntimeMailboxAuthAccount => !!account),
   };
 }
 
@@ -359,6 +403,7 @@ async function fetchWithTimeout(
   try {
     return await nativeFetch(input, {
       ...init,
+      credentials: init.credentials ?? "same-origin",
       signal: controller.signal,
     });
   } catch (error) {
@@ -374,6 +419,10 @@ async function fetchWithTimeout(
 }
 
 const fetch = fetchWithTimeout;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms))
+}
 
 function createBaseHeaders(providerId?: string): Record<string, string> {
   return {
@@ -417,17 +466,15 @@ function createHeadersWithApiKey(
   return attachBearerToken(headers, apiKeyOverride);
 }
 
-function createHeadersWithBearer(
-  bearerToken: string,
+function createHeadersWithAdminSession(
   additionalHeaders: Record<string, string> = {},
   providerId?: string,
 ): HeadersInit {
-  const headers = {
+  return {
     ...createBaseHeaders(providerId),
     ...additionalHeaders,
+    [ADMIN_SESSION_PROXY_HEADER]: "1",
   };
-
-  return attachBearerToken(headers, bearerToken);
 }
 
 // 创建带有 JWT Token 认证的请求头（用于其他所有需要认证的操作）
@@ -553,71 +600,208 @@ function shouldRetry(status: number): boolean {
   return !noRetryStatuses.includes(status);
 }
 
-// 从localStorage获取当前账户信息
-function getCurrentAccountFromStorage(): {
+// 从运行时状态获取当前账户信息，避免把凭据写进浏览器持久化存储。
+function getCurrentAccountFromRuntime(): {
   id?: string;
   address: string;
   password?: string;
   token: string;
   providerId: string;
 } | null {
-  if (typeof window === "undefined") return null;
-
-  try {
-    const parsed = readStoredJson<StoredAuthPayload | null>("auth", null);
-    if (!parsed || !isRecord(parsed)) return null;
-
-    const currentAccount = normalizeStoredAuthAccount(parsed.currentAccount);
-    const effectiveToken = currentAccount?.token || parsed.token;
-    if (!currentAccount || typeof effectiveToken !== "string") {
-      return null;
-    }
-
-    return {
-      id: currentAccount.id,
-      address: currentAccount.address,
-      password: currentAccount.password,
-      token: effectiveToken,
-      providerId: currentAccount.providerId || DEFAULT_PROVIDER_ID,
-    };
-  } catch (error) {
+  const currentAccount = runtimeMailboxAuthState.currentAccount;
+  const effectiveToken = currentAccount?.token || runtimeMailboxAuthState.token;
+  if (!currentAccount || typeof effectiveToken !== "string" || !effectiveToken.trim()) {
     return null;
+  }
+
+  return {
+    id: currentAccount.id,
+    address: currentAccount.address,
+    password: currentAccount.password,
+    token: effectiveToken,
+    providerId: currentAccount.providerId || DEFAULT_PROVIDER_ID,
+  };
+}
+
+// 更新运行时 token，并通知 auth-context 同步 React state。
+function updateRuntimeMailboxToken(newToken: string): void {
+  const trimmedToken = newToken.trim();
+  if (!trimmedToken) {
+    return;
+  }
+
+  const currentAccount = runtimeMailboxAuthState.currentAccount;
+  if (!currentAccount) {
+    runtimeMailboxAuthState = {
+      ...runtimeMailboxAuthState,
+      token: trimmedToken,
+    };
+    return;
+  }
+
+  const updatedCurrentAccount = {
+    ...currentAccount,
+    token: trimmedToken,
+  };
+  const updatedAccounts = runtimeMailboxAuthState.accounts.map((account) =>
+    (updatedCurrentAccount.id && account.id === updatedCurrentAccount.id) ||
+    account.address === updatedCurrentAccount.address
+      ? { ...account, token: trimmedToken }
+      : account,
+  );
+
+  runtimeMailboxAuthState = {
+    token: trimmedToken,
+    currentAccount: updatedCurrentAccount,
+    accounts: updatedAccounts,
+  };
+
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(
+      new CustomEvent(MAILBOX_TOKEN_REFRESHED_EVENT, {
+        detail: { token: trimmedToken },
+      }),
+    );
   }
 }
 
-// 更新localStorage中的token，并通知auth-context同步更新
-function updateTokenInStorage(newToken: string): void {
-  if (typeof window === "undefined") return;
+async function ensureAdminSessionResponse(response: Response): Promise<Response> {
+  if (response.ok) {
+    return response;
+  }
 
+  if (response.status === 401 || response.status === 403) {
+    clearStoredAdminSession();
+  }
+
+  const error = await response.json().catch(() => ({}));
+  throw new Error(getErrorMessage(response.status, error));
+}
+
+async function readJsonWithTimeout<T>(
+  response: Response,
+  timeoutMs = CLIENT_FETCH_TIMEOUT_MS,
+): Promise<T> {
+  return await new Promise<T>((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error("HTTP 504: 响应超时，请稍后重试"));
+    }, timeoutMs);
+
+    response
+      .json()
+      .then((payload) => resolve(payload as T))
+      .catch(reject)
+      .finally(() => globalThis.clearTimeout(timeoutId));
+  });
+}
+
+async function requestAdminSessionResponse(
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<Response> {
+  const controller = new AbortController()
+  const timeoutId = globalThis.setTimeout(() => controller.abort(), ADMIN_SESSION_REQUEST_TIMEOUT_MS)
+  const headers = createHeadersWithAdminSession({}, providerId)
   try {
-    const parsed = readStoredJson<StoredAuthPayload | null>("auth", null);
-    if (!parsed || !isRecord(parsed)) return;
+    return await fetch(buildProxyUrl("/admin/session"), {
+      headers,
+      cache: "no-store",
+      signal: controller.signal,
+    })
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("HTTP 504: 请求超时，请稍后重试")
+    }
 
-    const currentAccount = normalizeStoredAuthAccount(parsed.currentAccount);
-    if (currentAccount) {
-      currentAccount.token = newToken;
-      parsed.currentAccount = currentAccount;
-      // 同时更新accounts数组中对应账户的token
-      if (parsed.accounts && Array.isArray(parsed.accounts)) {
-        parsed.accounts = parsed.accounts
-          .map(normalizeStoredAuthAccount)
-          .filter((account): account is StoredAuthAccount => !!account)
-          .map((account) =>
-            account.address === currentAccount.address
-              ? { ...account, token: newToken }
-              : account,
-          );
+    throw error
+  } finally {
+    globalThis.clearTimeout(timeoutId)
+  }
+}
+
+function isRetryableAdminSessionError(status: number): boolean {
+  return [401, 403, 502, 503, 504].includes(status)
+}
+
+function isRetryableAdminSessionFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  if (error.name === "AbortError") {
+    return true
+  }
+
+  return /\bHTTP (502|503|504)\b/.test(error.message)
+}
+
+export async function waitForAdminSessionInfo(
+  providerId = DEFAULT_PROVIDER_ID,
+  options?: {
+    attempts?: number
+    delayMs?: number
+  },
+): Promise<AdminSessionInfo> {
+  const attempts = Math.max(1, options?.attempts ?? ADMIN_SESSION_READY_ATTEMPTS)
+  const delayMs = Math.max(0, options?.delayMs ?? ADMIN_SESSION_READY_DELAY_MS)
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      const response = await requestAdminSessionResponse(providerId)
+
+      if (response.ok) {
+        return response.json()
+      }
+
+      const error = await response.json().catch(() => ({}))
+      lastError = new Error(getErrorMessage(response.status, error))
+
+      if (!isRetryableAdminSessionError(response.status) || attempt === attempts) {
+        if (response.status === 401 || response.status === 403) {
+          clearStoredAdminSession()
+        }
+        throw lastError
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("HTTP 503: 管理会话暂时不可用")
+
+      if (!isRetryableAdminSessionFailure(lastError) || attempt === attempts) {
+        throw lastError
       }
     }
-    parsed.token = newToken;
 
-    localStorage.setItem("auth", JSON.stringify(parsed));
+    await sleep(delayMs)
+  }
 
-    // 触发自定义事件，通知auth-context更新React state
-    window.dispatchEvent(
-      new CustomEvent("token-refreshed", { detail: { token: newToken } }),
-    );
-  } catch {}
+  throw lastError ?? new Error("HTTP 503: 管理会话暂时不可用")
+}
+
+export async function restoreAdminSessionInfo(
+  providerId = DEFAULT_PROVIDER_ID,
+  options?: {
+    attempts?: number
+    delayMs?: number
+  },
+): Promise<AdminSessionInfo> {
+  const attempts = Math.max(1, options?.attempts ?? ADMIN_SESSION_RESTORE_ATTEMPTS)
+  const delayMs = Math.max(0, options?.delayMs ?? ADMIN_SESSION_RESTORE_DELAY_MS)
+  let lastError: Error | null = null
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await getAdminSessionInfo(providerId)
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("HTTP 503: 管理会话暂时不可用")
+
+      if (!isRetryableAdminSessionFailure(lastError) || attempt === attempts) {
+        throw lastError
+      }
+    }
+
+    await sleep(delayMs)
+  }
+
+  throw lastError ?? new Error("HTTP 503: 管理会话暂时不可用")
 }
 
 // 全局变量：用于防止并发token刷新
@@ -630,7 +814,7 @@ async function tryRefreshToken(): Promise<string | null> {
     return refreshTokenPromise;
   }
 
-  const account = getCurrentAccountFromStorage();
+  const account = getCurrentAccountFromRuntime();
   if (!account) {
     return null;
   }
@@ -638,13 +822,11 @@ async function tryRefreshToken(): Promise<string | null> {
   // 创建刷新Promise并存储，防止并发刷新
   refreshTokenPromise = (async () => {
     try {
-      const adminSessionToken = getStoredAdminSession()
       const res =
-        adminSessionToken.trim() && account.id
+        account.id
           ? await fetch(buildProxyUrl(`/accounts/${account.id}/token`), {
               method: "POST",
-              headers: createHeadersWithBearer(
-                adminSessionToken,
+              headers: createHeadersWithAdminSession(
                 { "Content-Type": "application/json" },
                 account.providerId,
               ),
@@ -671,8 +853,8 @@ async function tryRefreshToken(): Promise<string | null> {
       const data = await res.json();
       const newToken = data.token;
 
-      // 更新存储中的token
-      updateTokenInStorage(newToken);
+      // 更新运行时 token，避免把敏感凭据写入浏览器持久化存储。
+      updateRuntimeMailboxToken(newToken);
 
       return newToken;
     } catch (error) {
@@ -722,11 +904,18 @@ async function fetchWithTokenRefresh(
 }
 
 // 重试函数，改进错误处理
+type RetryFetchOptions = {
+  retries?: number;
+  delayMs?: number;
+}
+
 async function retryFetch<T>(
   fn: () => Promise<T>,
-  retries = 3,
-  delay = 1000,
+  options: RetryFetchOptions = {},
 ): Promise<T> {
+  const retries = options.retries ?? 3;
+  const delayMs = options.delayMs ?? 1000;
+
   try {
     const response = await fn();
     return response;
@@ -745,8 +934,8 @@ async function retryFetch<T>(
 
     // 对于其他错误，如果还有重试次数，则重试
     if (retries > 0) {
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      return retryFetch(fn, retries - 1, delay * 2);
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return retryFetch(fn, { retries: retries - 1, delayMs: delayMs * 2 });
     }
     throw error;
   }
@@ -755,7 +944,7 @@ async function retryFetch<T>(
 async function requestDomainCollection(
   providerId: string,
   apiKeyOverride?: string,
-): Promise<any[]> {
+): Promise<Domain[]> {
   const headers = createHeadersWithApiKey(
     { "Cache-Control": "no-cache" },
     providerId,
@@ -773,7 +962,7 @@ async function requestDomainCollection(
     return res;
   });
 
-  const data = await response.json();
+  const data = (await response.json()) as HydraCollection<Domain>;
 
   if (!data || !Array.isArray(data["hydra:member"])) {
     throw new Error("Invalid domains data format");
@@ -792,9 +981,9 @@ export async function fetchDomainsFromProvider(
       DEFAULT_PROVIDER_ID,
       options.apiKeyOverride,
     );
-    const availableDomains = domainCollection.filter((domain: any) => domain.isVerified);
+    const availableDomains = domainCollection.filter((domain) => domain.isVerified);
 
-    return availableDomains.map((domain: any) => ({
+    return availableDomains.map((domain) => ({
       ...domain,
       providerId: providerId || DEFAULT_PROVIDER_ID,
     }));
@@ -814,47 +1003,84 @@ export async function fetchDomains(): Promise<Domain[]> {
 
 export async function fetchManagedDomains(
   providerId = DEFAULT_PROVIDER_ID,
-  apiKeyOverride?: string,
 ): Promise<Domain[]> {
-  const domains = await requestDomainCollection(providerId, apiKeyOverride);
+  const headers = createHeadersWithAdminSession(
+    { "Cache-Control": "no-cache" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl("/domains"), {
+    headers,
+    cache: "no-store",
+  })
 
-  return domains.map((domain: any) => ({
+  await ensureAdminSessionResponse(res)
+
+  const data = (await res.json()) as HydraCollection<Domain>
+  const domains = Array.isArray(data["hydra:member"]) ? data["hydra:member"] : []
+
+  return domains.map((domain) => ({
     ...domain,
     providerId,
   }));
 }
 
+async function probeServiceEndpoint(
+  endpoint: "/readyz" | "/healthz",
+  providerId: string,
+  status: ServiceStatusResponse["status"],
+): Promise<ServiceStatusResponse | null> {
+  const controller = new AbortController()
+  const timeoutId = globalThis.setTimeout(
+    () => controller.abort(),
+    SERVICE_STATUS_REQUEST_TIMEOUT_MS,
+  )
+
+  try {
+    const response = await fetch(buildProxyUrl(endpoint), {
+      headers: createBaseHeaders(providerId),
+      cache: "no-store",
+      signal: controller.signal,
+    })
+
+    if (!response.ok) {
+      return null
+    }
+
+    const payload = (await response.json().catch(() => null)) as
+      | { storeBackend?: unknown }
+      | null
+
+    return {
+      status,
+      storeBackend:
+        typeof payload?.storeBackend === "string"
+          ? payload.storeBackend
+          : undefined,
+    }
+  } catch {
+    return null
+  } finally {
+    globalThis.clearTimeout(timeoutId)
+  }
+}
+
 export async function getServiceStatus(
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ServiceStatusResponse> {
-  const headers = createBaseHeaders(providerId);
-  const readyResponse = await fetch(buildProxyUrl("/readyz"), {
-    headers,
-    cache: "no-store",
-  });
+  const readyProbe = probeServiceEndpoint("/readyz", providerId, "ready")
+  const healthProbe = probeServiceEndpoint("/healthz", providerId, "degraded")
+  const readyStatus = await readyProbe
 
-  if (readyResponse.ok) {
-    const data = await readyResponse.json();
-    return {
-      status: "ready",
-      storeBackend: data?.storeBackend,
-    };
+  if (readyStatus) {
+    return readyStatus
   }
 
-  const healthResponse = await fetch(buildProxyUrl("/healthz"), {
-    headers,
-    cache: "no-store",
-  });
-
-  if (healthResponse.ok) {
-    const data = await healthResponse.json();
-    return {
-      status: "degraded",
-      storeBackend: data?.storeBackend,
-    };
+  const healthStatus = await healthProbe
+  if (healthStatus) {
+    return healthStatus
   }
 
-  return { status: "offline" };
+  return { status: "offline" }
 }
 
 export const fetchServiceStatus = getServiceStatus
@@ -1028,20 +1254,16 @@ export async function completeLinuxDoLogin(
 }
 
 export async function validateAdminSession(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<boolean> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
-  const res = await fetch(buildProxyUrl("/admin/session"), {
-    headers,
-    cache: "no-store",
-  });
+  const res = await requestAdminSessionResponse(providerId)
 
   if (res.ok) {
     return true;
   }
 
   if (res.status === 401 || res.status === 403) {
+    clearStoredAdminSession();
     return false;
   }
 
@@ -1050,19 +1272,11 @@ export async function validateAdminSession(
 }
 
 export async function getAdminSessionInfo(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminSessionInfo> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
-  const res = await fetch(buildProxyUrl("/admin/session"), {
-    headers,
-    cache: "no-store",
-  })
+  const res = await requestAdminSessionResponse(providerId)
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
@@ -1090,29 +1304,23 @@ export async function recoverAdmin(
 }
 
 export async function getAdminAccessKey(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
-): Promise<AdminAccessKeyResponse> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+): Promise<AdminAccessKeyInfoResponse> {
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(buildProxyUrl("/admin/access-key"), {
     headers,
     cache: "no-store",
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
-  return res.json();
+  return readJsonWithTimeout<AdminAccessKeyInfoResponse>(res);
 }
 
 export async function regenerateAdminAccessKey(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminAccessKeyResponse> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   );
@@ -1122,39 +1330,30 @@ export async function regenerateAdminAccessKey(
     body: JSON.stringify({}),
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
-  return res.json();
+  return readJsonWithTimeout<AdminAccessKeyResponse>(res);
 }
 
 export async function fetchAdminAccessKeys(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminAccessKeyListResponse> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl("/admin/access-keys"), {
     headers,
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
-  return res.json()
+  return readJsonWithTimeout<AdminAccessKeyListResponse>(res)
 }
 
 export async function createAdminAccessKey(
-  sessionToken: string,
   payload: AdminCreateAccessKeyRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminAccessKeyResponse> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1164,39 +1363,30 @@ export async function createAdminAccessKey(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
-  return res.json()
+  return readJsonWithTimeout<AdminAccessKeyResponse>(res)
 }
 
 export async function deleteAdminAccessKey(
-  sessionToken: string,
   keyId: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl(`/admin/access-keys/${keyId}`), {
     method: "DELETE",
     headers,
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 }
 
 export async function updateAdminPassword(
-  sessionToken: string,
   currentPassword: string,
   newPassword: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   );
@@ -1206,37 +1396,29 @@ export async function updateAdminPassword(
     body: JSON.stringify({ currentPassword, newPassword }),
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
+  clearStoredAdminSession();
 }
 
 export async function fetchAdminUsers(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ConsoleUser[]> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl("/admin/users"), {
     headers,
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function createAdminUser(
-  sessionToken: string,
   payload: AdminCreateUserRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ConsoleUser> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1246,22 +1428,17 @@ export async function createAdminUser(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function updateAdminUser(
-  sessionToken: string,
   userId: string,
   payload: AdminUpdateUserRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ConsoleUser> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1271,39 +1448,30 @@ export async function updateAdminUser(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function deleteAdminUser(
-  sessionToken: string,
   userId: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl(`/admin/users/${userId}`), {
     method: "DELETE",
     headers,
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 }
 
 export async function resetAdminUserPassword(
-  sessionToken: string,
   userId: string,
   payload: AdminResetUserPasswordRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1313,37 +1481,28 @@ export async function resetAdminUserPassword(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 }
 
 export async function fetchAdminSystemSettings(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminSystemSettings> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl("/admin/settings"), {
     headers,
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function updateAdminSystemSettings(
-  sessionToken: string,
   payload: AdminUpdateSystemSettingsRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminSystemSettings> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1353,38 +1512,30 @@ export async function updateAdminSystemSettings(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function getAdminMetrics(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<AdminMetricsResponse> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(buildProxyUrl("/admin/metrics"), {
     headers,
     cache: "no-store",
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   return res.json();
 }
 
 export async function getAdminAuditLogs(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
   limit = 50,
 ): Promise<AdminAuditLogsResponse> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(
     buildProxyUrl(`/admin/audit-logs?limit=${encodeURIComponent(limit)}`),
     {
@@ -1393,36 +1544,27 @@ export async function getAdminAuditLogs(
     },
   );
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   return res.json();
 }
 
 export async function clearAdminAuditLogs(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId);
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(buildProxyUrl("/admin/audit-logs"), {
     method: "DELETE",
     headers,
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 }
 
 export async function runAdminCleanup(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<CleanupRunResponse> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   );
@@ -1432,10 +1574,7 @@ export async function runAdminCleanup(
     body: JSON.stringify({}),
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   return res.json();
 }
@@ -1443,12 +1582,10 @@ export async function runAdminCleanup(
 export async function createManagedDomain(
   domain: string,
   providerId = DEFAULT_PROVIDER_ID,
-  apiKeyOverride?: string,
 ): Promise<Domain> {
-  const headers = createHeadersWithApiKey(
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
-    apiKeyOverride,
   );
   const res = await fetch(buildProxyUrl("/domains"), {
     method: "POST",
@@ -1456,10 +1593,7 @@ export async function createManagedDomain(
     body: JSON.stringify({ domain }),
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   const createdDomain = await res.json();
   return {
@@ -1471,17 +1605,13 @@ export async function createManagedDomain(
 export async function getManagedDomainRecords(
   domainId: string,
   providerId = DEFAULT_PROVIDER_ID,
-  apiKeyOverride?: string,
 ): Promise<DomainDnsRecord[]> {
-  const headers = createHeadersWithApiKey({}, providerId, apiKeyOverride);
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(buildProxyUrl(`/domains/${domainId}/records`), {
     headers,
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   return res.json();
 }
@@ -1489,12 +1619,10 @@ export async function getManagedDomainRecords(
 export async function verifyManagedDomain(
   domainId: string,
   providerId = DEFAULT_PROVIDER_ID,
-  apiKeyOverride?: string,
 ): Promise<Domain> {
-  const headers = createHeadersWithApiKey(
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
-    apiKeyOverride,
   );
   const res = await fetch(buildProxyUrl(`/domains/${domainId}/verify`), {
     method: "POST",
@@ -1502,10 +1630,7 @@ export async function verifyManagedDomain(
     body: JSON.stringify({}),
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 
   const verifiedDomain = await res.json();
   return {
@@ -1517,18 +1642,14 @@ export async function verifyManagedDomain(
 export async function deleteManagedDomain(
   domainId: string,
   providerId = DEFAULT_PROVIDER_ID,
-  apiKeyOverride?: string,
 ): Promise<void> {
-  const headers = createHeadersWithApiKey({}, providerId, apiKeyOverride);
+  const headers = createHeadersWithAdminSession({}, providerId);
   const res = await fetch(buildProxyUrl(`/domains/${domainId}`), {
     method: "DELETE",
     headers,
   });
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}));
-    throw new Error(getErrorMessage(res.status, error));
-  }
+  await ensureAdminSessionResponse(res);
 }
 
 // 创建账户
@@ -1551,7 +1672,7 @@ export async function createAccount(
   };
 
   // 构建请求体，仅在指定 expiresIn 时才传递该字段
-  const requestBody: Record<string, any> = { address, password };
+  const requestBody: Record<string, string | number> = { address, password };
   if (expiresIn !== undefined) {
     requestBody.expiresIn = expiresIn;
   }
@@ -1597,17 +1718,15 @@ export async function sendMailboxRegisterOtp(
 }
 
 export async function createOwnedAccount(
-  sessionToken: string,
   address: string,
   providerId = DEFAULT_PROVIDER_ID,
   expiresIn?: number,
 ): Promise<Account> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
-  const requestBody: Record<string, any> = { address }
+  const requestBody: Record<string, string | number> = { address }
   if (expiresIn !== undefined) {
     requestBody.expiresIn = expiresIn
   }
@@ -1618,40 +1737,31 @@ export async function createOwnedAccount(
     body: JSON.stringify(requestBody),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function fetchOwnedAccounts(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<Account[]> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl("/accounts"), {
     headers,
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   const payload = await res.json()
   return Array.isArray(payload?.["hydra:member"]) ? payload["hydra:member"] : []
 }
 
 export async function issueOwnedAccountToken(
-  sessionToken: string,
   accountId: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<{ token: string; id: string }> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1661,39 +1771,30 @@ export async function issueOwnedAccountToken(
     body: JSON.stringify({}),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function fetchConsoleCloudflareSettings(
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ConsoleCloudflareSettings> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl("/admin/cloudflare"), {
     headers,
     cache: "no-store",
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function updateConsoleCloudflareSettings(
-  sessionToken: string,
   payload: UpdateConsoleCloudflareSettingsRequest,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<ConsoleCloudflareSettings> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1703,21 +1804,16 @@ export async function updateConsoleCloudflareSettings(
     body: JSON.stringify(payload),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function testConsoleCloudflareToken(
-  sessionToken: string,
   apiToken?: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<CloudflareTokenValidationResponse> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1727,21 +1823,16 @@ export async function testConsoleCloudflareToken(
     body: JSON.stringify({ apiToken }),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function syncManagedDomainCloudflare(
   domainId: string,
-  sessionToken: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<CloudflareDnsSyncResponse> {
-  const headers = createHeadersWithBearer(
-    sessionToken,
+  const headers = createHeadersWithAdminSession(
     { "Content-Type": "application/json" },
     providerId,
   )
@@ -1751,28 +1842,32 @@ export async function syncManagedDomainCloudflare(
     body: JSON.stringify({}),
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
-  }
+  await ensureAdminSessionResponse(res)
 
   return res.json()
 }
 
 export async function deleteOwnedAccount(
-  sessionToken: string,
   accountId: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<void> {
-  const headers = createHeadersWithBearer(sessionToken, {}, providerId)
+  const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl(`/accounts/${accountId}`), {
     method: "DELETE",
     headers,
   })
 
-  if (!res.ok) {
-    const error = await res.json().catch(() => ({}))
-    throw new Error(getErrorMessage(res.status, error))
+  await ensureAdminSessionResponse(res)
+}
+
+export async function deleteAdminSession(): Promise<void> {
+  try {
+    await fetch("/api/admin/session", {
+      method: "DELETE",
+      cache: "no-store",
+    })
+  } finally {
+    clearStoredAdminSession()
   }
 }
 
@@ -1823,7 +1918,7 @@ export async function getAccount(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(
@@ -1866,8 +1961,8 @@ export async function getMessages(
     if (!res.ok) {
       // 如果刷新后仍然失败，检查是否需要更新token
       if (res.status === 401) {
-        // 尝试从storage获取最新token（可能已被刷新）
-        const account = getCurrentAccountFromStorage();
+        // 尝试从运行时状态获取最新 token（可能已被刷新）
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           // 用新token重试一次
@@ -1888,7 +1983,7 @@ export async function getMessages(
     }
 
     return res;
-  });
+  }, { retries: 0 });
 
   const data = await response.json();
   const messages = data["hydra:member"] || [];
@@ -1922,7 +2017,7 @@ export async function getMessage(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(
@@ -1941,7 +2036,7 @@ export async function getMessage(
     }
 
     return res;
-  });
+  }, { retries: 0 });
 
   return response.json();
 }
@@ -1972,7 +2067,7 @@ export async function markMessageAsRead(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(
@@ -2003,7 +2098,7 @@ export async function markMessageAsRead(
       return res.json();
     }
     return { seen: true };
-  });
+  }, { retries: 0 });
 
   return response;
 }
@@ -2029,7 +2124,7 @@ export async function deleteMessage(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(
@@ -2073,7 +2168,7 @@ export async function deleteAccount(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(
@@ -2114,7 +2209,7 @@ export async function downloadProtectedAsset(
 
     if (!res.ok) {
       if (res.status === 401) {
-        const account = getCurrentAccountFromStorage();
+        const account = getCurrentAccountFromRuntime();
         if (account && account.token && account.token !== currentToken) {
           currentToken = account.token;
           const retryHeaders = createHeadersWithToken(

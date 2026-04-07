@@ -73,7 +73,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/domains/{id}", delete(domains::delete_domain))
         .route("/domains/{id}/records", get(domains::get_domain_records))
         .route("/domains/{id}/verify", post(domains::verify_domain))
-        .route("/domains/{id}/cloudflare/sync", post(domains::sync_domain_cloudflare))
+        .route(
+            "/domains/{id}/cloudflare/sync",
+            post(domains::sync_domain_cloudflare),
+        )
         .route(
             "/accounts",
             get(accounts::list_accounts).post(accounts::create_account),

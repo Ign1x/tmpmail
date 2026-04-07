@@ -13,20 +13,19 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    admin_state, auth, cloudflare,
+    admin_state::{self, default_email_otp_body, default_email_otp_subject},
+    auth, cloudflare,
     error::{ApiError, AppResult},
     models::{
-        AdminAccessKeyListResponse, AdminAccessKeyResponse, AdminBootstrapRequest,
-        AdminCreateAccessKeyRequest, AdminCreateUserRequest, AdminPasswordChangeRequest,
-        AdminRecoveryRequest, AdminResetUserPasswordRequest, AdminSessionInfo,
-        AdminSessionResponse, AdminSetupResponse, AdminStatusResponse, AdminSystemSettings,
-        AdminUpdateSystemSettingsRequest, AdminUpdateUserRequest, ConsoleCloudflareSettings,
-        CloudflareTokenValidationResponse,
-        ConsoleRegisterRequest, ConsoleUser, ConsoleUserRole, LinuxDoAuthorizeRequest,
-        LinuxDoAuthorizeResponse, LinuxDoCompleteRequest, SendEmailOtpRequest,
-        SendEmailOtpResponse,
-        TestConsoleCloudflareTokenRequest,
-        UpdateConsoleCloudflareSettingsRequest,
+        AdminAccessKeyInfoResponse, AdminAccessKeyListResponse, AdminAccessKeyResponse,
+        AdminBootstrapRequest, AdminCreateAccessKeyRequest, AdminCreateUserRequest,
+        AdminPasswordChangeRequest, AdminRecoveryRequest, AdminResetUserPasswordRequest,
+        AdminSessionInfo, AdminSessionResponse, AdminSetupResponse, AdminStatusResponse,
+        AdminSystemSettings, AdminUpdateSystemSettingsRequest, AdminUpdateUserRequest,
+        CloudflareTokenValidationResponse, ConsoleCloudflareSettings, ConsoleRegisterRequest,
+        ConsoleUser, ConsoleUserRole, LinuxDoAuthorizeRequest, LinuxDoAuthorizeResponse,
+        LinuxDoCompleteRequest, SendEmailOtpRequest, SendEmailOtpResponse,
+        TestConsoleCloudflareTokenRequest, UpdateConsoleCloudflareSettingsRequest,
     },
     otp::normalize_email_key,
     state::AppState,
@@ -77,6 +76,7 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatus
     let admin_state = state.admin_state.read().await;
     let registration_settings = admin_state.registration_settings();
     let linux_do_enabled = registration_settings.linux_do.enabled
+        && !registration_settings.email_otp.enabled
         && registration_settings
             .linux_do
             .client_id
@@ -121,6 +121,11 @@ pub async fn linux_do_authorize(
             "public console registration is disabled",
         ));
     }
+    if registration_settings.email_otp.enabled {
+        return Err(ApiError::forbidden(
+            "linux.do registration is unavailable while email otp is enabled",
+        ));
+    }
 
     let linux_do = registration_settings.linux_do;
     if !linux_do.enabled {
@@ -135,7 +140,12 @@ pub async fn linux_do_authorize(
         .authorize_url
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
-    let redirect_uri = normalize_linux_do_redirect_uri(&payload.redirect_uri)?;
+    let redirect_uri = normalize_linux_do_redirect_uri(
+        &payload.redirect_uri,
+        &headers,
+        linux_do.callback_url.as_deref(),
+        state.config.trust_proxy_headers,
+    )?;
     let state_value = normalize_linux_do_state(&payload.state)?;
 
     let mut authorization_url = Url::parse(&authorize_url)
@@ -163,20 +173,18 @@ pub async fn setup(
         admin_state.bootstrap_first_admin(&payload.username, &payload.password)?
     };
     let session = load_session_info(&state, &user.id).await?;
-    let session_token = issue_session_token(&state, &session.user)?;
+    let session_token = issue_session_token(&state, &session.user).await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.bootstrap",
-                "console-user",
-                user.id.clone(),
-                Some(user.id.clone()),
-                format!("username={} role=admin", user.username),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.bootstrap",
+            "console-user",
+            user.id.clone(),
+            Some(user.id.clone()),
+            format!("username={} role=admin", user.username),
+        )
+        .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -195,29 +203,37 @@ pub async fn login(
     Json(payload): Json<crate::models::AdminLoginRequest>,
 ) -> AppResult<impl IntoResponse> {
     auth::require_secure_admin_transport(&headers, &state.config)?;
+    let rate_limit_ticket = auth::enforce_auth_attempt_limit(
+        &state,
+        &headers,
+        "admin-login",
+        &payload.username,
+        auth::ADMIN_LOGIN_NETWORK_LIMIT,
+        auth::ADMIN_LOGIN_IDENTITY_LIMIT,
+    )
+    .await?;
     let authenticated = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.authenticate(&payload.username, &payload.password)?
     };
+    auth::clear_auth_attempt_limit(&state, rate_limit_ticket).await;
     let session = load_session_info(&state, &authenticated.id.to_string()).await?;
-    let session_token = issue_session_token(&state, &session.user)?;
+    let session_token = issue_session_token(&state, &session.user).await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.login",
-                "console-user",
-                authenticated.id.to_string(),
-                Some(authenticated.id.to_string()),
-                format!(
-                    "username={} role={}",
-                    authenticated.username,
-                    role_label(&authenticated.role)
-                ),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.login",
+            "console-user",
+            authenticated.id.to_string(),
+            Some(authenticated.id.to_string()),
+            format!(
+                "username={} role={}",
+                authenticated.username,
+                role_label(&authenticated.role)
+            ),
+        )
+        .await?;
 
     Ok((
         sensitive_headers(),
@@ -265,20 +281,18 @@ pub async fn register(
         admin_state.create_public_user(registration_identity, &payload.password, domain_limit)?
     };
     let session = load_session_info(&state, &user.id).await?;
-    let session_token = issue_session_token(&state, &session.user)?;
+    let session_token = issue_session_token(&state, &session.user).await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.register",
-                "console-user",
-                user.id.clone(),
-                None,
-                format!("username={} role=user", user.username),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.register",
+            "console-user",
+            user.id.clone(),
+            None,
+            format!("username={} role=user", user.username),
+        )
+        .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -319,7 +333,7 @@ pub async fn send_register_otp(
     }
 
     let email = normalize_email_key(&payload.email)?;
-    send_email_otp(&state, &email, &settings).await?;
+    send_email_otp(&state, &headers, &email, &settings).await?;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -349,6 +363,11 @@ pub async fn linux_do_complete(
             "public console registration is disabled",
         ));
     }
+    if registration_settings.email_otp.enabled {
+        return Err(ApiError::forbidden(
+            "linux.do registration is unavailable while email otp is enabled",
+        ));
+    }
 
     let linux_do = registration_settings.linux_do;
     if !linux_do.enabled {
@@ -371,7 +390,12 @@ pub async fn linux_do_complete(
         .userinfo_url
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
-    let redirect_uri = normalize_linux_do_redirect_uri(&payload.redirect_uri)?;
+    let redirect_uri = normalize_linux_do_redirect_uri(
+        &payload.redirect_uri,
+        &headers,
+        linux_do.callback_url.as_deref(),
+        state.config.trust_proxy_headers,
+    )?;
     let code = payload.code.trim();
     if code.is_empty() {
         return Err(ApiError::validation(
@@ -461,23 +485,21 @@ pub async fn linux_do_complete(
         admin_state.authenticate_linux_do(&subject, &preferred_username, trust_level)?
     };
     let session = load_session_info(&state, &authenticated.id.to_string()).await?;
-    let session_token = issue_session_token(&state, &session.user)?;
+    let session_token = issue_session_token(&state, &session.user).await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.login.linux_do",
-                "console-user",
-                authenticated.id.to_string(),
-                None,
-                format!(
-                    "linux_do_user_id={} linux_do_username={} trust_level={trust_level}",
-                    subject, preferred_username
-                ),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.login.linux_do",
+            "console-user",
+            authenticated.id.to_string(),
+            None,
+            format!(
+                "linux_do_user_id={} linux_do_username={} trust_level={trust_level}",
+                subject, preferred_username
+            ),
+        )
+        .await?;
 
     Ok((
         sensitive_headers(),
@@ -492,8 +514,8 @@ pub async fn session(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let session = load_session_info(&state, &claims.sub).await?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let session = load_session_info(&state, &user.id.to_string()).await?;
 
     Ok((sensitive_headers(), Json(session)))
 }
@@ -511,30 +533,38 @@ pub async fn recover(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::forbidden("admin recovery is not configured"))?;
+    let username = payload.username.as_deref().unwrap_or("admin");
+    let rate_limit_ticket = auth::enforce_auth_attempt_limit(
+        &state,
+        &headers,
+        "admin-recover",
+        username,
+        auth::ADMIN_RECOVERY_NETWORK_LIMIT,
+        auth::ADMIN_RECOVERY_IDENTITY_LIMIT,
+    )
+    .await?;
     if payload.recovery_token.trim() != configured_token {
         return Err(ApiError::unauthorized("invalid admin recovery token"));
     }
 
-    let username = payload.username.as_deref().unwrap_or("admin");
     let (user, api_key) = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.reset_password_with_recovery(username, &payload.new_password)?
     };
+    auth::clear_auth_attempt_limit(&state, rate_limit_ticket).await;
     let session = load_session_info(&state, &user.id).await?;
-    let session_token = issue_session_token(&state, &session.user)?;
+    let session_token = issue_session_token(&state, &session.user).await?;
 
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.recover",
-                "console-user",
-                user.id.clone(),
-                Some(user.id.clone()),
-                format!("username={} password recovered", user.username),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.recover",
+            "console-user",
+            user.id.clone(),
+            Some(user.id.clone()),
+            format!("username={} password recovered", user.username),
+        )
+        .await?;
 
     Ok((
         sensitive_headers(),
@@ -550,17 +580,18 @@ pub async fn access_key(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
-    let (key, api_key) = {
-        let mut admin_state = state.admin_state.write().await;
-        admin_state.create_api_key(user_id, Some("Default Key"))?
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
+    let key = {
+        let admin_state = state.admin_state.read().await;
+        admin_state
+            .latest_api_key(user_id)?
+            .ok_or_else(|| ApiError::not_found("access key not found"))?
     };
 
     Ok((
         sensitive_headers(),
-        Json(AdminAccessKeyResponse { key, api_key }),
+        Json(AdminAccessKeyInfoResponse { key }),
     ))
 }
 
@@ -568,25 +599,22 @@ pub async fn regenerate_access_key(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<impl IntoResponse> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
     let (key, api_key) = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.create_api_key(user_id, None)?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.access_key.regenerate",
-                "console-user",
-                user_id.to_string(),
-                Some(user_id.to_string()),
-                "rotated console api key".to_owned(),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.access_key.regenerate",
+            "console-user",
+            user_id.to_string(),
+            Some(user_id.to_string()),
+            "rotated console api key".to_owned(),
+        )
+        .await?;
 
     Ok((
         sensitive_headers(),
@@ -598,9 +626,8 @@ pub async fn list_access_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> AppResult<Json<AdminAccessKeyListResponse>> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
     let admin_state = state.admin_state.read().await;
 
     Ok(Json(AdminAccessKeyListResponse {
@@ -614,25 +641,22 @@ pub async fn create_access_key(
     headers: HeaderMap,
     Json(payload): Json<AdminCreateAccessKeyRequest>,
 ) -> AppResult<impl IntoResponse> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
     let (key, api_key) = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.create_api_key(user_id, payload.name.as_deref())?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.access_key.create",
-                "console-user",
-                user_id.to_string(),
-                Some(user_id.to_string()),
-                format!("created access key id={} name={}", key.id, key.name),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.access_key.create",
+            "console-user",
+            user_id.to_string(),
+            Some(user_id.to_string()),
+            format!("created access key id={} name={}", key.id, key.name),
+        )
+        .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -646,26 +670,23 @@ pub async fn delete_access_key(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
     let key_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid access key id"))?;
     let deleted = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.delete_api_key(user_id, key_id)?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.access_key.delete",
-                "console-user",
-                user_id.to_string(),
-                Some(user_id.to_string()),
-                format!("deleted access key id={} name={}", deleted.id, deleted.name),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.access_key.delete",
+            "console-user",
+            user_id.to_string(),
+            Some(user_id.to_string()),
+            format!("deleted access key id={} name={}", deleted.id, deleted.name),
+        )
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -675,25 +696,22 @@ pub async fn change_password(
     headers: HeaderMap,
     Json(payload): Json<AdminPasswordChangeRequest>,
 ) -> AppResult<impl IntoResponse> {
-    let claims = auth::require_console_session(&headers, &state.config)?;
-    let user_id = Uuid::parse_str(&claims.sub)
-        .map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let user = admin_state::require_console_session_user(&headers, &state).await?;
+    let user_id = user.id;
     {
         let mut admin_state = state.admin_state.write().await;
         admin_state.change_password(user_id, &payload.current_password, &payload.new_password)?;
     }
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.password.change",
-                "console-user",
-                user_id.to_string(),
-                Some(user_id.to_string()),
-                "console password updated".to_owned(),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.password.change",
+            "console-user",
+            user_id.to_string(),
+            Some(user_id.to_string()),
+            "console password updated".to_owned(),
+        )
+        .await?;
 
     Ok((StatusCode::NO_CONTENT, sensitive_headers()))
 }
@@ -722,18 +740,16 @@ pub async fn create_user(
             payload.domain_limit,
         )?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.user.create",
-                "console-user",
-                user.id.clone(),
-                Some(actor.id.to_string()),
-                format!("username={} role={}", user.username, role_label(&user.role)),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.user.create",
+            "console-user",
+            user.id.clone(),
+            Some(actor.id.to_string()),
+            format!("username={} role={}", user.username, role_label(&user.role)),
+        )
+        .await?;
 
     Ok((StatusCode::CREATED, Json(user)))
 }
@@ -757,18 +773,16 @@ pub async fn update_user(
             payload.is_disabled,
         )?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.user.update",
-                "console-user",
-                user.id.clone(),
-                Some(actor.id.to_string()),
-                format!("username={} role={}", user.username, role_label(&user.role)),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.user.update",
+            "console-user",
+            user.id.clone(),
+            Some(actor.id.to_string()),
+            format!("username={} role={}", user.username, role_label(&user.role)),
+        )
+        .await?;
 
     Ok(Json(user))
 }
@@ -786,18 +800,16 @@ pub async fn reset_user_password(
         let mut admin_state = state.admin_state.write().await;
         admin_state.reset_user_password(user_id, &payload.new_password)?;
     }
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.user.password.reset",
-                "console-user",
-                user_id.to_string(),
-                Some(actor.id.to_string()),
-                "password reset by administrator".to_owned(),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.user.password.reset",
+            "console-user",
+            user_id.to_string(),
+            Some(actor.id.to_string()),
+            "password reset by administrator".to_owned(),
+        )
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -811,38 +823,33 @@ pub async fn delete_user(
     let user_id =
         Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid console user id"))?;
 
-    {
-        let mut store = state.store.lock().await;
-        let owned_domains = store.count_domains_owned_by(user_id).await?;
-        if owned_domains > 0 {
-            return Err(ApiError::validation(
-                "console user still owns managed domains",
-            ));
-        }
-        let owned_accounts = store.count_accounts_owned_by(user_id).await?;
-        if owned_accounts > 0 {
-            return Err(ApiError::validation(
-                "console user still owns mailbox accounts",
-            ));
-        }
+    let owned_domains = state.store.count_domains_owned_by(user_id).await?;
+    if owned_domains > 0 {
+        return Err(ApiError::validation(
+            "console user still owns managed domains",
+        ));
+    }
+    let owned_accounts = state.store.count_accounts_owned_by(user_id).await?;
+    if owned_accounts > 0 {
+        return Err(ApiError::validation(
+            "console user still owns mailbox accounts",
+        ));
     }
 
     {
         let mut admin_state = state.admin_state.write().await;
         admin_state.delete_user(user_id)?;
     }
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.user.delete",
-                "console-user",
-                user_id.to_string(),
-                Some(actor.id.to_string()),
-                "console user deleted".to_owned(),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.user.delete",
+            "console-user",
+            user_id.to_string(),
+            Some(actor.id.to_string()),
+            "console user deleted".to_owned(),
+        )
+        .await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -852,8 +859,9 @@ pub async fn get_settings(
     headers: HeaderMap,
 ) -> AppResult<Json<AdminSystemSettings>> {
     admin_state::require_admin_access(&headers, &state).await?;
+    let config = state.effective_runtime_config().await;
     let admin_state = state.admin_state.read().await;
-    Ok(Json(admin_state.effective_system_settings(state.config.as_ref())))
+    Ok(Json(admin_state.effective_system_settings(&config)))
 }
 
 pub async fn update_settings(
@@ -874,37 +882,35 @@ pub async fn update_settings(
             payload.update_notice,
         )?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.settings.update",
-                "system-settings",
-                "default".to_owned(),
-                Some(actor.id.to_string()),
-                format!(
-                    "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} open_registration_enabled={} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
-                    settings.system_enabled,
-                    settings.mail_exchange_host,
-                    settings.mail_route_target,
-                    settings.domain_txt_prefix,
-                    settings
-                        .registration_settings
-                        .open_registration_enabled,
-                    settings.registration_settings.allowed_email_suffixes,
-                    settings.registration_settings.email_otp.enabled,
-                    settings.registration_settings.linux_do.enabled,
-                    settings.user_limits.default_domain_limit,
-                    settings.user_limits.mailbox_limit,
-                    settings.user_limits.api_key_limit,
-                    settings
-                        .update_notice
-                        .as_ref()
-                        .map(|notice| notice.version.as_str()),
-                ),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.settings.update",
+            "system-settings",
+            "default".to_owned(),
+            Some(actor.id.to_string()),
+            format!(
+                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} open_registration_enabled={} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
+                settings.system_enabled,
+                settings.mail_exchange_host,
+                settings.mail_route_target,
+                settings.domain_txt_prefix,
+                settings
+                    .registration_settings
+                    .open_registration_enabled,
+                settings.registration_settings.allowed_email_suffixes,
+                settings.registration_settings.email_otp.enabled,
+                settings.registration_settings.linux_do.enabled,
+                settings.user_limits.default_domain_limit,
+                settings.user_limits.mailbox_limit,
+                settings.user_limits.api_key_limit,
+                settings
+                    .update_notice
+                    .as_ref()
+                    .map(|notice| notice.version.as_str()),
+            ),
+        )
+        .await?;
 
     Ok(Json(effective_system_settings(&state).await))
 }
@@ -933,21 +939,19 @@ pub async fn update_cloudflare_settings(
             payload.auto_sync_enabled,
         )?
     };
-    {
-        let mut store = state.store.lock().await;
-        store
-            .append_audit_log(
-                "console.cloudflare.update",
-                "console-user",
-                actor.id.to_string(),
-                Some(actor.id.to_string()),
-                format!(
-                    "enabled={} api_token_configured={} auto_sync_enabled={}",
-                    settings.enabled, settings.api_token_configured, settings.auto_sync_enabled
-                ),
-            )
-            .await?;
-    }
+    state
+        .store
+        .append_audit_log(
+            "console.cloudflare.update",
+            "console-user",
+            actor.id.to_string(),
+            Some(actor.id.to_string()),
+            format!(
+                "enabled={} api_token_configured={} auto_sync_enabled={}",
+                settings.enabled, settings.api_token_configured, settings.auto_sync_enabled
+            ),
+        )
+        .await?;
 
     Ok(Json(settings))
 }
@@ -985,22 +989,32 @@ pub async fn test_cloudflare_token(
 async fn load_session_info(state: &AppState, user_id: &str) -> AppResult<AdminSessionInfo> {
     let user_id =
         Uuid::parse_str(user_id).map_err(|_| ApiError::unauthorized("invalid console session"))?;
+    let config = state.effective_runtime_config().await;
     let admin_state = state.admin_state.read().await;
     Ok(AdminSessionInfo {
         user: admin_state.current_user(user_id)?,
-        system_settings: admin_state.effective_system_settings(state.config.as_ref()),
+        system_settings: admin_state.effective_system_settings(&config),
     })
 }
 
 async fn effective_system_settings(state: &AppState) -> AdminSystemSettings {
+    let config = state.effective_runtime_config().await;
     let admin_state = state.admin_state.read().await;
-    admin_state.effective_system_settings(state.config.as_ref())
+    admin_state.effective_system_settings(&config)
 }
 
-fn issue_session_token(state: &AppState, user: &ConsoleUser) -> AppResult<String> {
+async fn issue_session_token(state: &AppState, user: &ConsoleUser) -> AppResult<String> {
     let user_id =
         Uuid::parse_str(&user.id).map_err(|_| ApiError::unauthorized("invalid console user"))?;
-    auth::issue_console_session_token(user_id, &user.username, &user.role, &state.config)
+    let admin_state = state.admin_state.read().await;
+    let session_version = admin_state.current_session_version(user_id)?;
+    auth::issue_console_session_token(
+        user_id,
+        &user.username,
+        &user.role,
+        session_version,
+        &state.config,
+    )
 }
 
 fn role_label(role: &ConsoleUserRole) -> &'static str {
@@ -1017,7 +1031,37 @@ fn sensitive_headers() -> [(HeaderName, HeaderValue); 2] {
     ]
 }
 
-fn normalize_linux_do_redirect_uri(value: &str) -> AppResult<String> {
+fn normalize_linux_do_redirect_uri(
+    value: &str,
+    headers: &HeaderMap,
+    configured_callback_url: Option<&str>,
+    trust_proxy_headers: bool,
+) -> AppResult<String> {
+    let normalized = normalize_linux_do_callback_url(value)?;
+    let parsed = Url::parse(&normalized)
+        .map_err(|_| ApiError::validation("linux.do redirect uri is invalid"))?;
+
+    if let Some(allowed) = configured_callback_url {
+        let allowed = normalize_linux_do_callback_url(allowed)?;
+        if normalized != allowed {
+            return Err(ApiError::validation(
+                "linux.do redirect uri is not allowlisted",
+            ));
+        }
+        return Ok(normalized);
+    }
+
+    let request_origin = request_origin_from_headers(headers, trust_proxy_headers)?;
+    if parsed.origin().ascii_serialization() != request_origin {
+        return Err(ApiError::validation(
+            "linux.do redirect uri must match the current admin origin",
+        ));
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_linux_do_callback_url(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(ApiError::validation("linux.do redirect uri is required"));
@@ -1028,15 +1072,29 @@ fn normalize_linux_do_redirect_uri(value: &str) -> AppResult<String> {
 
     let parsed = Url::parse(trimmed)
         .map_err(|_| ApiError::validation("linux.do redirect uri is invalid"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ApiError::validation("linux.do redirect uri is invalid"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(ApiError::validation("linux.do redirect uri is invalid"));
+    }
+
     match parsed.scheme() {
-        "http" | "https" => Ok(parsed.to_string()),
+        "https" => Ok(parsed.to_string()),
+        "http" if is_local_linux_do_host(parsed.host_str()) => Ok(parsed.to_string()),
         _ => Err(ApiError::validation("linux.do redirect uri is invalid")),
     }
 }
 
 fn normalize_linux_do_state(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.len() > 512 || trimmed.chars().any(char::is_whitespace) {
+    if trimmed.len() < 32
+        || trimmed.len() > 128
+        || trimmed.chars().any(char::is_whitespace)
+        || !trimmed
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
         return Err(ApiError::validation("linux.do state is invalid"));
     }
 
@@ -1057,40 +1115,144 @@ fn truncate_upstream_error(value: String) -> String {
     }
 }
 
+fn request_origin_from_headers(headers: &HeaderMap, trust_proxy_headers: bool) -> AppResult<String> {
+    let scheme = forwarded_proto_from_headers(headers, trust_proxy_headers).unwrap_or_else(|| {
+        if is_local_linux_do_host(host_from_headers(headers).as_deref()) {
+            "http".to_owned()
+        } else {
+            "https".to_owned()
+        }
+    });
+    let authority = host_from_headers(headers)
+        .ok_or_else(|| ApiError::validation("linux.do redirect uri is invalid"))?;
+
+    let parsed = Url::parse(&format!("{scheme}://{authority}"))
+        .map_err(|_| ApiError::validation("linux.do redirect uri is invalid"))?;
+
+    Ok(parsed.origin().ascii_serialization())
+}
+
+fn host_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(first_header_value)
+        .map(str::trim)
+        .filter(|value| {
+            !value.is_empty() && !value.chars().any(char::is_whitespace) && !value.contains('/')
+        })
+        .map(ToOwned::to_owned)
+}
+
+fn forwarded_proto_from_headers(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
+    if !trust_proxy_headers {
+        return None;
+    }
+
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(first_header_value)
+        .map(str::to_ascii_lowercase)
+        .or_else(|| {
+            headers
+                .get("forwarded")
+                .and_then(|value| value.to_str().ok())
+                .and_then(forwarded_proto)
+        })
+}
+
+fn first_header_value(value: &str) -> Option<&str> {
+    let first = value
+        .split(',')
+        .next()
+        .unwrap_or(value)
+        .trim()
+        .trim_matches('"');
+    if first.is_empty() { None } else { Some(first) }
+}
+
+fn forwarded_proto(value: &str) -> Option<String> {
+    let first = first_header_value(value)?;
+    for parameter in first.split(';') {
+        let Some((name, raw_value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("proto") {
+            let proto = raw_value.trim().trim_matches('"');
+            if !proto.is_empty() {
+                return Some(proto.to_ascii_lowercase());
+            }
+        }
+    }
+
+    None
+}
+
+fn is_local_linux_do_host(host: Option<&str>) -> bool {
+    let Some(host) = host else {
+        return false;
+    };
+    let trimmed = host.trim();
+    let without_port = if let Some(stripped) = trimmed.strip_prefix('[') {
+        stripped.split(']').next().unwrap_or_default()
+    } else if let Some((host_part, port)) = trimmed.rsplit_once(':') {
+        if !host_part.contains(':')
+            && !port.is_empty()
+            && port.chars().all(|ch| ch.is_ascii_digit())
+        {
+            host_part
+        } else {
+            trimmed
+        }
+    } else {
+        trimmed
+    };
+    let normalized = without_port
+        .trim()
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+    matches!(normalized.as_str(), "localhost" | "127.0.0.1" | "::1")
+        || normalized.ends_with(".localhost")
+}
+
 pub(crate) async fn send_email_otp(
     state: &AppState,
+    headers: &HeaderMap,
     email: &str,
     settings: &crate::models::AdminEmailOtpSettings,
 ) -> AppResult<()> {
     if !settings.enabled {
         return Err(ApiError::forbidden("email otp is disabled"));
     }
+    auth::enforce_otp_send_limit(state, headers).await?;
 
     let mail_sender = state
         .mail_sender
         .as_ref()
         .ok_or_else(|| ApiError::forbidden("email otp delivery is not configured"))?;
-    let code = {
-        let mut otp_store = state.otp_store.lock().await;
-        otp_store.issue_code(email, settings.ttl_seconds, settings.cooldown_seconds)?
-    };
+    let code = state
+        .otp_store
+        .issue_code(email, settings.ttl_seconds, settings.cooldown_seconds)
+        .await?;
     let subject = settings
         .subject
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::forbidden("email otp subject is not configured"))?;
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(default_email_otp_subject);
     let body_template = settings
         .body
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| ApiError::forbidden("email otp body is not configured"))?;
-    let body = render_otp_body(body_template, &code, settings.ttl_seconds);
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(default_email_otp_body);
+    let body = render_otp_body(&body_template, &code, settings.ttl_seconds);
 
-    if let Err(error) = mail_sender.send_text_email(email, subject, &body).await {
-        let mut otp_store = state.otp_store.lock().await;
-        let _ = otp_store.verify_and_consume(email, &code);
+    if let Err(error) = mail_sender.send_text_email(email, &subject, &body).await {
+        let _ = state.otp_store.verify_and_consume(email, &code).await;
         return Err(error);
     }
 
@@ -1103,12 +1265,394 @@ pub(crate) async fn verify_email_otp(
     otp_code: Option<&str>,
 ) -> AppResult<()> {
     let otp_code = otp_code.ok_or_else(|| ApiError::validation("verification code is required"))?;
-    let mut otp_store = state.otp_store.lock().await;
-    otp_store.verify_and_consume(email, otp_code)
+    state.otp_store.verify_and_consume(email, otp_code).await
 }
 
 fn render_otp_body(template: &str, code: &str, ttl_seconds: u32) -> String {
     template
         .replace("{{code}}", code)
         .replace("{{ttlSeconds}}", &ttl_seconds.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use axum::{
+        body::{Body, to_bytes},
+        http::{HeaderMap, HeaderValue, Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{app::build_router, config::Config, rate_limit::RateLimitPolicy};
+
+    #[tokio::test]
+    async fn login_rate_limit_returns_too_many_requests() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        let app = build_router(state);
+
+        for _ in 0..auth::ADMIN_LOGIN_IDENTITY_LIMIT {
+            let response = app
+                .clone()
+                .oneshot(json_request(
+                    "/admin/login",
+                    json!({ "username": "admin", "password": "wrong123" }),
+                ))
+                .await
+                .expect("login response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(json_request(
+                "/admin/login",
+                json!({ "username": "admin", "password": "wrong123" }),
+            ))
+            .await
+            .expect("rate limited login response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn recover_rate_limit_returns_too_many_requests() {
+        let state = test_state(Config {
+            admin_recovery_token: Some("recover-secret".to_owned()),
+            ..Config::default()
+        })
+        .await;
+        bootstrap_admin(&state, "correct12345").await;
+        let app = build_router(state);
+
+        for _ in 0..auth::ADMIN_RECOVERY_IDENTITY_LIMIT {
+            let response = app
+                .clone()
+                .oneshot(json_request(
+                    "/admin/recover",
+                    json!({
+                        "username": "admin",
+                        "recoveryToken": "wrong-secret",
+                        "newPassword": "fresh12345"
+                    }),
+                ))
+                .await
+                .expect("recovery response");
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        let response = app
+            .oneshot(json_request(
+                "/admin/recover",
+                json!({
+                    "username": "admin",
+                    "recoveryToken": "wrong-secret",
+                    "newPassword": "fresh12345"
+                }),
+            ))
+            .await
+            .expect("rate limited recovery response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn send_register_otp_rate_limit_returns_too_many_requests() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        enable_email_otp(&state).await;
+        saturate_otp_send_limit(&state, "198.51.100.90").await;
+
+        let response = build_router(state)
+            .oneshot(json_request_with_forwarded_for(
+                "/admin/register/otp",
+                json!({ "email": "user@example.com" }),
+                "198.51.100.90",
+            ))
+            .await
+            .expect("otp response");
+
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    #[tokio::test]
+    async fn password_change_revokes_existing_session() {
+        let state = test_state(Config::default()).await;
+        let user = bootstrap_admin(&state, "correct12345").await;
+        let session_token = issue_session_token(&state, &user)
+            .await
+            .expect("issue initial session token");
+        let app = build_router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(json_request_with_bearer(
+                "/admin/password",
+                json!({
+                    "currentPassword": "correct12345",
+                    "newPassword": "fresh12345"
+                }),
+                &session_token,
+            ))
+            .await
+            .expect("password change response");
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let response = app
+            .oneshot(session_request(&session_token))
+            .await
+            .expect("session response");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn recovery_revokes_old_session_and_returns_fresh_session() {
+        let state = test_state(Config {
+            admin_recovery_token: Some("recover-secret".to_owned()),
+            ..Config::default()
+        })
+        .await;
+        let user = bootstrap_admin(&state, "correct12345").await;
+        let old_session_token = issue_session_token(&state, &user)
+            .await
+            .expect("issue initial session token");
+        let app = build_router(state.clone());
+
+        let response = app
+            .clone()
+            .oneshot(json_request(
+                "/admin/recover",
+                json!({
+                    "username": "admin",
+                    "recoveryToken": "recover-secret",
+                    "newPassword": "renewed12345"
+                }),
+            ))
+            .await
+            .expect("recovery response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        let new_session_token = body
+            .get("sessionToken")
+            .and_then(Value::as_str)
+            .expect("session token in recovery response")
+            .to_owned();
+
+        let old_response = app
+            .clone()
+            .oneshot(session_request(&old_session_token))
+            .await
+            .expect("old session response");
+        assert_eq!(old_response.status(), StatusCode::UNAUTHORIZED);
+
+        let new_response = app
+            .oneshot(session_request(&new_session_token))
+            .await
+            .expect("new session response");
+        assert_eq!(new_response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn get_access_key_returns_existing_key_without_creating_new_one() {
+        let state = test_state(Config::default()).await;
+        let user = bootstrap_admin(&state, "correct12345").await;
+        let session_token = issue_session_token(&state, &user)
+            .await
+            .expect("issue session token");
+        let user_id = Uuid::parse_str(&user.id).expect("user uuid");
+        let before_count = {
+            let admin_state = state.admin_state.read().await;
+            admin_state
+                .list_api_keys(user_id)
+                .expect("list existing access keys")
+                .len()
+        };
+
+        let response = build_router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/access-key")
+                    .header("host", "localhost")
+                    .header("authorization", format!("Bearer {session_token}"))
+                    .body(Body::empty())
+                    .expect("build access-key request"),
+            )
+            .await
+            .expect("access-key response");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert!(body.get("key").is_some());
+        assert!(body.get("apiKey").is_none());
+
+        let after_count = {
+            let admin_state = state.admin_state.read().await;
+            admin_state
+                .list_api_keys(user_id)
+                .expect("list access keys after get")
+                .len()
+        };
+        assert_eq!(before_count, after_count);
+    }
+
+    #[test]
+    fn linux_do_redirect_uri_requires_allowlisted_callback_match() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("localhost"));
+
+        let error = normalize_linux_do_redirect_uri(
+            "http://localhost/auth/linux-do",
+            &headers,
+            Some("http://localhost/console/auth/linux-do"),
+            false,
+        )
+        .expect_err("mismatched callback should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "linux.do redirect uri is not allowlisted"
+        );
+    }
+
+    #[test]
+    fn linux_do_redirect_uri_requires_same_origin_without_allowlist() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("console.example.com"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        normalize_linux_do_redirect_uri(
+            "https://console.example.com/zh/auth/linux-do",
+            &headers,
+            None,
+            true,
+        )
+        .expect("same-origin callback should pass");
+
+        let error = normalize_linux_do_redirect_uri(
+            "https://evil.example.com/zh/auth/linux-do",
+            &headers,
+            None,
+            true,
+        )
+        .expect_err("foreign callback should fail");
+
+        assert_eq!(
+            error.to_string(),
+            "linux.do redirect uri must match the current admin origin"
+        );
+    }
+
+    #[test]
+    fn linux_do_state_requires_high_entropy_token_shape() {
+        assert!(normalize_linux_do_state("0123456789abcdef0123456789abcdef").is_ok());
+        assert!(normalize_linux_do_state("too-short").is_err());
+        assert!(normalize_linux_do_state("contains space 0123456789abcdef").is_err());
+    }
+
+    async fn test_state(config: Config) -> AppState {
+        let config = Config {
+            cleanup_interval_seconds: 0,
+            domain_verification_poll_interval_seconds: 0,
+            ..config
+        };
+
+        crate::test_support::build_test_state(config, "routes-admin").await
+    }
+
+    async fn bootstrap_admin(state: &AppState, password: &str) -> ConsoleUser {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state
+            .bootstrap_first_admin("admin", password)
+            .expect("bootstrap admin")
+            .0
+    }
+
+    async fn enable_email_otp(state: &AppState) {
+        let mut admin_state = state.admin_state.write().await;
+        let mut registration_settings = admin_state.registration_settings();
+        registration_settings.email_otp.enabled = true;
+        admin_state
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                Some(registration_settings),
+                None,
+                None,
+            )
+            .expect("enable email otp");
+    }
+
+    async fn saturate_otp_send_limit(state: &AppState, network_id: &str) {
+        let mut limiter = state.otp_send_limiter.lock().await;
+        let policy = RateLimitPolicy {
+            limit: auth::OTP_SEND_NETWORK_LIMIT,
+            window: Duration::from_secs(10 * 60),
+        };
+        let key = format!("otp-send:ip:{network_id}");
+        for _ in 0..auth::OTP_SEND_NETWORK_LIMIT {
+            assert!(limiter.check_and_record(&key, policy));
+        }
+    }
+
+    fn json_request(path: &str, payload: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("build json request")
+    }
+
+    fn json_request_with_bearer(
+        path: &str,
+        payload: serde_json::Value,
+        token: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("build json request")
+    }
+
+    fn session_request(token: &str) -> Request<Body> {
+        Request::builder()
+            .method("GET")
+            .uri("/admin/session")
+            .header("host", "localhost")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .expect("build session request")
+    }
+
+    fn json_request_with_forwarded_for(
+        path: &str,
+        payload: serde_json::Value,
+        forwarded_for: &str,
+    ) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("x-forwarded-for", forwarded_for)
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .expect("build json request")
+    }
+    async fn read_json_body(response: axum::response::Response) -> Value {
+        serde_json::from_slice(
+            &to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("read response body"),
+        )
+        .expect("decode json body")
+    }
 }

@@ -1,0 +1,5 @@
+CREATE TABLE IF NOT EXISTS admin_state_store (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE,
+    state JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

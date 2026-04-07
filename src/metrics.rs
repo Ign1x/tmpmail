@@ -100,8 +100,12 @@ impl AppMetrics {
         self.realtime_events_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn open_sse_connection(&self) {
-        self.sse_connections_active.fetch_add(1, Ordering::Relaxed);
+    pub fn try_open_sse_connection(&self, limit: usize) -> bool {
+        self.sse_connections_active
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                (current < limit as u64).then_some(current + 1)
+            })
+            .is_ok()
     }
 
     pub fn close_sse_connection(&self) {
@@ -232,12 +236,21 @@ mod tests {
     fn close_sse_connection_balances_open_count_without_underflow() {
         let metrics = AppMetrics::default();
 
-        metrics.open_sse_connection();
-        metrics.open_sse_connection();
+        assert!(metrics.try_open_sse_connection(2));
+        assert!(metrics.try_open_sse_connection(2));
         metrics.close_sse_connection();
         metrics.close_sse_connection();
         metrics.close_sse_connection();
 
         assert_eq!(metrics.snapshot().sse_connections_active, 0);
+    }
+
+    #[test]
+    fn try_open_sse_connection_enforces_limit() {
+        let metrics = AppMetrics::default();
+
+        assert!(metrics.try_open_sse_connection(1));
+        assert!(!metrics.try_open_sse_connection(1));
+        assert_eq!(metrics.snapshot().sse_connections_active, 1);
     }
 }

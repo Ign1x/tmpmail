@@ -15,6 +15,10 @@ pub enum ApiError {
     #[error("{0}")]
     Forbidden(String),
     #[error("{0}")]
+    TooManyRequests(String),
+    #[error("{0}")]
+    ServiceUnavailable(String),
+    #[error("{0}")]
     NotFound(String),
     #[error("{0}")]
     Validation(String),
@@ -29,6 +33,14 @@ impl ApiError {
 
     pub fn forbidden(message: impl Into<String>) -> Self {
         Self::Forbidden(message.into())
+    }
+
+    pub fn service_unavailable(message: impl Into<String>) -> Self {
+        Self::ServiceUnavailable(message.into())
+    }
+
+    pub fn too_many_requests(message: impl Into<String>) -> Self {
+        Self::TooManyRequests(message.into())
     }
 
     pub fn not_found(message: impl Into<String>) -> Self {
@@ -47,6 +59,8 @@ impl ApiError {
         match self {
             Self::Unauthorized(_) => StatusCode::UNAUTHORIZED,
             Self::Forbidden(_) => StatusCode::FORBIDDEN,
+            Self::TooManyRequests(_) => StatusCode::TOO_MANY_REQUESTS,
+            Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::Validation(_) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,

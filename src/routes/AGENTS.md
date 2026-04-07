@@ -26,21 +26,28 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 ## Auth matrix
 - `admin/status` is public.
 - `admin/linux-do/authorize` and `admin/linux-do/complete` are public-facing registration helpers, but still require secure admin transport and the Linux Do registration feature to be enabled.
+- Linux Do redirect URIs must either match the configured callback allowlist exactly or stay same-origin with the current admin request; keep `state` validation strict.
 - `admin/setup`, `admin/login`, and `admin/recover` require secure admin transport.
+- `admin/login`, `admin/recover`, and public `POST /token` also enforce fixed-window brute-force throttling.
+- `admin/register/otp` and `accounts/otp` enforce IP-scoped OTP send throttling; OTP verification also expires codes after too many wrong attempts.
+- Session-only console endpoints must reject stale JWTs after password or recovery changes; do not treat console session TTL as the only revocation mechanism.
 - Admin session, user, settings, metrics, audit-log, and cleanup flows use console credentials and admin guards where required.
 - `GET /domains` is public when unauthenticated; console auth scopes results by owner/admin.
 - Domain mutations require console access.
 - `GET /accounts`, console-auth `POST /accounts`, `POST /accounts/{id}/token`, and console-auth `DELETE /accounts/{id}` use console session and mailbox ownership checks.
 - Public `POST /accounts`, `/token`, `/accounts/me`, mailbox-token `DELETE /accounts/{id}`, and `messages/*` remain available for legacy mailbox-token flows.
-- `/events` uses mailbox bearer tokens and rejects `accountId` mismatches.
+- `/events` uses mailbox bearer tokens, rejects `accountId` mismatches, and enforces the config-driven `TMPMAIL_SSE_CONNECTION_LIMIT`.
 
 ## Conventions
 - Update `mod.rs` whenever you add or move a route.
 - Validate UUID/path/query inputs early and keep `ApiError` response patterns consistent.
 - Admin mutations usually append audit logs.
+- `GET /admin/access-key` is read-only metadata now; only explicit create/regenerate endpoints may mint a new plaintext API key.
 - Message patch/delete must preserve realtime publish behavior.
-- Keep streaming endpoints in `stream_router()`; SSE intentionally sits outside the protected API middleware path.
-- Public `/metrics` and `/site/update-notice` live beside admin-only ops endpoints in `ops.rs`; do not merge their auth behavior.
+- Sensitive auth surfaces should keep abuse controls close to the route edge; current fixed-window throttling covers `/admin/login`, `/admin/recover`, and `/token`.
+- OTP abuse controls are split intentionally: send throttling stays at the route edge, while wrong-code attempt caps live in `otp.rs` so both registration flows share the same rules.
+- Keep streaming endpoints in `stream_router()`; SSE intentionally sits outside the protected API middleware path, so abuse protection belongs in the route or shared metrics layer.
+- Public `/metrics` and `/site/update-notice` live beside admin-only ops endpoints in `ops.rs`; `/metrics` may be config-disabled, but do not merge its auth behavior with admin ops.
 
 ## Verification
 - `cargo test` for route-adjacent modules; `messages.rs` already carries route-focused tests.

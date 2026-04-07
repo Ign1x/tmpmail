@@ -1,8 +1,9 @@
 "use client"
 
-import { ADMIN_SESSION_COOKIE_KEY } from "@/lib/admin-session-cookie"
-
-export const ADMIN_SESSION_STORAGE_KEY = ADMIN_SESSION_COOKIE_KEY
+const ADMIN_SESSION_STORAGE_KEY = "tmpmail-admin-session-present"
+const ADMIN_PENDING_SESSION_STORAGE_KEY = "tmpmail-admin-pending-session"
+const ADMIN_SESSION_EVENT = "tmpmail-admin-session-change"
+const ADMIN_SESSION_BROADCAST_KEY = "tmpmail-admin-session-broadcast"
 const ADMIN_REVEALED_KEYS_STORAGE_KEY = "tmpmail-admin-revealed-keys"
 const ADMIN_PENDING_REVEALED_KEY_STORAGE_KEY = "tmpmail-admin-revealed-key"
 
@@ -13,94 +14,41 @@ export type StoredAdminKey = {
 
 export type StoredAdminKeyMap = Record<string, StoredAdminKey>
 
-function getCookie(name: string): string {
-  if (typeof document === "undefined") {
-    return ""
-  }
-
-  const cookiePrefix = `${encodeURIComponent(name)}=`
-  const rawValue = document.cookie
-    .split(";")
-    .map((part) => part.trim())
-    .find((part) => part.startsWith(cookiePrefix))
-    ?.slice(cookiePrefix.length)
-    .trim()
-
-  return rawValue ? decodeURIComponent(rawValue) : ""
-}
-
-function setSessionCookie(token: string): void {
-  if (typeof document === "undefined") {
-    return
-  }
-
-  const isSecure =
-    typeof window !== "undefined" && window.location.protocol.toLowerCase() === "https:"
-  document.cookie = [
-    `${encodeURIComponent(ADMIN_SESSION_COOKIE_KEY)}=${encodeURIComponent(token)}`,
-    "Path=/",
-    "SameSite=Lax",
-    isSecure ? "Secure" : "",
-  ]
-    .filter(Boolean)
-    .join("; ")
-}
-
-function clearSessionCookie(): void {
-  if (typeof document === "undefined") {
-    return
-  }
-
-  const isSecure =
-    typeof window !== "undefined" && window.location.protocol.toLowerCase() === "https:"
-  document.cookie = [
-    `${encodeURIComponent(ADMIN_SESSION_COOKIE_KEY)}=`,
-    "Path=/",
-    "Max-Age=0",
-    "SameSite=Lax",
-    isSecure ? "Secure" : "",
-  ]
-    .filter(Boolean)
-    .join("; ")
-}
-
-export function getStoredAdminSession(): string {
+function broadcastAdminSessionChange(): void {
   if (typeof window === "undefined") {
-    return ""
+    return
   }
 
+  window.dispatchEvent(new Event(ADMIN_SESSION_EVENT))
+
   try {
-    const storedValue = sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY)?.trim() || ""
-    if (storedValue) {
-      return storedValue
-    }
+    localStorage.setItem(ADMIN_SESSION_BROADCAST_KEY, String(Date.now()))
+    localStorage.removeItem(ADMIN_SESSION_BROADCAST_KEY)
   } catch {}
+}
 
-  const cookieValue = getCookie(ADMIN_SESSION_COOKIE_KEY)
-
-  if (!cookieValue) {
-    return ""
+export function hasStoredAdminSession(): boolean {
+  if (typeof window === "undefined") {
+    return false
   }
 
   try {
-    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, cookieValue)
+    return sessionStorage.getItem(ADMIN_SESSION_STORAGE_KEY) === "1"
   } catch {
-    return cookieValue
+    return false
   }
-
-  return cookieValue
 }
 
-export function setStoredAdminSession(token: string): void {
+export function setStoredAdminSession(): void {
   if (typeof window === "undefined") {
     return
   }
 
   try {
-    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, token)
+    sessionStorage.setItem(ADMIN_SESSION_STORAGE_KEY, "1")
   } catch {}
 
-  setSessionCookie(token)
+  broadcastAdminSessionChange()
 }
 
 export function clearStoredAdminSession(): void {
@@ -110,9 +58,71 @@ export function clearStoredAdminSession(): void {
 
   try {
     sessionStorage.removeItem(ADMIN_SESSION_STORAGE_KEY)
+    sessionStorage.removeItem(ADMIN_PENDING_SESSION_STORAGE_KEY)
   } catch {}
 
-  clearSessionCookie()
+  broadcastAdminSessionChange()
+}
+
+export function storePendingAdminSession(session: unknown): void {
+  if (typeof window === "undefined" || !session || typeof session !== "object" || Array.isArray(session)) {
+    return
+  }
+
+  try {
+    sessionStorage.setItem(ADMIN_PENDING_SESSION_STORAGE_KEY, JSON.stringify(session))
+  } catch {}
+}
+
+export function takePendingAdminSession<T = unknown>(): T | null {
+  if (typeof window === "undefined") {
+    return null
+  }
+
+  try {
+    const raw = sessionStorage.getItem(ADMIN_PENDING_SESSION_STORAGE_KEY)
+    sessionStorage.removeItem(ADMIN_PENDING_SESSION_STORAGE_KEY)
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null
+    }
+
+    return parsed as T
+  } catch {
+    try {
+      sessionStorage.removeItem(ADMIN_PENDING_SESSION_STORAGE_KEY)
+    } catch {}
+    return null
+  }
+}
+
+export function subscribeToAdminSession(listener: () => void): () => void {
+  if (typeof window === "undefined") {
+    return () => {}
+  }
+
+  const handleWindowEvent = () => listener()
+  const handleStorageEvent = (event: StorageEvent) => {
+    if (
+      !event.key ||
+      event.key === ADMIN_SESSION_STORAGE_KEY ||
+      event.key === ADMIN_SESSION_BROADCAST_KEY
+    ) {
+      listener()
+    }
+  }
+
+  window.addEventListener(ADMIN_SESSION_EVENT, handleWindowEvent)
+  window.addEventListener("storage", handleStorageEvent)
+
+  return () => {
+    window.removeEventListener(ADMIN_SESSION_EVENT, handleWindowEvent)
+    window.removeEventListener("storage", handleStorageEvent)
+  }
 }
 
 function createStoredAdminKey(apiKey: string, ttlMs: number): StoredAdminKey | null {

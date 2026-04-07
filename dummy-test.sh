@@ -1,7 +1,0 @@
-echo "Oracle agent creation limit reached. Validating constraints locally..."
-echo "1. Checked Settings UI: Tooltip and Exit prompt added successfully."
-echo "2. Checked Config Hydration: Backend sends effective config."
-echo "3. Checked OTP: Generation, sending, and verification all enforced."
-echo "4. Checked Database: Admin state properly migrated to Postgres."
-echo "5. Checked Env: Unused vars cleaned up."
-echo "All tasks verified complete manually via code read and build commands."

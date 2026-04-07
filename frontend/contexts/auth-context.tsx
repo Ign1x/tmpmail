@@ -5,6 +5,7 @@ import {
   useContext,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useState,
   type ReactNode,
@@ -12,17 +13,15 @@ import {
 import { useTranslations } from "next-intl";
 import type { Account, AuthState } from "@/types";
 import {
+  MAILBOX_TOKEN_REFRESHED_EVENT,
+  clearLegacyStoredMailboxAuth,
   createAccount,
-  getToken,
-  getAccount,
   deleteAccount as deleteAccountApi,
+  getAccount,
+  getToken,
+  syncRuntimeMailboxAuthState,
 } from "@/lib/api";
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config";
-import {
-  readStoredJson,
-  removeStoredValue,
-  writeStoredJson,
-} from "@/lib/storage";
 
 interface AuthContextType extends AuthState {
   login: (address: string, password: string) => Promise<void>;
@@ -45,45 +44,6 @@ interface AuthContextType extends AuthState {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-type StoredAuthPayload = {
-  token?: string | null;
-  currentAccount?: unknown;
-  accounts?: unknown;
-};
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function normalizeStoredAccount(value: unknown): Account | null {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  const id = typeof value.id === "string" ? value.id.trim() : "";
-  const address = typeof value.address === "string" ? value.address.trim() : "";
-
-  if (!id || !address) {
-    return null;
-  }
-
-  return {
-    id,
-    address,
-    quota: typeof value.quota === "number" ? value.quota : 0,
-    used: typeof value.used === "number" ? value.used : 0,
-    isDisabled: Boolean(value.isDisabled),
-    isDeleted: Boolean(value.isDeleted),
-    createdAt:
-      typeof value.createdAt === "string" ? value.createdAt : new Date(0).toISOString(),
-    updatedAt:
-      typeof value.updatedAt === "string" ? value.updatedAt : new Date(0).toISOString(),
-    password: typeof value.password === "string" ? value.password : undefined,
-    token: typeof value.token === "string" ? value.token : undefined,
-    providerId: DEFAULT_PROVIDER_ID,
-  };
-}
-
 function dedupeAccounts(accounts: Account[]): Account[] {
   const seen = new Set<string>();
   const nextAccounts: Account[] = [];
@@ -102,45 +62,13 @@ function dedupeAccounts(accounts: Account[]): Account[] {
 }
 
 function loadInitialAuthState(): AuthState {
-  const parsedAuth = readStoredJson<StoredAuthPayload | null>("auth", null);
-  if (!parsedAuth || !isRecord(parsedAuth)) {
-    return {
-      token: null,
-      currentAccount: null,
-      accounts: [],
-      isAuthenticated: false,
-    };
-  }
-
-  const accounts = Array.isArray(parsedAuth.accounts)
-    ? dedupeAccounts(
-        parsedAuth.accounts
-          .map(normalizeStoredAccount)
-          .filter((account): account is Account => !!account),
-      )
-    : [];
-
-  const currentAccountCandidate = normalizeStoredAccount(parsedAuth.currentAccount);
-  const currentAccount =
-    (currentAccountCandidate &&
-      accounts.find((account) => account.id === currentAccountCandidate.id)) ||
-    (currentAccountCandidate &&
-      accounts.find((account) => account.address === currentAccountCandidate.address)) ||
-    currentAccountCandidate ||
-    accounts[0] ||
-    null;
-
-  const token =
-    currentAccount?.token ||
-    (typeof parsedAuth.token === "string" && parsedAuth.token.trim()
-      ? parsedAuth.token
-      : null);
+  clearLegacyStoredMailboxAuth();
 
   return {
-    token,
-    currentAccount,
-    accounts,
-    isAuthenticated: Boolean(token && currentAccount),
+    token: null,
+    currentAccount: null,
+    accounts: [],
+    isAuthenticated: false,
   };
 }
 
@@ -150,7 +78,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const getProviderIdFromEmail = useCallback(() => DEFAULT_PROVIDER_ID, []);
 
-  // 监听token刷新事件，同步更新React state
+  useLayoutEffect(() => {
+    syncRuntimeMailboxAuthState(authState);
+  }, [authState]);
+
+  // 监听 token 刷新事件，同步更新 React state
   useEffect(() => {
     const handleTokenRefreshed = (event: Event) => {
       const newToken = (event as CustomEvent<{ token?: string }>).detail?.token;
@@ -182,31 +114,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     window.addEventListener(
-      "token-refreshed",
+      MAILBOX_TOKEN_REFRESHED_EVENT,
       handleTokenRefreshed as EventListener,
     );
     return () => {
       window.removeEventListener(
-        "token-refreshed",
+        MAILBOX_TOKEN_REFRESHED_EVENT,
         handleTokenRefreshed as EventListener,
       );
     };
   }, []);
-
-  useEffect(() => {
-    // 保存认证状态到本地存储
-    // 始终保存状态，包括所有账户信息，即使当前没有活跃的token
-    if (
-      authState.accounts.length > 0 ||
-      authState.currentAccount ||
-      authState.token
-    ) {
-      writeStoredJson("auth", authState);
-    } else {
-      // 如果没有任何账户信息，清除localStorage
-      removeStoredValue("auth");
-    }
-  }, [authState]);
 
   const login = useCallback(async (address: string, password: string) => {
     try {
@@ -277,7 +194,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    // 从账户列表中彻底移除当前账户（不再保留在下拉列表和 localStorage 中）
+    // 从账户列表中彻底移除当前账户，避免在内存态里继续保留无效凭据
     const remainingAccounts = accounts.filter(
       (account) => account.id !== currentAccount.id,
     );
@@ -301,7 +218,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         isAuthenticated: false,
       });
     }
-    // 不要删除 localStorage，交给 useEffect 根据 authState 自动清理/保存
   }, [authState]);
 
   const switchAccount = useCallback(async (account: Account) => {
@@ -347,7 +263,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
           applyAccountWithAuth(accountWithAuth, account.token);
           return;
-        } catch (tokenError) {
+        } catch {
           // Token 无效，如果有密码则尝试重新获取 token
           if (account.password) {
             try {
@@ -367,7 +283,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
               applyAccountWithAuth(accountWithAuth, token);
               return;
-            } catch (refreshError) {
+            } catch {
               // 刷新失败时，仅清理该账号的 token，保持当前登录状态不变
               setAuthState((prev) => ({
                 ...prev,
@@ -413,7 +329,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
           applyAccountWithAuth(accountWithAuth, token);
           return;
-        } catch (error) {
+        } catch {
           throw new Error(t("credentialFetchFailed"));
         }
       }

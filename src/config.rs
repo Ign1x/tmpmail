@@ -1,6 +1,14 @@
+use anyhow::{bail, Context, Result};
 use std::{env, net::IpAddr};
 
 use reqwest::Url;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdminPasswordMode {
+    Disabled,
+    Bootstrap,
+    Force,
+}
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -9,10 +17,13 @@ pub struct Config {
     pub jwt_secret: String,
     pub http_request_timeout_seconds: i64,
     pub http_concurrency_limit: usize,
-    pub database_url: Option<String>,
-    pub admin_state_path: String,
-    pub store_state_path: String,
+    pub sse_connection_limit: usize,
+    pub public_metrics_enabled: bool,
+    pub trust_proxy_headers: bool,
+    pub database_url: String,
     pub admin_password: Option<String>,
+    pub admin_password_mode: AdminPasswordMode,
+    pub allow_insecure_dev_secrets: bool,
     pub admin_require_secure_transport: bool,
     pub admin_recovery_token: Option<String>,
     pub admin_session_ttl_seconds: i64,
@@ -42,6 +53,7 @@ pub struct Config {
     pub smtp_from_address: Option<String>,
     pub smtp_from_name: Option<String>,
     pub smtp_starttls: bool,
+    pub linux_do_client_secret: Option<String>,
 }
 
 impl Default for Config {
@@ -52,10 +64,13 @@ impl Default for Config {
             jwt_secret: "tmpmail-dev-secret-change-me".to_owned(),
             http_request_timeout_seconds: 15,
             http_concurrency_limit: 256,
-            database_url: None,
-            admin_state_path: "data/config/admin-state.json".to_owned(),
-            store_state_path: "data/storage/store-state.json".to_owned(),
+            sse_connection_limit: 128,
+            public_metrics_enabled: false,
+            trust_proxy_headers: false,
+            database_url: String::new(),
             admin_password: None,
+            admin_password_mode: AdminPasswordMode::Bootstrap,
+            allow_insecure_dev_secrets: false,
             admin_require_secure_transport: true,
             admin_recovery_token: None,
             admin_session_ttl_seconds: 12 * 60 * 60,
@@ -85,12 +100,13 @@ impl Default for Config {
             smtp_from_address: None,
             smtp_from_name: None,
             smtp_starttls: true,
+            linux_do_client_secret: None,
         }
     }
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self> {
         let defaults = Self::default();
 
         let host = env::var("TMPMAIL_HOST")
@@ -111,24 +127,38 @@ impl Config {
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(defaults.http_concurrency_limit)
             .clamp(16, 4_096);
-        let database_url = env::var("TMPMAIL_DATABASE_URL")
+        let sse_connection_limit = env::var("TMPMAIL_SSE_CONNECTION_LIMIT")
             .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let admin_state_path = env::var("TMPMAIL_ADMIN_STATE_PATH")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(defaults.sse_connection_limit)
+            .clamp(1, 4_096);
+        let public_metrics_enabled = env::var("TMPMAIL_PUBLIC_METRICS_ENABLED")
             .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(defaults.admin_state_path);
-        let store_state_path = env::var("TMPMAIL_STORE_STATE_PATH")
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(defaults.public_metrics_enabled);
+        let trust_proxy_headers = env::var("TMPMAIL_TRUST_PROXY_HEADERS")
             .ok()
-            .map(|value| value.trim().to_owned())
-            .filter(|value| !value.is_empty())
-            .unwrap_or(defaults.store_state_path);
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(defaults.trust_proxy_headers);
+        let database_url = resolve_database_url(
+            read_optional_env("TMPMAIL_DATABASE_URL"),
+            read_optional_env("TMPMAIL_POSTGRES_USER"),
+            read_optional_env("TMPMAIL_POSTGRES_PASSWORD"),
+            read_optional_env("TMPMAIL_POSTGRES_DB"),
+        )?;
         let admin_password = env::var("TMPMAIL_ADMIN_PASSWORD")
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        let admin_password_mode = env::var("TMPMAIL_ADMIN_PASSWORD_MODE")
+            .ok()
+            .map(|value| parse_admin_password_mode(&value))
+            .transpose()?
+            .unwrap_or(defaults.admin_password_mode);
+        let allow_insecure_dev_secrets = env::var("TMPMAIL_ALLOW_INSECURE_DEV_SECRETS")
+            .ok()
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(defaults.allow_insecure_dev_secrets);
         let admin_require_secure_transport = env::var("TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT")
             .ok()
             .and_then(|value| parse_bool(&value))
@@ -263,17 +293,24 @@ impl Config {
             .ok()
             .and_then(|value| parse_bool(&value))
             .unwrap_or(defaults.smtp_starttls);
+        let linux_do_client_secret = env::var("TMPMAIL_LINUX_DO_CLIENT_SECRET")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
 
-        Self {
+        let config = Self {
             host,
             port,
             jwt_secret,
             http_request_timeout_seconds,
             http_concurrency_limit,
+            sse_connection_limit,
+            public_metrics_enabled,
+            trust_proxy_headers,
             database_url,
-            admin_state_path,
-            store_state_path,
             admin_password,
+            admin_password_mode,
+            allow_insecure_dev_secrets,
             admin_require_secure_transport,
             admin_recovery_token,
             admin_session_ttl_seconds,
@@ -303,11 +340,26 @@ impl Config {
             smtp_from_address,
             smtp_from_name,
             smtp_starttls,
-        }
+            linux_do_client_secret,
+        };
+        config.validate_runtime_security()?;
+
+        Ok(config)
     }
 
     pub fn bind_address(&self) -> String {
         format!("{}:{}", self.host, self.port)
+    }
+
+    pub fn required_database_url(&self) -> Result<&str> {
+        let database_url = self.database_url.trim();
+        if database_url.is_empty() {
+            bail!(
+                "database configuration is missing; set TMPMAIL_DATABASE_URL or bundled TMPMAIL_POSTGRES_* settings"
+            );
+        }
+
+        Ok(database_url)
     }
 
     pub fn effective_mail_exchange_host(&self, domain: &str) -> String {
@@ -351,8 +403,95 @@ impl Config {
             return None;
         }
 
+        if !is_public_mail_route_host(host) {
+            return None;
+        }
+
         Some(host.to_owned())
     }
+
+    fn validate_runtime_security(&self) -> Result<()> {
+        if self.allow_insecure_dev_secrets {
+            return Ok(());
+        }
+
+        if self.jwt_secret.trim().chars().count() < 32
+            || looks_like_placeholder_secret(&self.jwt_secret)
+        {
+            bail!(
+                "TMPMAIL_JWT_SECRET must be at least 32 characters and not use a placeholder; set TMPMAIL_ALLOW_INSECURE_DEV_SECRETS=true only for explicit local development"
+            );
+        }
+
+        Ok(())
+    }
+}
+
+fn read_optional_env(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+}
+
+fn resolve_database_url(
+    explicit_database_url: Option<String>,
+    postgres_user: Option<String>,
+    postgres_password: Option<String>,
+    postgres_database: Option<String>,
+) -> Result<String> {
+    if let Some(database_url) = explicit_database_url {
+        return Ok(database_url);
+    }
+
+    let postgres_password = postgres_password.ok_or_else(|| {
+        anyhow::anyhow!(
+            "TMPMAIL_DATABASE_URL must be set, or set TMPMAIL_POSTGRES_PASSWORD so the bundled postgres service can be used automatically"
+        )
+    })?;
+    let postgres_user = postgres_user.unwrap_or_else(|| "tmpmail".to_owned());
+    let postgres_database = postgres_database.unwrap_or_else(|| "tmpmail".to_owned());
+
+    build_bundled_postgres_url(&postgres_user, &postgres_password, &postgres_database)
+}
+
+fn build_bundled_postgres_url(
+    postgres_user: &str,
+    postgres_password: &str,
+    postgres_database: &str,
+) -> Result<String> {
+    let postgres_user = postgres_user.trim();
+    if postgres_user.is_empty() {
+        bail!("TMPMAIL_POSTGRES_USER must not be empty when TMPMAIL_DATABASE_URL is unset");
+    }
+
+    let postgres_password = postgres_password.trim();
+    if postgres_password.is_empty() {
+        bail!("TMPMAIL_POSTGRES_PASSWORD must not be empty when TMPMAIL_DATABASE_URL is unset");
+    }
+
+    let postgres_database = postgres_database.trim().trim_matches('/');
+    if postgres_database.is_empty() {
+        bail!("TMPMAIL_POSTGRES_DB must not be empty when TMPMAIL_DATABASE_URL is unset");
+    }
+
+    let mut database_url =
+        Url::parse("postgres://postgres").context("build bundled postgres database url")?;
+    database_url
+        .set_host(Some("postgres"))
+        .map_err(|_| anyhow::anyhow!("failed to set bundled postgres host"))?;
+    database_url
+        .set_port(Some(5432))
+        .map_err(|_| anyhow::anyhow!("failed to set bundled postgres port"))?;
+    database_url
+        .set_username(postgres_user)
+        .map_err(|_| anyhow::anyhow!("failed to set bundled postgres username"))?;
+    database_url
+        .set_password(Some(postgres_password))
+        .map_err(|_| anyhow::anyhow!("failed to set bundled postgres password"))?;
+    database_url.set_path(&format!("/{postgres_database}"));
+
+    Ok(database_url.to_string())
 }
 
 fn parse_csv(value: &str) -> Vec<String> {
@@ -373,6 +512,35 @@ fn parse_bool(value: &str) -> Option<bool> {
         "0" | "false" | "no" | "off" => Some(false),
         _ => None,
     }
+}
+
+fn parse_admin_password_mode(value: &str) -> Result<AdminPasswordMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "disabled" => Ok(AdminPasswordMode::Disabled),
+        "bootstrap" => Ok(AdminPasswordMode::Bootstrap),
+        "force" => Ok(AdminPasswordMode::Force),
+        _ => bail!("TMPMAIL_ADMIN_PASSWORD_MODE must be one of: disabled, bootstrap, force"),
+    }
+}
+
+fn looks_like_placeholder_secret(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return true;
+    }
+
+    matches!(
+        normalized.as_str(),
+        "change-me"
+            | "changeme"
+            | "change-me-in-production"
+            | "tmpmail"
+            | "tmpmail-dev-secret-change-me"
+            | "dev-secret"
+            | "development-secret"
+            | "secret"
+            | "jwt-secret"
+    ) || normalized.contains("change-me")
 }
 
 fn normalize_optional_hostname(value: &str) -> Option<String> {
@@ -405,6 +573,34 @@ fn normalize_hostname_like(value: &str) -> String {
     value.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
+fn is_public_mail_route_host(value: &str) -> bool {
+    let normalized = normalize_hostname_like(value);
+    if normalized.is_empty() || normalized == "localhost" {
+        return false;
+    }
+
+    if let Ok(ip) = normalized.parse::<IpAddr>() {
+        return match ip {
+            IpAddr::V4(ip) => {
+                !(ip.is_private()
+                    || ip.is_loopback()
+                    || ip.is_link_local()
+                    || ip.is_broadcast()
+                    || ip.is_unspecified()
+                    || ip.is_documentation())
+            }
+            IpAddr::V6(ip) => {
+                !(ip.is_loopback()
+                    || ip.is_unspecified()
+                    || ip.is_unique_local()
+                    || ip.is_unicast_link_local())
+            }
+        };
+    }
+
+    normalized.contains('.')
+}
+
 fn normalize_txt_prefix(value: &str) -> String {
     let normalized = value.trim().trim_matches('.').to_ascii_lowercase();
     if normalized == "@" {
@@ -416,7 +612,12 @@ fn normalize_txt_prefix(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_txt_prefix, parse_bool, parse_csv, Config};
+    use super::{
+        build_bundled_postgres_url, looks_like_placeholder_secret, normalize_txt_prefix,
+        parse_admin_password_mode, parse_bool, parse_csv, resolve_database_url, AdminPasswordMode,
+        Config,
+    };
+    use reqwest::Url;
 
     #[test]
     fn derives_public_mail_route_from_remote_inbucket_hostname() {
@@ -454,6 +655,30 @@ mod tests {
             config.effective_mail_route_target().as_deref(),
             Some("185.13.148.129")
         );
+    }
+
+    #[test]
+    fn does_not_derive_mail_route_from_internal_compose_service_name() {
+        let config = Config {
+            mail_exchange_host: "mail.tmpmail.local".to_owned(),
+            mail_cname_target: "mail.tmpmail.local".to_owned(),
+            inbucket_base_url: Some("http://inbucket:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(config.effective_mail_route_target().as_deref(), None);
+    }
+
+    #[test]
+    fn does_not_derive_mail_route_from_loopback_inbucket_host() {
+        let config = Config {
+            mail_exchange_host: "mail.tmpmail.local".to_owned(),
+            mail_cname_target: "mail.tmpmail.local".to_owned(),
+            inbucket_base_url: Some("http://127.0.0.1:9000".to_owned()),
+            ..Config::default()
+        };
+
+        assert_eq!(config.effective_mail_route_target().as_deref(), None);
     }
 
     #[test]
@@ -506,9 +731,55 @@ mod tests {
     fn stability_defaults_cover_background_lock_and_inbucket_retries() {
         let config = Config::default();
 
+        assert!(!config.public_metrics_enabled);
         assert_eq!(config.background_store_lock_timeout_milliseconds, 250);
         assert_eq!(config.inbucket_request_retries, 2);
         assert_eq!(config.inbucket_retry_backoff_milliseconds, 250);
+        assert_eq!(config.sse_connection_limit, 128);
+    }
+
+    #[test]
+    fn explicit_database_url_wins_over_bundled_postgres_defaults() {
+        let explicit = "postgres://external-user:secret@db.example.com:5432/tmpmail".to_owned();
+
+        assert_eq!(
+            resolve_database_url(
+                Some(explicit.clone()),
+                Some("tmpmail".to_owned()),
+                Some("ignored".to_owned()),
+                Some("ignored".to_owned()),
+            )
+            .expect("resolve explicit database url"),
+            explicit
+        );
+    }
+
+    #[test]
+    fn builds_bundled_postgres_url_with_encoded_credentials() {
+        let resolved = build_bundled_postgres_url("tmpmail", "pa:ss@wo?rd#[]", "tmpmail")
+            .expect("build bundled postgres url");
+        let parsed = Url::parse(&resolved).expect("parse bundled postgres url");
+
+        assert_eq!(parsed.scheme(), "postgres");
+        assert_eq!(parsed.host_str(), Some("postgres"));
+        assert_eq!(parsed.port(), Some(5432));
+        assert_eq!(parsed.username(), "tmpmail");
+        assert_eq!(parsed.password(), Some("pa%3Ass%40wo%3Frd%23%5B%5D"));
+        assert_eq!(parsed.path(), "/tmpmail");
+        assert!(resolved.contains("pa%3Ass%40wo%3Frd%23%5B%5D"));
+    }
+
+    #[test]
+    fn bundled_postgres_password_is_required_when_database_url_is_unset() {
+        let error = resolve_database_url(None, None, None, None)
+            .expect_err("missing bundled postgres password should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TMPMAIL_DATABASE_URL must be set"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -526,5 +797,60 @@ mod tests {
             normalize_txt_prefix(" _TmpMail-Verify. "),
             "_tmpmail-verify"
         );
+    }
+
+    #[test]
+    fn rejects_placeholder_jwt_secret_without_explicit_dev_override() {
+        let config = Config::default();
+        let error = config
+            .validate_runtime_security()
+            .expect_err("placeholder secret should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TMPMAIL_JWT_SECRET must be at least 32 characters"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn allows_explicit_dev_override_for_weak_jwt_secret() {
+        let config = Config {
+            allow_insecure_dev_secrets: true,
+            ..Config::default()
+        };
+
+        config
+            .validate_runtime_security()
+            .expect("dev override should bypass weak secret rejection");
+    }
+
+    #[test]
+    fn parses_admin_password_modes() {
+        assert_eq!(
+            parse_admin_password_mode("bootstrap").expect("bootstrap mode"),
+            AdminPasswordMode::Bootstrap
+        );
+        assert_eq!(
+            parse_admin_password_mode("force").expect("force mode"),
+            AdminPasswordMode::Force
+        );
+        assert_eq!(
+            parse_admin_password_mode("disabled").expect("disabled mode"),
+            AdminPasswordMode::Disabled
+        );
+        assert!(parse_admin_password_mode("invalid-mode").is_err());
+    }
+
+    #[test]
+    fn detects_common_placeholder_secrets() {
+        assert!(looks_like_placeholder_secret(
+            "tmpmail-dev-secret-change-me"
+        ));
+        assert!(looks_like_placeholder_secret("change-me-in-production"));
+        assert!(!looks_like_placeholder_secret(
+            "8f8c38e0e8d34eb8a5d7a6d92a7427a0"
+        ));
     }
 }

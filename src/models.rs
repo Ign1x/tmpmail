@@ -224,16 +224,16 @@ pub struct LinuxDoAuthSettings {
     pub client_secret_configured: bool,
     #[serde(default)]
     pub minimum_trust_level: u8,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorize_url: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_url: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub userinfo_url: Option<String>,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub callback_url: Option<String>,
 }
@@ -320,6 +320,12 @@ pub struct AdminAccessKeyListResponse {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AdminAccessKeyInfoResponse {
+    pub key: AdminAccessKey,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AdminAccessKeyResponse {
     pub key: AdminAccessKey,
     pub api_key: String,
@@ -365,8 +371,8 @@ pub struct CleanupRunResponse {
     pub deleted_domains: usize,
 }
 
-impl From<crate::store::CleanupReport> for CleanupRunResponse {
-    fn from(value: crate::store::CleanupReport) -> Self {
+impl From<crate::app_store::CleanupReport> for CleanupRunResponse {
+    fn from(value: crate::app_store::CleanupReport) -> Self {
         Self {
             deleted_accounts: value.deleted_accounts,
             deleted_messages: value.deleted_messages,
@@ -422,7 +428,7 @@ pub struct AdminMetricsResponse {
 impl AdminMetricsResponse {
     pub fn from_parts(
         console_users_total: usize,
-        stats: crate::store::StoreStats,
+        stats: crate::app_store::StoreStats,
         metrics: crate::metrics::MetricsSnapshot,
         runtime: RuntimeStatusSnapshot,
     ) -> Self {

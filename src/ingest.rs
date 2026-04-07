@@ -31,11 +31,11 @@ pub fn spawn_inbucket_poller(state: AppState, client: Arc<InbucketClient>) {
 }
 
 pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<()> {
-    let Some(mut store) = state.try_lock_store_for_background("inbucket-sync").await else {
+    let Some(_permit) = state.try_lock_store_for_background("inbucket-sync").await else {
         return Ok(());
     };
-    let mailboxes = active_mailboxes(&store.active_account_addresses().await?);
-    drop(store);
+    let mailboxes = active_mailboxes(&state.store.active_account_addresses().await?);
+    drop(_permit);
 
     let mut imported_total = 0_usize;
     let mut deleted_total = 0_usize;
@@ -51,10 +51,11 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
             .collect::<HashSet<_>>();
 
         let deleted_count = {
-            let Some(mut store) = state.try_lock_store_for_background("inbucket-sync").await else {
+            let Some(_permit) = state.try_lock_store_for_background("inbucket-sync").await else {
                 continue;
             };
-            store
+            state
+                .store
                 .reconcile_mailbox_sources(&mailbox, &active_source_keys)
                 .await?
         };
@@ -63,11 +64,11 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
         for summary in messages {
             let source_key = format!("{mailbox}:{}", summary.id);
             let already_imported = {
-                let Some(mut store) = state.try_lock_store_for_background("inbucket-sync").await
+                let Some(_permit) = state.try_lock_store_for_background("inbucket-sync").await
                 else {
                     continue;
                 };
-                store.has_imported_source(&source_key).await?
+                state.store.has_imported_source(&source_key).await?
             };
 
             if already_imported {
@@ -85,11 +86,12 @@ pub async fn sync_once(state: &AppState, client: &InbucketClient) -> AppResult<(
             }
 
             let imported_receipts = {
-                let Some(mut store) = state.try_lock_store_for_background("inbucket-sync").await
+                let Some(_permit) = state.try_lock_store_for_background("inbucket-sync").await
                 else {
                     continue;
                 };
-                store
+                state
+                    .store
                     .import_message_for_recipients(&recipients, imported.clone())
                     .await?
             };

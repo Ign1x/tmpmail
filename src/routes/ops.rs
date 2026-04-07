@@ -2,17 +2,18 @@ use axum::{
     Json,
     extract::{Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header::CONTENT_TYPE},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
 use crate::{
-    admin_state, cleanup_worker,
+    admin_state,
+    app_store::StoreStats,
+    cleanup_worker,
     error::AppResult,
     metrics::MetricsSnapshot,
     models::{AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice},
     state::AppState,
-    store::StoreStats,
 };
 
 #[derive(Debug, Deserialize)]
@@ -30,10 +31,7 @@ pub async fn admin_metrics(
         admin_state.users_total()
     };
 
-    let stats = {
-        let mut store = state.store.lock().await;
-        store.stats().await?
-    };
+    let stats = state.store.stats().await?;
     let metrics = state.metrics.snapshot();
     let runtime = state.metrics.runtime_snapshot();
 
@@ -52,10 +50,7 @@ pub async fn admin_audit_logs(
 ) -> AppResult<Json<AdminAuditLogsResponse>> {
     let _ = admin_state::require_admin_access(&headers, &state).await?;
     let limit = query.limit.unwrap_or(50).clamp(1, 500);
-    let entries = {
-        let mut store = state.store.lock().await;
-        store.audit_logs(limit).await?
-    };
+    let entries = state.store.audit_logs(limit).await?;
 
     Ok(Json(AdminAuditLogsResponse { entries }))
 }
@@ -65,10 +60,7 @@ pub async fn clear_admin_audit_logs(
     headers: HeaderMap,
 ) -> AppResult<StatusCode> {
     let _ = admin_state::require_admin_access(&headers, &state).await?;
-    {
-        let mut store = state.store.lock().await;
-        store.clear_audit_logs().await?;
-    }
+    state.store.clear_audit_logs().await?;
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -93,11 +85,20 @@ pub async fn trigger_cleanup(
     ))
 }
 
-pub async fn metrics(State(state): State<AppState>) -> AppResult<impl IntoResponse> {
-    let stats = {
-        let mut store = state.store.lock().await;
-        store.stats().await?
-    };
+pub async fn metrics(State(state): State<AppState>) -> AppResult<Response> {
+    if !state.config.public_metrics_enabled {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            [(
+                CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            )],
+            "metrics endpoint is disabled\n".to_owned(),
+        )
+            .into_response());
+    }
+
+    let stats = state.store.stats().await?;
     let metrics = state.metrics.snapshot();
     let payload = render_metrics(&stats, &metrics);
 
@@ -107,7 +108,8 @@ pub async fn metrics(State(state): State<AppState>) -> AppResult<impl IntoRespon
             HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
         )],
         payload,
-    ))
+    )
+        .into_response())
 }
 
 fn render_metrics(stats: &StoreStats, metrics: &MetricsSnapshot) -> String {
@@ -196,4 +198,70 @@ fn render_metrics(stats: &StoreStats, metrics: &MetricsSnapshot) -> String {
     }
 
     lines.join("\n") + "\n"
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header::CONTENT_TYPE},
+    };
+    use tower::ServiceExt;
+
+    use crate::{app::build_router, config::Config, state::AppState};
+
+    #[tokio::test]
+    async fn public_metrics_are_disabled_by_default() {
+        let app = build_router(test_state(Config::default()).await);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("metrics response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn public_metrics_can_be_enabled_explicitly() {
+        let app = build_router(
+            test_state(Config {
+                public_metrics_enabled: true,
+                ..Config::default()
+            })
+            .await,
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("build metrics request"),
+            )
+            .await
+            .expect("metrics response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; version=0.0.4; charset=utf-8")
+        );
+    }
+
+    async fn test_state(config: Config) -> AppState {
+        let config = Config {
+            cleanup_interval_seconds: 0,
+            domain_verification_poll_interval_seconds: 0,
+            ..config
+        };
+
+        crate::test_support::build_test_state(config, "routes-ops").await
+    }
 }

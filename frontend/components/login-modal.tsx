@@ -80,12 +80,12 @@ export default function LoginModal({ isOpen, onClose, accountAddress }: LoginMod
         })()
 
   const passwordError = !password
-    ? null
-    : !password.trim()
-      ? t("passwordBlank")
-      : [...password].length < 6
-        ? t("passwordTooShort")
-        : null
+      ? null
+      : !password.trim()
+        ? t("passwordBlank")
+        : [...password].length < 10
+          ? t("passwordTooShort")
+          : null
 
   useEffect(() => {
     if (!isOpen) return
@@ -193,7 +193,6 @@ export default function LoginModal({ isOpen, onClose, accountAddress }: LoginMod
             <div className="min-w-0">
               <div className="tm-section-label">{t("modeLogin")}</div>
               <h2 className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">{t("title")}</h2>
-              <p className="mt-2 text-sm leading-7 text-slate-500 dark:text-slate-400">{t("subtitle")}</p>
             </div>
           </div>
         </ModalHeader>
