@@ -96,10 +96,16 @@ pub async fn validate_api_token(
     timeout: Duration,
 ) -> AppResult<CloudflareTokenValidationResponse> {
     let client = build_client(api_token, timeout)?;
-    let zones = list_zones(&client).await?;
+    let mut zones = list_zones(&client)
+        .await?
+        .into_iter()
+        .map(|zone| zone.name)
+        .collect::<Vec<_>>();
+    zones.sort();
 
     Ok(CloudflareTokenValidationResponse {
         zone_count: zones.len(),
+        zones,
     })
 }
 

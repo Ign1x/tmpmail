@@ -447,6 +447,8 @@ export default function DomainManagementPage({
   const [managedDomainInput, setManagedDomainInput] = useState("")
   const [isCreatingDomain, setIsCreatingDomain] = useState(false)
   const [isBatchDomainModalOpen, setIsBatchDomainModalOpen] = useState(false)
+  const [cloudflareZoneOptions, setCloudflareZoneOptions] = useState<string[]>([])
+  const [cloudflareZonesLoading, setCloudflareZonesLoading] = useState(false)
   const [batchDomainRootInput, setBatchDomainRootInput] = useState("")
   const [batchDomainPrefixInput, setBatchDomainPrefixInput] = useState("")
   const [batchDomainRandomLengthInput, setBatchDomainRandomLengthInput] = useState("6")
@@ -612,39 +614,6 @@ export default function DomainManagementPage({
     () => Object.fromEntries(adminUsers.map((user) => [user.id, user])),
     [adminUsers],
   )
-  const batchRootDomainOptions = useMemo(() => {
-    const optionMap = new Map<
-      string,
-      {
-        domain: string
-        isActive: boolean
-      }
-    >()
-
-    for (const domain of managedDomains) {
-      const normalizedDomain = normalizeManagedDomainEntry(domain.domain)
-      if (normalizedDomain.split(".").filter(Boolean).length !== 2) {
-        continue
-      }
-
-      const current = optionMap.get(normalizedDomain)
-      const nextIsActive = domain.isVerified || domain.status === "active"
-      if (!current || (!current.isActive && nextIsActive)) {
-        optionMap.set(normalizedDomain, {
-          domain: normalizedDomain,
-          isActive: nextIsActive,
-        })
-      }
-    }
-
-    return Array.from(optionMap.values()).sort((left, right) => {
-      if (left.isActive !== right.isActive) {
-        return left.isActive ? -1 : 1
-      }
-
-      return left.domain.localeCompare(right.domain)
-    })
-  }, [managedDomains])
   const activeMailboxAccountsCount = mailboxAccounts.filter(
     (account) => !account.isDeleted && !account.isDisabled,
   ).length
@@ -767,13 +736,13 @@ export default function DomainManagementPage({
     }
 
     setBatchDomainRootInput((current) => {
-      if (current && batchRootDomainOptions.some((option) => option.domain === current)) {
+      if (current && cloudflareZoneOptions.includes(current)) {
         return current
       }
 
-      return batchRootDomainOptions[0]?.domain ?? ""
+      return cloudflareZoneOptions[0] ?? ""
     })
-  }, [batchRootDomainOptions, isBatchDomainModalOpen])
+  }, [cloudflareZoneOptions, isBatchDomainModalOpen])
 
   useEffect(() => {
     currentMailboxAccountRef.current = currentAccount
@@ -1749,20 +1718,42 @@ export default function DomainManagementPage({
     }
   }
 
-  const handleOpenBatchDomainModal = useCallback(() => {
-    if (batchRootDomainOptions.length === 0) {
+  const loadBatchCloudflareZones = useCallback(async () => {
+    if (!cloudflareSettings.apiTokenConfigured) {
+      setCloudflareZoneOptions([])
+      return []
+    }
+
+    setCloudflareZonesLoading(true)
+    try {
+      const response = await testConsoleCloudflareToken(undefined, DEFAULT_PROVIDER_ID)
+      const zones = Array.from(
+        new Set(
+          (response.zones ?? [])
+            .map(normalizeManagedDomainEntry)
+            .filter(Boolean),
+        ),
+      ).sort((left, right) => left.localeCompare(right))
+      setCloudflareZoneOptions(zones)
+      return zones
+    } catch (error) {
+      setCloudflareZoneOptions([])
       toast({
-        title: ts("domainBatchNoSecondLevelDomain"),
-        description: ts("domainBatchNoSecondLevelDomainDesc"),
+        title: ts("cloudflareZoneLoadFailed"),
+        description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
         color: "warning",
         variant: "flat",
       })
-      return
+      return []
+    } finally {
+      setCloudflareZonesLoading(false)
     }
+  }, [cloudflareSettings.apiTokenConfigured, toast, ts])
 
-    setBatchDomainRootInput((current) => current || batchRootDomainOptions[0]?.domain || "")
+  const handleOpenBatchDomainModal = useCallback(() => {
     setIsBatchDomainModalOpen(true)
-  }, [batchRootDomainOptions, toast, ts])
+    void loadBatchCloudflareZones()
+  }, [loadBatchCloudflareZones])
 
   const handleCloseBatchDomainModal = useCallback(() => {
     if (isCreatingDomainBatch) {
@@ -3814,38 +3805,40 @@ export default function DomainManagementPage({
 
                 {/* Add domain */}
                 <Panel>
-                  <div className="flex flex-col gap-3 p-5 sm:flex-row sm:items-end">
-                    <div className="min-w-0 flex-1">
+                  <div className="space-y-3 p-5">
+                    <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
                       <Input
                         label={ts("domainInputLabel")}
                         placeholder={ts("domainInputPlaceholder")}
-                        description={ts("domainInputDescription")}
                         value={managedDomainInput}
                         onValueChange={setManagedDomainInput}
                         variant="bordered"
                         size="sm"
                         classNames={TM_INPUT_CLASSNAMES}
                       />
+                      <div className="flex shrink-0 items-center gap-2 sm:pb-0.5">
+                        <Button
+                          size="sm"
+                          className="h-10 rounded-full bg-white px-4 text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700 dark:hover:bg-slate-800"
+                          onPress={handleOpenBatchDomainModal}
+                          startContent={<Sparkles size={14} />}
+                        >
+                          {ts("domainBatchOpenAction")}
+                        </Button>
+                        <Button
+                          size="sm"
+                          className="h-10 rounded-full bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                          onPress={handleCreateDomain}
+                          isLoading={isCreatingDomain}
+                          startContent={<Plus size={14} />}
+                        >
+                          {ts("addDomain")}
+                        </Button>
+                      </div>
                     </div>
-                    <div className="flex shrink-0 items-end gap-2 sm:self-end">
-                      <Button
-                        size="sm"
-                        className="h-10 rounded-full bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700 dark:hover:bg-slate-800"
-                        onPress={handleOpenBatchDomainModal}
-                        startContent={<Sparkles size={14} />}
-                      >
-                        {ts("domainBatchOpenAction")}
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="h-10 rounded-full bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
-                        onPress={handleCreateDomain}
-                        isLoading={isCreatingDomain}
-                        startContent={<Plus size={14} />}
-                      >
-                        {ts("addDomain")}
-                      </Button>
-                    </div>
+                    <p className="px-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                      {ts("domainInputDescription")}
+                    </p>
                   </div>
                 </Panel>
 
@@ -4368,23 +4361,40 @@ export default function DomainManagementPage({
           </ModalHeader>
 
           <ModalBody className="space-y-4 px-6 py-5">
-            <Select
-              label={ts("domainBatchRootLabel")}
-              placeholder={ts("domainBatchRootPlaceholder")}
-              description={ts("domainBatchRootDescription")}
-              selectedKeys={batchDomainRootInput ? [batchDomainRootInput] : []}
-              onSelectionChange={(keys) => {
-                const [value] = Array.from(keys).map(String)
-                setBatchDomainRootInput(value ?? "")
-              }}
-              disallowEmptySelection
-            >
-              {batchRootDomainOptions.map((option) => (
-                <SelectItem key={option.domain} textValue={option.domain}>
-                  {option.domain}
-                </SelectItem>
-              ))}
-            </Select>
+            {cloudflareZoneOptions.length > 0 ? (
+              <Select
+                label={ts("domainBatchRootLabel")}
+                placeholder={ts("domainBatchRootPlaceholder")}
+                description={ts("domainBatchRootDescription")}
+                selectedKeys={batchDomainRootInput ? [batchDomainRootInput] : []}
+                onSelectionChange={(keys) => {
+                  const [value] = Array.from(keys).map(String)
+                  setBatchDomainRootInput(value ?? "")
+                }}
+                disallowEmptySelection
+                isDisabled={cloudflareZonesLoading}
+              >
+                {cloudflareZoneOptions.map((zone) => (
+                  <SelectItem key={zone} textValue={zone}>
+                    {zone}
+                  </SelectItem>
+                ))}
+              </Select>
+            ) : (
+              <EmptyState
+                compact
+                title={
+                  cloudflareZonesLoading
+                    ? ts("cloudflareZoneLoading")
+                    : ts("domainBatchNoSecondLevelDomain")
+                }
+                description={
+                  cloudflareZonesLoading
+                    ? ts("cloudflareZoneLoadingDesc")
+                    : ts("domainBatchNoSecondLevelDomainDesc")
+                }
+              />
+            )}
 
             <div className="grid gap-4 md:grid-cols-2">
               <Input
@@ -4445,6 +4455,7 @@ export default function DomainManagementPage({
               onPress={() => void handleCreateRandomDomainBatch()}
               isLoading={isCreatingDomainBatch}
               startContent={<Sparkles size={14} />}
+              isDisabled={cloudflareZonesLoading || cloudflareZoneOptions.length === 0}
             >
               {ts("domainBatchCreateAction")}
             </Button>

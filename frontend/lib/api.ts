@@ -219,6 +219,7 @@ export interface CloudflareDnsSyncResponse {
 
 export interface CloudflareTokenValidationResponse {
   zoneCount: number
+  zones: string[]
 }
 
 export interface AdminCreateAccessKeyRequest {

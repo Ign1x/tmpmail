@@ -610,6 +610,8 @@ pub struct CloudflareDnsSyncResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CloudflareTokenValidationResponse {
     pub zone_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<String>,
 }
 
 fn default_true() -> bool {
