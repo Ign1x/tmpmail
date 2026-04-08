@@ -131,7 +131,7 @@
 - 如果这个 Inbucket 要作为公网 MX 收件主机，宿主机必须对外开放 `25/TCP`；主 compose 已经把宿主机 `25` 映射到容器内 `2500`。
 - `TMPMAIL_MAIL_EXCHANGE_HOST` 也必须解析到一个公网可直连的 SMTP 主机，而且必须是仅 DNS；不能挂 Cloudflare 代理。
 - 当前主 compose 不会把 Inbucket 的 Web UI `9000` 和 POP3 `1100` 暴露到宿主机；TmpMail 自己通过 Docker 内网访问 Inbucket。
-- 当前 compose 还把 `frontend` 与 `inbucket` / `postgres` 拆到了不同网络；前端容器不能直接访问这两个后端服务。
+- 当前 compose 会给 `inbucket` SMTP 和 `postgres` 宿主机端口各自挂一个专用 publish bridge，同时保留内部 `backend` 网络；`frontend` 不会加入这些网络，因此仍然不能直接访问 `inbucket` / `postgres`。
 - Inbucket 监控页默认关闭，镜像已固定到不可变 digest，容器能力也被压到 `cap_drop: ALL` + `no-new-privileges`。
 - 这意味着默认部署更简单，也避免了把 Inbucket Web/API 额外公开到公网。
 - 对真实公网域名，建议显式配置 `TMPMAIL_MAIL_EXCHANGE_HOST=mail.your-domain.tld`，让后台 DNS 记录始终指向稳定的公网收件主机名，而不是依赖内部容器地址推导。
@@ -144,7 +144,7 @@
 - 当前后端只使用 PostgreSQL 持久化；不再保留 JSON 状态文件、文件 fallback 或首次导库逻辑。
 - 默认部署使用内置同机 Inbucket；如后续确实要拆分邮件接入层，远端 Inbucket 配置能力仍然保留。
 - Compose 现在内置同机 Inbucket：API 通过 Docker 内网访问 `inbucket:9000`，宿主机默认只对外暴露 SMTP `25/TCP`。
-- `compose.yaml` 现在把 `frontend` 与 `postgres` / `inbucket` 分到不同网络，减少横向暴露面。
+- `compose.yaml` 现在把 `frontend` 与 `postgres` / `inbucket` 分到不同网络，并为 SMTP / PostgreSQL 宿主机端口使用各自独立的 publish bridge，减少横向暴露面，同时兼容 Docker 29 的端口发布行为。
 - 存储并发模型已经去掉全局 `AppStore` 大锁；前台请求直接使用后端自己的并发控制，后台 worker 只共享一个轻量调度闸门，减少高并发下的串行瓶颈。
 - API 现在提供了基础稳定性保护，可按需调节：
   - `TMPMAIL_HTTP_REQUEST_TIMEOUT_SECONDS`：限制普通 API 请求最长处理时间，默认 `15`

@@ -125,6 +125,7 @@ services:
         condition: service_completed_successfully
     networks:
       - backend
+      - postgres-publish
     environment:
       POSTGRES_DB: "${TMPMAIL_POSTGRES_DB:-tmpmail}"
       POSTGRES_USER: "${TMPMAIL_POSTGRES_USER:-tmpmail}"
@@ -149,6 +150,7 @@ services:
     restart: unless-stopped
     networks:
       - backend
+      - smtp-publish
     environment:
       INBUCKET_LOGLEVEL: info
       INBUCKET_MAILBOXNAMING: local
@@ -178,3 +180,5 @@ networks:
   public:
   backend:
     internal: true
+  postgres-publish:
+  smtp-publish:

@@ -105,7 +105,7 @@ cd frontend && npm run build
 - API and frontend runtime containers are expected to run as non-root with hardened compose defaults; if bind-mounted `./data` needs permission alignment, use `TMPMAIL_CONTAINER_UID` / `TMPMAIL_CONTAINER_GID`.
 - Linux Do OAuth secrets can be seeded from `TMPMAIL_LINUX_DO_CLIENT_SECRET`; runtime persistence lives in PostgreSQL.
 - Default documented deployment path is plain `docker compose`; do not reintroduce a separate same-host Inbucket deployment script.
-- Main compose exposes Inbucket SMTP on host `25/TCP`, keeps Inbucket Web/API on the internal Docker network, and isolates `frontend` from `postgres` / `inbucket` with separate networks.
+- Main compose exposes Inbucket SMTP on host `25/TCP`, keeps Inbucket Web/API on the internal Docker network, and uses dedicated publish-only bridge networks for host-facing Inbucket/PostgreSQL ports so `frontend` still stays isolated from `postgres` / `inbucket`.
 - `TMPMAIL_MAIL_EXCHANGE_HOST` must resolve to a public DNS-only SMTP endpoint that really accepts `25/TCP`; `dev-up` now probes that endpoint after startup to catch false-success deployments early.
 
 ## Update policy
