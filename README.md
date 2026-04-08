@@ -36,7 +36,7 @@
    - 如果希望前端首页、示例邮箱和品牌展示优先使用一个固定域名，可设置 `NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN`
 
    如果你不想先手工填这两个必填项，也可以直接运行 `./scripts/dev-up.sh`。
-   它会在缺少 `TMPMAIL_ADMIN_PASSWORD` 或 `TMPMAIL_MAIL_EXCHANGE_HOST` 时停下来交互提问，把值写回 `.env`，然后再启动 compose，并打印 DNS / Cloudflare 配置提示。
+   它会先让你选择脚本提示语言，默认简体中文；当缺少 `TMPMAIL_ADMIN_PASSWORD` 或 `TMPMAIL_MAIL_EXCHANGE_HOST` 时会停下来交互提问，把值写回 `.env`，然后再启动 compose，并打印 DNS / Cloudflare 配置提示。
 
 3. 启动服务：
 
