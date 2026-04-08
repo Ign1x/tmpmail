@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 SETUP_LANG="zh-CN"
+PYTHON_BIN=""
 # shellcheck source=./lib/env.sh
 . "$ROOT_DIR/scripts/lib/env.sh"
 
@@ -99,6 +100,8 @@ msg() {
     en:mx_check_provider_hint) printf '%s' "Common cause 3: your cloud firewall, host firewall, or provider policy rejects 25/TCP." ;;
     zh-CN:mx_check_next) printf '%s' "请先确认下面几项，再继续让外部发件方重试：" ;;
     en:mx_check_next) printf '%s' "Check the following before asking external senders to retry:" ;;
+    zh-CN:python_required) printf '%s' "需要先安装 python3（或提供可用的 python 命令），脚本才能做 SMTP TCP 探测。" ;;
+    en:python_required) printf '%s' "python3 (or a working python command) is required for SMTP TCP probing." ;;
     zh-CN:frontend_label) printf '%s' "前端" ;;
     en:frontend_label) printf '%s' "frontend" ;;
     zh-CN:admin_label) printf '%s' "管理台" ;;
@@ -178,6 +181,25 @@ choose_language() {
 }
 
 choose_language
+
+detect_python_bin() {
+  if [ -n "$PYTHON_BIN" ]; then
+    return 0
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+    return 0
+  fi
+
+  if command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+    return 0
+  fi
+
+  say_err python_required
+  return 1
+}
 
 if ! command -v docker >/dev/null 2>&1; then
   say docker_required
@@ -354,11 +376,13 @@ verify_smtp_ingress() {
   local published_port
   local local_probe_result
 
+  detect_python_bin || return 1
+
   smtp_port_binding="$(docker compose -f "$ROOT_DIR/compose.yaml" port inbucket 2500 2>/dev/null || true)"
   smtp_port_binding="$(trim_whitespace "$smtp_port_binding")"
   published_port="${smtp_port_binding##*:}"
   local_probe_result="$(
-    python - <<'PY'
+    "$PYTHON_BIN" - <<'PY'
 import socket
 
 try:
@@ -407,7 +431,9 @@ PY
 probe_mail_exchange_smtp() {
   local host="$1"
 
-  python - "$host" <<'PY'
+  detect_python_bin || return 1
+
+  "$PYTHON_BIN" - "$host" <<'PY'
 import socket
 import sys
 
@@ -455,6 +481,8 @@ verify_mail_exchange_connectivity() {
   local host="$1"
   local probe_result
 
+  detect_python_bin || return 1
+
   probe_result="$(probe_mail_exchange_smtp "$host" || true)"
   probe_result="$(trim_whitespace "$probe_result")"
 
@@ -472,7 +500,7 @@ verify_mail_exchange_connectivity() {
       say_err mx_check_provider_hint
       say_err mx_check_next
       printf '  host %s\n' "$host" >&2
-      printf '  python - <<'\''PY'\''\n' >&2
+      printf "  %s - <<'PY'\n" "$PYTHON_BIN" >&2
       printf 'import socket\n' >&2
       printf 'print(socket.create_connection(("%s", 25), timeout=6).recv(1024))\n' "$host" >&2
       printf 'PY\n' >&2
