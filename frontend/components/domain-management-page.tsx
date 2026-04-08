@@ -449,6 +449,7 @@ export default function DomainManagementPage({
   const [isBatchDomainModalOpen, setIsBatchDomainModalOpen] = useState(false)
   const [cloudflareZoneOptions, setCloudflareZoneOptions] = useState<string[]>([])
   const [cloudflareZonesLoading, setCloudflareZonesLoading] = useState(false)
+  const [cloudflareZonesRequireApiUpdate, setCloudflareZonesRequireApiUpdate] = useState(false)
   const [batchDomainRootInput, setBatchDomainRootInput] = useState("")
   const [batchDomainPrefixInput, setBatchDomainPrefixInput] = useState("")
   const [batchDomainRandomLengthInput, setBatchDomainRandomLengthInput] = useState("6")
@@ -1721,6 +1722,7 @@ export default function DomainManagementPage({
   const loadBatchCloudflareZones = useCallback(async () => {
     if (!cloudflareSettings.apiTokenConfigured) {
       setCloudflareZoneOptions([])
+      setCloudflareZonesRequireApiUpdate(false)
       return []
     }
 
@@ -1734,10 +1736,21 @@ export default function DomainManagementPage({
             .filter(Boolean),
         ),
       ).sort((left, right) => left.localeCompare(right))
+      const requiresApiUpdate = response.zoneCount > 0 && zones.length === 0
+      setCloudflareZonesRequireApiUpdate(requiresApiUpdate)
       setCloudflareZoneOptions(zones)
+      if (requiresApiUpdate) {
+        toast({
+          title: ts("cloudflareZoneApiOutdated"),
+          description: ts("cloudflareZoneApiOutdatedDesc"),
+          color: "warning",
+          variant: "flat",
+        })
+      }
       return zones
     } catch (error) {
       setCloudflareZoneOptions([])
+      setCloudflareZonesRequireApiUpdate(false)
       toast({
         title: ts("cloudflareZoneLoadFailed"),
         description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
@@ -4347,10 +4360,20 @@ export default function DomainManagementPage({
       >
         <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
           <ModalHeader className="flex flex-col gap-1 border-b border-slate-200/80 px-6 pb-5 pt-6 dark:border-slate-800">
-            <div className="mb-3 flex justify-center">
-              <div className="flex h-14 w-14 items-center justify-center rounded-[1.25rem] bg-emerald-100 dark:bg-emerald-950/50">
-                <Sparkles size={24} className="text-emerald-600 dark:text-emerald-300" />
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex-1" />
+              <div className="mb-3 flex justify-center">
+                <div className="flex h-14 w-14 items-center justify-center rounded-[1.25rem] bg-emerald-100 dark:bg-emerald-950/50">
+                  <Sparkles size={24} className="text-emerald-600 dark:text-emerald-300" />
+                </div>
               </div>
+              <IconActionButton
+                icon={<RefreshCw size={14} />}
+                label={ts("cloudflareZoneRefresh")}
+                tooltip={ts("cloudflareZoneRefresh")}
+                onPress={() => void loadBatchCloudflareZones()}
+                isLoading={cloudflareZonesLoading}
+              />
             </div>
             <h2 className="text-center text-xl font-semibold text-slate-950 dark:text-white">
               {ts("domainBatchTitle")}
@@ -4386,11 +4409,15 @@ export default function DomainManagementPage({
                 title={
                   cloudflareZonesLoading
                     ? ts("cloudflareZoneLoading")
+                    : cloudflareZonesRequireApiUpdate
+                      ? ts("cloudflareZoneApiOutdated")
                     : ts("domainBatchNoSecondLevelDomain")
                 }
                 description={
                   cloudflareZonesLoading
                     ? ts("cloudflareZoneLoadingDesc")
+                    : cloudflareZonesRequireApiUpdate
+                      ? ts("cloudflareZoneApiOutdatedDesc")
                     : ts("domainBatchNoSecondLevelDomainDesc")
                 }
               />
