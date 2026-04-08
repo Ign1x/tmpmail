@@ -26,7 +26,8 @@
    - 只有在你不使用 compose 自带 PostgreSQL、或者要让宿主机直跑的后端连接外部数据库时，才需要显式设置 `TMPMAIL_DATABASE_URL`
    - 默认建议保留 `TMPMAIL_ADMIN_PASSWORD_MODE=bootstrap`；只有救援或显式重置密码时才考虑 `force`
    - 本地 HTTP 联调可设 `TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT=false`
-   - `TMPMAIL_TRUST_PROXY_HEADERS` 默认应保持 `false`；只有在前面明确有一层可信反向代理负责覆盖 `X-Forwarded-*` / `Forwarded` 头时才改成 `true`
+   - 如果你的网站是通过 Nginx / Caddy / Traefik / ingress 等 HTTPS 反向代理对外提供访问，那么首次启动前就应把 `TMPMAIL_TRUST_PROXY_HEADERS=true`
+   - 如果是直接暴露服务，或者前面的代理不会严格覆盖 `X-Forwarded-*` / `Forwarded` 头，那么 `TMPMAIL_TRUST_PROXY_HEADERS` 应保持 `false`
    - 配置后，托管域名会统一生成 `CNAME mail.<domain> -> <共享收件主机>`、`MX <domain> -> <共享收件主机>`、`TXT <domain> -> <verification token>`
    - 如果你不配 `TMPMAIL_MAIL_EXCHANGE_HOST`，系统会回退为每个域名自己的 `mail.<domain>` 路由，这时通常还要额外配置 `TMPMAIL_MAIL_CNAME_TARGET`
    - 如果 API 镜像构建阶段卡在 `Updating crates.io index`，可设置 `TMPMAIL_CARGO_MIRROR=sparse+https://rsproxy.cn/index/`
@@ -35,14 +36,14 @@
    - 构建阶段也支持 `TMPMAIL_CARGO_REGISTRY_PROTOCOL`、`TMPMAIL_CARGO_NET_RETRY`、`TMPMAIL_CARGO_HTTP_TIMEOUT`
    - 如果希望前端首页、示例邮箱和品牌展示优先使用一个固定域名，可设置 `NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN`
 
-   如果你不想先手工填这两个必填项，也可以直接运行 `./scripts/dev-up.sh`。
-   它会先让你选择脚本提示语言，默认简体中文；当缺少 `TMPMAIL_ADMIN_PASSWORD` 或 `TMPMAIL_MAIL_EXCHANGE_HOST` 时会停下来交互提问，把值写回 `.env`，然后再启动 compose，并打印 DNS / Cloudflare 配置提示。
+   如果你不想先手工填这些关键部署项，也可以直接运行 `./scripts/dev-up.sh`。
+   它会先让你选择脚本提示语言，默认简体中文；当缺少 `TMPMAIL_ADMIN_PASSWORD`、`TMPMAIL_MAIL_EXCHANGE_HOST`，或还没决定 `TMPMAIL_TRUST_PROXY_HEADERS` 时，会停下来交互提问，把值写回 `.env`，然后再启动 compose，并做两层 SMTP 硬检查：先确认宿主机 `25/TCP` 是否真的发布给 `inbucket:2500` 且本机 `127.0.0.1:25` 能连通；如果第一次失败，脚本会自动对 `inbucket` 做一次 `--force-recreate` 后复检。之后再确认 `TMPMAIL_MAIL_EXCHANGE_HOST:25` 当前是否真的能建立 SMTP 连接。任一项失败，脚本都会直接报错退出，而不是把一个根本收不到公网邮件的部署误报成成功。
 
 3. 启动服务：
 
    `docker compose up -d --build`
 
-   如果希望启动前自动补齐必填项，并在启动后额外打印访问地址和 DNS / Cloudflare 配置提示，也可以改用：
+   如果希望启动前自动补齐必填项、按部署方式自动写入 `TMPMAIL_TRUST_PROXY_HEADERS`、并在启动后对 SMTP 入口和 `TMPMAIL_MAIL_EXCHANGE_HOST:25` 做硬检查，也可以改用：
 
    `./scripts/dev-up.sh`
 
@@ -101,6 +102,7 @@
 - Linux Do OAuth 现在支持配置精确的 `callback_url` 白名单；如未配置，回调地址也必须与当前管理台来源同源，且只接受更严格的 `state` 格式。
 - `TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT` 默认是 `true`；只有本地开发或可信内网测试时才建议关掉。
 - `TMPMAIL_TRUST_PROXY_HEADERS` 默认是 `false`；直接用 `docker compose` 暴露服务时不要打开。只有在你确认前面的反向代理会清洗并重写 `X-Forwarded-*` / `Forwarded` 头时，才应该设成 `true`。
+- 如果你的公网访问方式是“HTTPS 反向代理 -> TmpMail 前端容器”，那么首次启动前就应把 `TMPMAIL_TRUST_PROXY_HEADERS=true`，否则管理台敏感操作可能会把实际的 HTTPS 访问误判成内部 HTTP 并返回 `403`。
 - 如确实要在本地保留弱测试 JWT secret，必须显式设置 `TMPMAIL_ALLOW_INSECURE_DEV_SECRETS=true`；默认不会再接受占位 secret。
 - 当前端检测到 `TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT=false` 时，`/admin` 页面会允许在本地 HTTP/内网调试环境里直接初始化后台用户、登录和轮换后台 Key。
 - 后台 API Key 现在按 console 用户分别生成，服务端只保存哈希；明文只会在签发或轮换当次显示。
@@ -127,6 +129,7 @@
 注意：
 
 - 如果这个 Inbucket 要作为公网 MX 收件主机，宿主机必须对外开放 `25/TCP`；主 compose 已经把宿主机 `25` 映射到容器内 `2500`。
+- `TMPMAIL_MAIL_EXCHANGE_HOST` 也必须解析到一个公网可直连的 SMTP 主机，而且必须是仅 DNS；不能挂 Cloudflare 代理。
 - 当前主 compose 不会把 Inbucket 的 Web UI `9000` 和 POP3 `1100` 暴露到宿主机；TmpMail 自己通过 Docker 内网访问 Inbucket。
 - 当前 compose 还把 `frontend` 与 `inbucket` / `postgres` 拆到了不同网络；前端容器不能直接访问这两个后端服务。
 - Inbucket 监控页默认关闭，镜像已固定到不可变 digest，容器能力也被压到 `cap_drop: ALL` + `no-new-privileges`。
@@ -134,6 +137,7 @@
 - 对真实公网域名，建议显式配置 `TMPMAIL_MAIL_EXCHANGE_HOST=mail.your-domain.tld`，让后台 DNS 记录始终指向稳定的公网收件主机名，而不是依赖内部容器地址推导。
 - 外部邮件服务器只会对 MX 主机发起 `25/TCP` 连接，不会改连 `2500`。
 - `2500` 只适合本地联调或内网测试；拿它直接做公网 MX 时，发件方通常会报“对方服务器未响应”或持续重试。
+- `./scripts/dev-up.sh` 现在除了检查 Docker 端口发布，还会主动探测宿主机 `127.0.0.1:25` 和 `TMPMAIL_MAIL_EXCHANGE_HOST:25`；任一项不通，脚本都会直接失败，避免把“管理台能打开但公网邮件根本收不到”的部署误判成成功。
 
 ## Notes
 
