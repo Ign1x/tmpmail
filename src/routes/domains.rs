@@ -127,8 +127,58 @@ pub async fn delete_domain(
 ) -> AppResult<StatusCode> {
     let user = admin_state::require_console_access(&headers, &state).await?;
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
-    ensure_domain_access(&state, user, domain_id).await?;
+    ensure_domain_access(&state, user.clone(), domain_id).await?;
+    let config = state.effective_runtime_config().await;
+    let owner_user_id = state.store.domain_owner_user_id(domain_id).await?;
+    let cloudflare_user_id = owner_user_id.unwrap_or(user.id);
+    let maybe_api_token = {
+        let admin_state = state.admin_state.read().await;
+        let settings = admin_state.cloudflare_settings(cloudflare_user_id)?;
+        if !settings.enabled || !settings.api_token_configured {
+            None
+        } else {
+            Some(
+                admin_state
+                    .cloudflare_api_token(cloudflare_user_id)?
+                    .ok_or_else(|| {
+                        ApiError::validation("cloudflare api token is not configured")
+                    })?,
+            )
+        }
+    };
+    let maybe_cleanup_report = if let Some(api_token) = maybe_api_token {
+        let (domain_name, _) = state.store.domain_verification_context(domain_id).await?;
+        let records = state.store.domain_dns_records(domain_id, &config).await?;
+        Some(
+            cloudflare::delete_domain_records(
+                &api_token,
+                &domain_name,
+                &records,
+                std::time::Duration::from_secs(
+                    state.config.http_request_timeout_seconds.max(5) as u64
+                ),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
     state.store.delete_domain(domain_id).await?;
+    if let Some(report) = maybe_cleanup_report {
+        state
+            .store
+            .append_audit_log(
+                "domain.cloudflare.delete",
+                "domain",
+                domain_id.to_string(),
+                Some(user.id.to_string()),
+                format!(
+                    "zone_name={} deleted_records={} missing_records={}",
+                    report.zone_name, report.deleted_records, report.missing_records,
+                ),
+            )
+            .await?;
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

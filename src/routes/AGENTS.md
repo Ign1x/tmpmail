@@ -42,6 +42,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - Update `mod.rs` whenever you add or move a route.
 - Validate UUID/path/query inputs early and keep `ApiError` response patterns consistent.
 - Admin mutations usually append audit logs.
+- Managed-domain deletion now also attempts Cloudflare DNS cleanup when the owning console user still has Cloudflare enabled with a saved token; keep that behavior in the route edge so non-frontend clients get the same cleanup.
 - `GET /admin/access-key` is read-only metadata now; only explicit create/regenerate endpoints may mint a new plaintext API key.
 - Message patch/delete must preserve realtime publish behavior.
 - Sensitive auth surfaces should keep abuse controls close to the route edge; current fixed-window throttling covers `/admin/login`, `/admin/recover`, and `/token`.

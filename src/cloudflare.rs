@@ -14,6 +14,13 @@ use crate::{
 
 const CLOUDFLARE_API_BASE: &str = "https://api.cloudflare.com/client/v4";
 
+#[derive(Clone, Debug)]
+pub struct CloudflareDnsDeleteReport {
+    pub zone_name: String,
+    pub deleted_records: usize,
+    pub missing_records: usize,
+}
+
 #[derive(Debug, Deserialize)]
 struct CloudflareEnvelope<T> {
     success: bool,
@@ -106,6 +113,47 @@ pub async fn validate_api_token(
     Ok(CloudflareTokenValidationResponse {
         zone_count: zones.len(),
         zones,
+    })
+}
+
+pub async fn delete_domain_records(
+    api_token: &str,
+    domain: &str,
+    records: &[DomainDnsRecord],
+    timeout: Duration,
+) -> AppResult<CloudflareDnsDeleteReport> {
+    let client = build_client(api_token, timeout)?;
+    let zones = list_zones(&client).await?;
+    let zone = match find_best_zone(domain, &zones) {
+        Some(zone) => zone,
+        None => {
+            return Err(ApiError::validation(format!(
+                "no Cloudflare zone available for {domain}"
+            )));
+        }
+    };
+
+    let mut deleted_records = 0usize;
+    let mut missing_records = 0usize;
+
+    for record in records {
+        let existing_records = list_dns_records(&client, &zone.id, record).await?;
+        let matching_ids = matching_record_ids(&existing_records, record)?;
+        if matching_ids.is_empty() {
+            missing_records += 1;
+            continue;
+        }
+
+        for record_id in matching_ids {
+            delete_record(&client, &zone.id, &record_id).await?;
+            deleted_records += 1;
+        }
+    }
+
+    Ok(CloudflareDnsDeleteReport {
+        zone_name: zone.name.clone(),
+        deleted_records,
+        missing_records,
     })
 }
 
@@ -337,12 +385,79 @@ async fn upsert_standard_record(
     Ok(RecordAction::Created)
 }
 
+fn matching_record_ids(
+    existing_records: &[CloudflareDnsRecord],
+    record: &DomainDnsRecord,
+) -> AppResult<Vec<String>> {
+    let matching_ids = match record.kind.as_str() {
+        "TXT" => {
+            let desired_content = normalize_dns_text(&record.value);
+            existing_records
+                .iter()
+                .filter(|existing| {
+                    normalize_dns_name(&existing.name) == normalize_dns_name(&record.name)
+                        && existing.kind == record.kind
+                        && normalize_dns_text(&existing.content) == desired_content
+                })
+                .map(|existing| existing.id.clone())
+                .collect()
+        }
+        "MX" => {
+            let (priority, content) = parse_mx_value(&record.value)?;
+            existing_records
+                .iter()
+                .filter(|existing| {
+                    normalize_dns_name(&existing.name) == normalize_dns_name(&record.name)
+                        && existing.kind == record.kind
+                        && existing.priority == Some(priority)
+                        && normalize_dns_name(&existing.content) == content
+                })
+                .map(|existing| existing.id.clone())
+                .collect()
+        }
+        "A" | "AAAA" | "CNAME" => {
+            let desired_content = match record.kind.as_str() {
+                "CNAME" => normalize_dns_name(&record.value),
+                _ => record.value.trim().to_owned(),
+            };
+            existing_records
+                .iter()
+                .filter(|existing| {
+                    normalize_dns_name(&existing.name) == normalize_dns_name(&record.name)
+                        && existing.kind == record.kind
+                        && normalize_dns_name(&existing.content)
+                            == normalize_dns_name(&desired_content)
+                })
+                .map(|existing| existing.id.clone())
+                .collect()
+        }
+        kind => {
+            return Err(ApiError::validation(format!(
+                "Cloudflare sync does not support DNS record type {kind}"
+            )));
+        }
+    };
+
+    Ok(matching_ids)
+}
+
 async fn create_record(client: &Client, zone_id: &str, body: Value) -> AppResult<()> {
     send_cloudflare_request::<Value>(
         client,
         reqwest::Method::POST,
         &format!("{CLOUDFLARE_API_BASE}/zones/{zone_id}/dns_records"),
         Some(body),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn delete_record(client: &Client, zone_id: &str, record_id: &str) -> AppResult<()> {
+    send_cloudflare_request::<Value>(
+        client,
+        reqwest::Method::DELETE,
+        &format!("{CLOUDFLARE_API_BASE}/zones/{zone_id}/dns_records/{record_id}"),
+        None,
     )
     .await?;
     Ok(())
@@ -432,4 +547,111 @@ fn normalize_dns_name(value: &str) -> String {
 
 fn normalize_dns_text(value: &str) -> String {
     value.trim().trim_matches('"').to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CloudflareDnsRecord, matching_record_ids};
+    use crate::models::DomainDnsRecord;
+
+    fn record(
+        id: &str,
+        kind: &str,
+        name: &str,
+        content: &str,
+        priority: Option<u16>,
+    ) -> CloudflareDnsRecord {
+        CloudflareDnsRecord {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            name: name.to_owned(),
+            content: content.to_owned(),
+            priority,
+        }
+    }
+
+    #[test]
+    fn matches_txt_records_by_name_and_content() {
+        let existing = vec![
+            record(
+                "txt-match",
+                "TXT",
+                "_tmpmail-verify.demo.example",
+                "\"token-1\"",
+                None,
+            ),
+            record(
+                "txt-other",
+                "TXT",
+                "_tmpmail-verify.demo.example",
+                "\"token-2\"",
+                None,
+            ),
+        ];
+        let desired = DomainDnsRecord {
+            kind: "TXT".to_owned(),
+            name: "_tmpmail-verify.demo.example".to_owned(),
+            value: "token-1".to_owned(),
+            ttl: 300,
+        };
+
+        let matching = matching_record_ids(&existing, &desired).expect("txt matching should work");
+
+        assert_eq!(matching, vec!["txt-match".to_owned()]);
+    }
+
+    #[test]
+    fn matches_mx_records_by_priority_and_target() {
+        let existing = vec![
+            record("mx-match", "MX", "demo.example", "mail.example", Some(10)),
+            record(
+                "mx-other-priority",
+                "MX",
+                "demo.example",
+                "mail.example",
+                Some(20),
+            ),
+        ];
+        let desired = DomainDnsRecord {
+            kind: "MX".to_owned(),
+            name: "demo.example".to_owned(),
+            value: "10 mail.example".to_owned(),
+            ttl: 300,
+        };
+
+        let matching = matching_record_ids(&existing, &desired).expect("mx matching should work");
+
+        assert_eq!(matching, vec!["mx-match".to_owned()]);
+    }
+
+    #[test]
+    fn matches_cname_records_case_insensitively() {
+        let existing = vec![
+            record(
+                "cname-match",
+                "CNAME",
+                "mail.demo.example",
+                "MAIL.EXAMPLE.COM.",
+                None,
+            ),
+            record(
+                "cname-other",
+                "CNAME",
+                "mail.demo.example",
+                "smtp.example.com",
+                None,
+            ),
+        ];
+        let desired = DomainDnsRecord {
+            kind: "CNAME".to_owned(),
+            name: "mail.demo.example".to_owned(),
+            value: "mail.example.com".to_owned(),
+            ttl: 300,
+        };
+
+        let matching =
+            matching_record_ids(&existing, &desired).expect("cname matching should work");
+
+        assert_eq!(matching, vec!["cname-match".to_owned()]);
+    }
 }

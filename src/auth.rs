@@ -635,7 +635,10 @@ mod tests {
             HeaderValue::from_static("198.51.100.24, 10.0.0.3"),
         );
 
-        assert_eq!(client_network_id(&headers, config.trust_proxy_headers), "unknown");
+        assert_eq!(
+            client_network_id(&headers, config.trust_proxy_headers),
+            "unknown"
+        );
     }
 
     #[test]
