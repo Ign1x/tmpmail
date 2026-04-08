@@ -43,6 +43,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
+ENV HOSTNAME=0.0.0.0
 ARG NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN=
 ARG NEXT_PUBLIC_TMPMAIL_BRAND_NAME=TmpMail
 ARG NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN=
@@ -52,10 +53,12 @@ ENV NEXT_PUBLIC_TMPMAIL_BRAND_NAME=$NEXT_PUBLIC_TMPMAIL_BRAND_NAME
 ENV NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN=$NEXT_PUBLIC_TMPMAIL_BRAND_DOMAIN
 ENV NEXT_PUBLIC_TMPMAIL_REPO_URL=$NEXT_PUBLIC_TMPMAIL_REPO_URL
 
-COPY --from=builder --chown=node:node /app ./
+COPY --from=builder --chown=node:node /app/public ./public
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
 
 EXPOSE 3000
 
 USER node
 
-CMD ["node", "node_modules/next/dist/bin/next", "start", "--hostname", "0.0.0.0", "--port", "3000"]
+CMD ["node", "server.js"]
