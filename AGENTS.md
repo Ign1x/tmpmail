@@ -30,7 +30,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 ## Where to look
 | Task | Location | Notes |
 |---|---|---|
-| Bring the stack up/down | `compose.yaml`, `scripts/dev-up.sh`, `scripts/dev-down.sh` | Default workflow is plain `docker compose`; scripts are optional local helpers |
+| Bring the stack up/down | `compose.yaml`, `scripts/dev-up.sh`, `scripts/dev-down.sh` | Default workflow is plain `docker compose`; `dev-up` can auto-create `.env`, prompt for required values, and print DNS follow-up |
 | Backend startup | `src/main.rs`, `src/app.rs` | Config, worker spawning, router assembly |
 | HTTP route map | `src/routes/mod.rs` | `api_router()` vs `stream_router()` |
 | Storage backend | `src/app_store.rs`, `src/pg_store.rs` | PostgreSQL-only business storage |
@@ -57,7 +57,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - Storage or schema changes: verify happy path plus migration/restore behavior
 
 ## Conventions
-- Prefer plain `docker compose up -d --build` / `docker compose down` for the default deployment path; `scripts/dev-up.sh` and `scripts/dev-down.sh` are optional local helpers, and `dev-up` can auto-create `.env` from `.env.example`.
+- Prefer plain `docker compose up -d --build` / `docker compose down` for the default deployment path; `scripts/dev-up.sh` and `scripts/dev-down.sh` are optional local helpers, and `dev-up` can auto-create `.env` from `.env.example`, prompt for missing required deployment values, and print DNS / Cloudflare next steps after startup.
 - `.env.example` is the source of truth for new settings. Update `README.md` when admin, JWT, transport, or deployment knobs change.
 - Env namespaces are deliberate: `TMPMAIL_*` backend/runtime plus Docker build overrides, `NEXT_PUBLIC_TMPMAIL_*` browser-visible frontend, and `INBUCKET_*` compose-internal container envs.
 - Security-sensitive envs now include `TMPMAIL_JWT_SECRET`, `TMPMAIL_ALLOW_INSECURE_DEV_SECRETS`, `TMPMAIL_ADMIN_PASSWORD`, `TMPMAIL_ADMIN_PASSWORD_MODE`, `TMPMAIL_DATABASE_URL`, `TMPMAIL_POSTGRES_PASSWORD`, `TMPMAIL_TRUST_PROXY_HEADERS`, `TMPMAIL_CONTAINER_UID`, `TMPMAIL_CONTAINER_GID`, and `TMPMAIL_POSTGRES_BIND_IP`; keep docs and compose defaults aligned when they change.
@@ -88,6 +88,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 ## Commands
 ```bash
 cp .env.example .env
+./scripts/dev-up.sh
 docker compose up -d --build
 docker compose down
 ./scripts/smoke.sh
