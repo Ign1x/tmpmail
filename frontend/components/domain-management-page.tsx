@@ -12,6 +12,7 @@ import {
 } from "react"
 import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@heroui/button"
+import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal"
 import {
   Activity,
   Check,
@@ -112,8 +113,9 @@ const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
   autoSyncEnabled: true,
 }
 const MAX_BATCH_MANAGED_DOMAINS = 50
-const RANDOM_BATCH_DOMAIN_SUFFIX_LENGTH = 6
 const MAX_BATCH_DOMAIN_PREFIX_LENGTH = 40
+const MIN_BATCH_DOMAIN_RANDOM_LENGTH = 4
+const MAX_BATCH_DOMAIN_RANDOM_LENGTH = 20
 
 const normalizeCloudflareSettings = (
   settings: ConsoleCloudflareSettings,
@@ -348,6 +350,7 @@ function isValidManagedDomainPrefix(value: string): boolean {
 function buildRandomManagedDomains(
   rootDomain: string,
   prefix: string,
+  randomLength: number,
   count: number,
   existingDomains: Set<string>,
 ): string[] {
@@ -360,7 +363,7 @@ function buildRandomManagedDomains(
 
   while (domains.length < count && attempts < maxAttempts) {
     attempts += 1
-    const randomSuffix = generateRandomUsername(RANDOM_BATCH_DOMAIN_SUFFIX_LENGTH).toLowerCase()
+    const randomSuffix = generateRandomUsername(randomLength).toLowerCase()
     const candidate = `${normalizedPrefix}-${randomSuffix}.${normalizedRootDomain}`
     if (seen.has(candidate)) {
       continue
@@ -443,8 +446,10 @@ export default function DomainManagementPage({
   const [managedDomainsLoading, setManagedDomainsLoading] = useState(false)
   const [managedDomainInput, setManagedDomainInput] = useState("")
   const [isCreatingDomain, setIsCreatingDomain] = useState(false)
+  const [isBatchDomainModalOpen, setIsBatchDomainModalOpen] = useState(false)
   const [batchDomainRootInput, setBatchDomainRootInput] = useState("")
   const [batchDomainPrefixInput, setBatchDomainPrefixInput] = useState("")
+  const [batchDomainRandomLengthInput, setBatchDomainRandomLengthInput] = useState("6")
   const [batchDomainCountInput, setBatchDomainCountInput] = useState("10")
   const [isCreatingDomainBatch, setIsCreatingDomainBatch] = useState(false)
   const [recordsByDomainId, setRecordsByDomainId] = useState<Record<string, DomainDnsRecord[]>>({})
@@ -607,6 +612,39 @@ export default function DomainManagementPage({
     () => Object.fromEntries(adminUsers.map((user) => [user.id, user])),
     [adminUsers],
   )
+  const batchRootDomainOptions = useMemo(() => {
+    const optionMap = new Map<
+      string,
+      {
+        domain: string
+        isActive: boolean
+      }
+    >()
+
+    for (const domain of managedDomains) {
+      const normalizedDomain = normalizeManagedDomainEntry(domain.domain)
+      if (normalizedDomain.split(".").filter(Boolean).length !== 2) {
+        continue
+      }
+
+      const current = optionMap.get(normalizedDomain)
+      const nextIsActive = domain.isVerified || domain.status === "active"
+      if (!current || (!current.isActive && nextIsActive)) {
+        optionMap.set(normalizedDomain, {
+          domain: normalizedDomain,
+          isActive: nextIsActive,
+        })
+      }
+    }
+
+    return Array.from(optionMap.values()).sort((left, right) => {
+      if (left.isActive !== right.isActive) {
+        return left.isActive ? -1 : 1
+      }
+
+      return left.domain.localeCompare(right.domain)
+    })
+  }, [managedDomains])
   const activeMailboxAccountsCount = mailboxAccounts.filter(
     (account) => !account.isDeleted && !account.isDisabled,
   ).length
@@ -719,9 +757,23 @@ export default function DomainManagementPage({
     setMailboxDomainInput((current) =>
       availableMailboxDomains.some((domain) => domain.domain === current)
         ? current
-        : availableMailboxDomains[0]?.domain ?? "",
+      : availableMailboxDomains[0]?.domain ?? "",
     )
   }, [availableMailboxDomains])
+
+  useEffect(() => {
+    if (!isBatchDomainModalOpen) {
+      return
+    }
+
+    setBatchDomainRootInput((current) => {
+      if (current && batchRootDomainOptions.some((option) => option.domain === current)) {
+        return current
+      }
+
+      return batchRootDomainOptions[0]?.domain ?? ""
+    })
+  }, [batchRootDomainOptions, isBatchDomainModalOpen])
 
   useEffect(() => {
     currentMailboxAccountRef.current = currentAccount
@@ -1697,18 +1749,31 @@ export default function DomainManagementPage({
     }
   }
 
-  const handleCreateRandomDomainBatch = async () => {
-    if (!hasAdminSession) {
-      return
-    }
-
-    if (!canBatchCreateManagedDomains) {
+  const handleOpenBatchDomainModal = useCallback(() => {
+    if (batchRootDomainOptions.length === 0) {
       toast({
-        title: ts("domainBatchRequiresCloudflare"),
-        description: ts("domainBatchRequiresCloudflareDesc"),
+        title: ts("domainBatchNoSecondLevelDomain"),
+        description: ts("domainBatchNoSecondLevelDomainDesc"),
         color: "warning",
         variant: "flat",
       })
+      return
+    }
+
+    setBatchDomainRootInput((current) => current || batchRootDomainOptions[0]?.domain || "")
+    setIsBatchDomainModalOpen(true)
+  }, [batchRootDomainOptions, toast, ts])
+
+  const handleCloseBatchDomainModal = useCallback(() => {
+    if (isCreatingDomainBatch) {
+      return
+    }
+
+    setIsBatchDomainModalOpen(false)
+  }, [isCreatingDomainBatch])
+
+  const handleCreateRandomDomainBatch = async () => {
+    if (!hasAdminSession) {
       return
     }
 
@@ -1727,6 +1792,16 @@ export default function DomainManagementPage({
       toast({
         title: ts("domainBatchRootInvalid"),
         description: ts("domainBatchRootInvalidDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (!canBatchCreateManagedDomains) {
+      toast({
+        title: ts("domainBatchRequiresCloudflare"),
+        description: ts("domainBatchRequiresCloudflareDesc"),
         color: "warning",
         variant: "flat",
       })
@@ -1753,6 +1828,34 @@ export default function DomainManagementPage({
         description: ts("domainBatchPrefixInvalidDesc", {
           count: MAX_BATCH_DOMAIN_PREFIX_LENGTH,
         }),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const rawRandomLength = Number(batchDomainRandomLengthInput)
+    if (
+      !Number.isInteger(rawRandomLength) ||
+      rawRandomLength < MIN_BATCH_DOMAIN_RANDOM_LENGTH ||
+      rawRandomLength > MAX_BATCH_DOMAIN_RANDOM_LENGTH
+    ) {
+      toast({
+        title: ts("domainBatchRandomLengthInvalid"),
+        description: ts("domainBatchRandomLengthInvalidDesc", {
+          min: MIN_BATCH_DOMAIN_RANDOM_LENGTH,
+          max: MAX_BATCH_DOMAIN_RANDOM_LENGTH,
+        }),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (normalizedPrefix.length + 1 + rawRandomLength > 63) {
+      toast({
+        title: ts("domainBatchPrefixTooLong"),
+        description: ts("domainBatchPrefixTooLongDesc"),
         color: "warning",
         variant: "flat",
       })
@@ -1801,6 +1904,7 @@ export default function DomainManagementPage({
     const generatedDomains = buildRandomManagedDomains(
       normalizedRootDomain,
       normalizedPrefix,
+      rawRandomLength,
       requestedCount,
       existingDomains,
     )
@@ -1876,6 +1980,7 @@ export default function DomainManagementPage({
             : "success",
         variant: "flat",
       })
+      setIsBatchDomainModalOpen(false)
     } finally {
       setIsCreatingDomainBatch(false)
     }
@@ -3722,61 +3827,27 @@ export default function DomainManagementPage({
                         classNames={TM_INPUT_CLASSNAMES}
                       />
                     </div>
-                    <IconActionButton
-                      icon={<Plus size={14} />}
-                      label={ts("addDomain")}
-                      className="bg-sky-600 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
-                      onPress={handleCreateDomain}
-                      isLoading={isCreatingDomain}
-                    />
+                    <div className="flex shrink-0 items-end gap-2 sm:self-end">
+                      <Button
+                        size="sm"
+                        className="h-10 rounded-full bg-white text-slate-700 shadow-sm ring-1 ring-slate-200 hover:bg-slate-50 dark:bg-slate-900 dark:text-slate-100 dark:ring-slate-700 dark:hover:bg-slate-800"
+                        onPress={handleOpenBatchDomainModal}
+                        startContent={<Sparkles size={14} />}
+                      >
+                        {ts("domainBatchOpenAction")}
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="h-10 rounded-full bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:text-white dark:hover:bg-sky-500"
+                        onPress={handleCreateDomain}
+                        isLoading={isCreatingDomain}
+                        startContent={<Plus size={14} />}
+                      >
+                        {ts("addDomain")}
+                      </Button>
+                    </div>
                   </div>
                 </Panel>
-
-                {canBatchCreateManagedDomains && (
-                  <Panel>
-                    <PanelHeader title={ts("domainBatchTitle")} icon={<Sparkles size={16} />} />
-                    <div className="grid gap-3 p-5 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_120px_auto] md:items-end">
-                      <Input
-                        label={ts("domainBatchRootLabel")}
-                        placeholder={ts("domainBatchRootPlaceholder")}
-                        description={ts("domainBatchRootDescription")}
-                        value={batchDomainRootInput}
-                        onValueChange={setBatchDomainRootInput}
-                        variant="bordered"
-                        size="sm"
-                        classNames={TM_INPUT_CLASSNAMES}
-                      />
-                      <Input
-                        label={ts("domainBatchPrefixLabel")}
-                        placeholder={ts("domainBatchPrefixPlaceholder")}
-                        description={ts("domainBatchPrefixDescription")}
-                        value={batchDomainPrefixInput}
-                        onValueChange={setBatchDomainPrefixInput}
-                        variant="bordered"
-                        size="sm"
-                        classNames={TM_INPUT_CLASSNAMES}
-                      />
-                      <Input
-                        label={ts("domainBatchCountLabel")}
-                        type="number"
-                        value={batchDomainCountInput}
-                        onValueChange={setBatchDomainCountInput}
-                        min={1}
-                        max={MAX_BATCH_MANAGED_DOMAINS}
-                        variant="bordered"
-                        size="sm"
-                        classNames={TM_INPUT_CLASSNAMES}
-                      />
-                      <IconActionButton
-                        icon={<Sparkles size={14} />}
-                        label={ts("domainBatchCreateAction")}
-                        className="bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-600 dark:text-white dark:hover:bg-emerald-500"
-                        onPress={handleCreateRandomDomainBatch}
-                        isLoading={isCreatingDomainBatch}
-                      />
-                    </div>
-                  </Panel>
-                )}
 
                 {/* Domain list */}
                 {managedDomains.length === 0 ? (
@@ -4272,6 +4343,114 @@ export default function DomainManagementPage({
           </div>
         </div>
       )}
+
+      <Modal
+        isOpen={isBatchDomainModalOpen}
+        onClose={handleCloseBatchDomainModal}
+        placement="center"
+        backdrop="blur"
+        size="2xl"
+        scrollBehavior="inside"
+      >
+        <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
+          <ModalHeader className="flex flex-col gap-1 border-b border-slate-200/80 px-6 pb-5 pt-6 dark:border-slate-800">
+            <div className="mb-3 flex justify-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-[1.25rem] bg-emerald-100 dark:bg-emerald-950/50">
+                <Sparkles size={24} className="text-emerald-600 dark:text-emerald-300" />
+              </div>
+            </div>
+            <h2 className="text-center text-xl font-semibold text-slate-950 dark:text-white">
+              {ts("domainBatchTitle")}
+            </h2>
+            <p className="mt-2 text-center text-sm leading-6 text-slate-500 dark:text-slate-400">
+              {ts("domainBatchDialogDescription")}
+            </p>
+          </ModalHeader>
+
+          <ModalBody className="space-y-4 px-6 py-5">
+            <Select
+              label={ts("domainBatchRootLabel")}
+              placeholder={ts("domainBatchRootPlaceholder")}
+              description={ts("domainBatchRootDescription")}
+              selectedKeys={batchDomainRootInput ? [batchDomainRootInput] : []}
+              onSelectionChange={(keys) => {
+                const [value] = Array.from(keys).map(String)
+                setBatchDomainRootInput(value ?? "")
+              }}
+              disallowEmptySelection
+            >
+              {batchRootDomainOptions.map((option) => (
+                <SelectItem key={option.domain} textValue={option.domain}>
+                  {option.domain}
+                </SelectItem>
+              ))}
+            </Select>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Input
+                label={ts("domainBatchPrefixLabel")}
+                placeholder={ts("domainBatchPrefixPlaceholder")}
+                description={ts("domainBatchPrefixDescription")}
+                value={batchDomainPrefixInput}
+                onValueChange={setBatchDomainPrefixInput}
+                variant="bordered"
+                size="sm"
+                classNames={TM_INPUT_CLASSNAMES}
+              />
+              <Input
+                label={ts("domainBatchRandomLengthLabel")}
+                type="number"
+                value={batchDomainRandomLengthInput}
+                onValueChange={setBatchDomainRandomLengthInput}
+                min={MIN_BATCH_DOMAIN_RANDOM_LENGTH}
+                max={MAX_BATCH_DOMAIN_RANDOM_LENGTH}
+                description={ts("domainBatchRandomLengthDescription", {
+                  min: MIN_BATCH_DOMAIN_RANDOM_LENGTH,
+                  max: MAX_BATCH_DOMAIN_RANDOM_LENGTH,
+                })}
+                variant="bordered"
+                size="sm"
+                classNames={TM_INPUT_CLASSNAMES}
+              />
+            </div>
+
+            <Input
+              label={ts("domainBatchCountLabel")}
+              type="number"
+              value={batchDomainCountInput}
+              onValueChange={setBatchDomainCountInput}
+              min={1}
+              max={MAX_BATCH_MANAGED_DOMAINS}
+              description={ts("domainBatchCountDescription", {
+                count: MAX_BATCH_MANAGED_DOMAINS,
+              })}
+              variant="bordered"
+              size="sm"
+              classNames={TM_INPUT_CLASSNAMES}
+            />
+
+            {!canBatchCreateManagedDomains ? (
+              <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+                {ts("domainBatchRequiresCloudflareDesc")}
+              </p>
+            ) : null}
+          </ModalBody>
+
+          <ModalFooter className="border-t border-slate-200/80 px-6 py-5 dark:border-slate-800">
+            <Button variant="flat" className="rounded-full" onPress={handleCloseBatchDomainModal}>
+              {tc("cancel")}
+            </Button>
+            <Button
+              className="rounded-full bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-500"
+              onPress={() => void handleCreateRandomDomainBatch()}
+              isLoading={isCreatingDomainBatch}
+              startContent={<Sparkles size={14} />}
+            >
+              {ts("domainBatchCreateAction")}
+            </Button>
+          </ModalFooter>
+        </ModalContent>
+      </Modal>
 
       <ConsoleActionModal
         isOpen={Boolean(actionDialog)}
