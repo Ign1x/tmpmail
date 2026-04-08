@@ -37,7 +37,7 @@
    - 如果希望前端首页、示例邮箱和品牌展示优先使用一个固定域名，可设置 `NEXT_PUBLIC_TMPMAIL_DEFAULT_DOMAIN`
 
    如果你不想先手工填这些关键部署项，也可以直接运行 `./scripts/dev-up.sh`。
-   它会先让你选择脚本提示语言，默认简体中文；当缺少 `TMPMAIL_ADMIN_PASSWORD`、`TMPMAIL_MAIL_EXCHANGE_HOST`，或还没决定 `TMPMAIL_TRUST_PROXY_HEADERS` 时，会停下来交互提问，把值写回 `.env`，然后再启动 compose，并做两层 SMTP 硬检查：先确认宿主机 `25/TCP` 是否真的发布给 `inbucket:2500` 且本机 `127.0.0.1:25` 能连通；如果第一次失败，脚本会自动对 `inbucket` 做一次 `--force-recreate` 后复检。之后再确认 `TMPMAIL_MAIL_EXCHANGE_HOST:25` 当前是否真的能建立 SMTP 连接。任一项失败，脚本都会直接报错退出，而不是把一个根本收不到公网邮件的部署误报成成功。
+   它会先让你选择脚本提示语言，默认简体中文；当缺少 `TMPMAIL_ADMIN_PASSWORD`、`TMPMAIL_MAIL_EXCHANGE_HOST`，或还没决定 `TMPMAIL_TRUST_PROXY_HEADERS` 时，会停下来交互提问，把值写回 `.env`，然后再启动 compose，并做两层 SMTP 硬检查：先确认宿主机 `25/TCP` 是否真的发布给 `inbucket:2500` 且本机 `127.0.0.1:25` 能连通；如果第一次失败，脚本会自动对 `inbucket` 做一次 `--force-recreate` 后复检。之后再确认 `TMPMAIL_MAIL_EXCHANGE_HOST:25` 当前是否真的能建立 SMTP 连接。脚本还会等待 `api` 和 `frontend` 健康就绪后才打印访问地址。任一项失败，脚本都会直接报错退出，而不是把一个根本收不到公网邮件或前端还没起来的部署误报成成功。
 
 3. 启动服务：
 

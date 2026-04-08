@@ -102,6 +102,14 @@ msg() {
     en:mx_check_next) printf '%s' "Check the following before asking external senders to retry:" ;;
     zh-CN:python_required) printf '%s' "需要先安装 python3（或提供可用的 python 命令），脚本才能做 SMTP TCP 探测。" ;;
     en:python_required) printf '%s' "python3 (or a working python command) is required for SMTP TCP probing." ;;
+    zh-CN:service_waiting) printf '%s' "等待 %s 就绪..." ;;
+    en:service_waiting) printf '%s' "Waiting for %s to become ready..." ;;
+    zh-CN:service_ready) printf '%s' "%s 已就绪。" ;;
+    en:service_ready) printf '%s' "%s is ready." ;;
+    zh-CN:service_not_ready) printf '%s' "错误：%s 在 %s 秒内仍未就绪。" ;;
+    en:service_not_ready) printf '%s' "Error: %s did not become ready within %s seconds." ;;
+    zh-CN:service_status_hint) printf '%s' "当前状态：%s" ;;
+    en:service_status_hint) printf '%s' "Current status: %s" ;;
     zh-CN:frontend_label) printf '%s' "前端" ;;
     en:frontend_label) printf '%s' "frontend" ;;
     zh-CN:admin_label) printf '%s' "管理台" ;;
@@ -518,6 +526,47 @@ verify_mail_exchange_connectivity() {
   esac
 }
 
+container_readiness_status() {
+  local container_name="$1"
+
+  docker inspect \
+    --format '{{if .State.Running}}{{if .State.Health}}{{.State.Health.Status}}{{else}}running{{end}}{{else}}{{.State.Status}}{{end}}' \
+    "$container_name" 2>/dev/null || true
+}
+
+wait_for_container_ready() {
+  local container_name="$1"
+  local label_key="$2"
+  local timeout_seconds="$3"
+  local elapsed=0
+  local status=""
+  local label
+
+  label="$(msg "$label_key")"
+  sayf service_waiting "$label"
+
+  while [ "$elapsed" -lt "$timeout_seconds" ]; do
+    status="$(trim_whitespace "$(container_readiness_status "$container_name")")"
+    case "$status" in
+      healthy|running)
+        sayf service_ready "$label"
+        return 0
+        ;;
+    esac
+
+    sleep 1
+    elapsed=$((elapsed + 1))
+  done
+
+  status="$(trim_whitespace "$(container_readiness_status "$container_name")")"
+  sayf_err service_not_ready "$label" "$timeout_seconds"
+  if [ -n "$status" ]; then
+    sayf_err service_status_hint "$status"
+  fi
+  docker compose -f "$ROOT_DIR/compose.yaml" ps "$container_name" >&2 || true
+  return 1
+}
+
 admin_password="${TMPMAIL_ADMIN_PASSWORD:-}"
 if [ -z "$admin_password" ]; then
   admin_password="$(env_read TMPMAIL_ADMIN_PASSWORD "$ENV_FILE" 2>/dev/null || true)"
@@ -573,6 +622,8 @@ if ! verify_smtp_ingress; then
   verify_smtp_ingress
 fi
 verify_mail_exchange_connectivity "$mail_exchange_host"
+wait_for_container_ready "tmpmail-api" "api_label" 60
+wait_for_container_ready "tmpmail-frontend" "frontend_label" 90
 
 frontend_port="${TMPMAIL_FRONTEND_PORT:-}"
 api_port="${TMPMAIL_PORT:-}"
