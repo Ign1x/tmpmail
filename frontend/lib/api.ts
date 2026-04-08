@@ -29,6 +29,19 @@ interface FetchDomainsFromProviderOptions {
   apiKeyOverride?: string;
 }
 
+function normalizeManagedDomainResponse(
+  domain: Domain,
+  providerId = DEFAULT_PROVIDER_ID,
+): Domain {
+  return {
+    ...domain,
+    ownerUserId: domain.ownerUserId ?? undefined,
+    verificationToken: domain.verificationToken ?? undefined,
+    verificationError: domain.verificationError ?? undefined,
+    providerId,
+  }
+}
+
 export interface AdminStatus {
   isBootstrapRequired: boolean;
   usersTotal: number;
@@ -1018,10 +1031,7 @@ export async function fetchManagedDomains(
   const data = (await res.json()) as HydraCollection<Domain>
   const domains = Array.isArray(data["hydra:member"]) ? data["hydra:member"] : []
 
-  return domains.map((domain) => ({
-    ...domain,
-    providerId,
-  }));
+  return domains.map((domain) => normalizeManagedDomainResponse(domain, providerId))
 }
 
 async function probeServiceEndpoint(
@@ -1596,10 +1606,7 @@ export async function createManagedDomain(
   await ensureAdminSessionResponse(res);
 
   const createdDomain = await res.json();
-  return {
-    ...createdDomain,
-    providerId,
-  };
+  return normalizeManagedDomainResponse(createdDomain, providerId)
 }
 
 export async function getManagedDomainRecords(
@@ -1633,10 +1640,7 @@ export async function verifyManagedDomain(
   await ensureAdminSessionResponse(res);
 
   const verifiedDomain = await res.json();
-  return {
-    ...verifiedDomain,
-    providerId,
-  };
+  return normalizeManagedDomainResponse(verifiedDomain, providerId)
 }
 
 export async function deleteManagedDomain(

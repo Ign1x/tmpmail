@@ -100,6 +100,7 @@ import MessageList from "@/components/message-list"
 import ConsoleActionModal from "@/components/console-action-modal"
 import type { Account, Domain, DomainDnsRecord, Message } from "@/types"
 import { BRAND_LABEL, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { generateRandomUsername } from "@/lib/account-credentials"
 import ThemeModeToggle from "@/components/theme-mode-toggle"
 import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
 import { Input, Select, SelectItem, Textarea } from "@/components/tm-form-fields"
@@ -110,6 +111,9 @@ const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
   apiTokenConfigured: false,
   autoSyncEnabled: true,
 }
+const MAX_BATCH_MANAGED_DOMAINS = 50
+const RANDOM_BATCH_DOMAIN_SUFFIX_LENGTH = 6
+const MAX_BATCH_DOMAIN_PREFIX_LENGTH = 40
 
 const normalizeCloudflareSettings = (
   settings: ConsoleCloudflareSettings,
@@ -329,6 +333,46 @@ function sortManagedDomains(domains: Domain[]): Domain[] {
   })
 }
 
+function normalizeManagedDomainEntry(value: string): string {
+  return value.trim().replace(/\.+$/, "").toLowerCase()
+}
+
+function normalizeManagedDomainPrefix(value: string): string {
+  return value.trim().toLowerCase()
+}
+
+function isValidManagedDomainPrefix(value: string): boolean {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(value)
+}
+
+function buildRandomManagedDomains(
+  rootDomain: string,
+  prefix: string,
+  count: number,
+  existingDomains: Set<string>,
+): string[] {
+  const normalizedRootDomain = normalizeManagedDomainEntry(rootDomain)
+  const normalizedPrefix = normalizeManagedDomainPrefix(prefix)
+  const domains: string[] = []
+  const seen = new Set(existingDomains)
+  const maxAttempts = Math.max(count * 20, 50)
+  let attempts = 0
+
+  while (domains.length < count && attempts < maxAttempts) {
+    attempts += 1
+    const randomSuffix = generateRandomUsername(RANDOM_BATCH_DOMAIN_SUFFIX_LENGTH).toLowerCase()
+    const candidate = `${normalizedPrefix}-${randomSuffix}.${normalizedRootDomain}`
+    if (seen.has(candidate)) {
+      continue
+    }
+
+    seen.add(candidate)
+    domains.push(candidate)
+  }
+
+  return domains
+}
+
 function sortMailboxAccounts(accounts: Account[]): Account[] {
   return [...accounts].sort((left, right) => left.address.localeCompare(right.address))
 }
@@ -399,6 +443,10 @@ export default function DomainManagementPage({
   const [managedDomainsLoading, setManagedDomainsLoading] = useState(false)
   const [managedDomainInput, setManagedDomainInput] = useState("")
   const [isCreatingDomain, setIsCreatingDomain] = useState(false)
+  const [batchDomainRootInput, setBatchDomainRootInput] = useState("")
+  const [batchDomainPrefixInput, setBatchDomainPrefixInput] = useState("")
+  const [batchDomainCountInput, setBatchDomainCountInput] = useState("10")
+  const [isCreatingDomainBatch, setIsCreatingDomainBatch] = useState(false)
   const [recordsByDomainId, setRecordsByDomainId] = useState<Record<string, DomainDnsRecord[]>>({})
   const [recordsLoadingById, setRecordsLoadingById] = useState<Record<string, boolean>>({})
   const [expandedDomainIds, setExpandedDomainIds] = useState<Record<string, boolean>>({})
@@ -1586,26 +1634,25 @@ export default function DomainManagementPage({
       return
     }
 
-    if (!managedDomainInput.trim()) {
+    const normalizedDomain = normalizeManagedDomainEntry(managedDomainInput)
+    if (!normalizedDomain) {
       toast({ title: ts("domainInputRequired"), color: "warning", variant: "flat" })
       return
     }
 
     setIsCreatingDomain(true)
     try {
-      const createdDomain = await createManagedDomain(
-        managedDomainInput.trim(),
-        DEFAULT_PROVIDER_ID,
-      )
+      const shouldAutoSyncDomains =
+        cloudflareSettings.enabled &&
+        cloudflareSettings.apiTokenConfigured &&
+        cloudflareSettings.autoSyncEnabled
+
+      const createdDomain = await createManagedDomain(normalizedDomain, DEFAULT_PROVIDER_ID)
       setManagedDomains((current) =>
         sortManagedDomains([createdDomain, ...current.filter((item) => item.id !== createdDomain.id)]),
       )
       setManagedDomainInput("")
-      if (
-        cloudflareSettings.enabled &&
-        cloudflareSettings.apiTokenConfigured &&
-        cloudflareSettings.autoSyncEnabled
-      ) {
+      if (shouldAutoSyncDomains) {
         const syncResult = await runCloudflareDomainSync(createdDomain, {
           silentSuccess: true,
           silentError: true,
@@ -1647,6 +1694,190 @@ export default function DomainManagementPage({
       })
     } finally {
       setIsCreatingDomain(false)
+    }
+  }
+
+  const handleCreateRandomDomainBatch = async () => {
+    if (!hasAdminSession) {
+      return
+    }
+
+    if (!canBatchCreateManagedDomains) {
+      toast({
+        title: ts("domainBatchRequiresCloudflare"),
+        description: ts("domainBatchRequiresCloudflareDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const normalizedRootDomain = normalizeManagedDomainEntry(batchDomainRootInput)
+    if (!normalizedRootDomain) {
+      toast({
+        title: ts("domainBatchRootRequired"),
+        description: ts("domainBatchRootRequiredDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (normalizedRootDomain.split(".").filter(Boolean).length < 2) {
+      toast({
+        title: ts("domainBatchRootInvalid"),
+        description: ts("domainBatchRootInvalidDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const normalizedPrefix = normalizeManagedDomainPrefix(batchDomainPrefixInput)
+    if (!normalizedPrefix) {
+      toast({
+        title: ts("domainBatchPrefixRequired"),
+        description: ts("domainBatchPrefixRequiredDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (
+      normalizedPrefix.length > MAX_BATCH_DOMAIN_PREFIX_LENGTH ||
+      !isValidManagedDomainPrefix(normalizedPrefix)
+    ) {
+      toast({
+        title: ts("domainBatchPrefixInvalid"),
+        description: ts("domainBatchPrefixInvalidDesc", {
+          count: MAX_BATCH_DOMAIN_PREFIX_LENGTH,
+        }),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const rawRequestedCount = Number(batchDomainCountInput)
+    if (!Number.isInteger(rawRequestedCount) || rawRequestedCount <= 0) {
+      toast({
+        title: ts("domainBatchCountInvalid"),
+        description: ts("domainBatchCountInvalidDesc"),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    if (rawRequestedCount > MAX_BATCH_MANAGED_DOMAINS) {
+      toast({
+        title: ts("domainBatchLimitExceeded"),
+        description: ts("domainBatchLimitExceededDesc", {
+          count: MAX_BATCH_MANAGED_DOMAINS,
+        }),
+        color: "warning",
+        variant: "flat",
+      })
+      return
+    }
+
+    const requestedCount = rawRequestedCount
+
+    if (!isAdmin && sessionInfo) {
+      const remainingDomainSlots = Math.max(sessionInfo.user.domainLimit - managedDomains.length, 0)
+      if (requestedCount > remainingDomainSlots) {
+        toast({
+          title: ts("domainBatchLimitReached"),
+          description: ts("domainBatchLimitReachedDesc", { remaining: remainingDomainSlots }),
+          color: "warning",
+          variant: "flat",
+        })
+        return
+      }
+    }
+
+    const existingDomains = new Set(managedDomains.map((domain) => domain.domain.toLowerCase()))
+    const generatedDomains = buildRandomManagedDomains(
+      normalizedRootDomain,
+      normalizedPrefix,
+      requestedCount,
+      existingDomains,
+    )
+
+    if (generatedDomains.length !== requestedCount) {
+      toast({
+        title: ts("domainBatchGenerateFailed"),
+        description: ts("domainBatchGenerateFailedDesc"),
+        color: "danger",
+        variant: "flat",
+      })
+      return
+    }
+
+    setIsCreatingDomainBatch(true)
+    try {
+      const createdDomains: Domain[] = []
+      const failedDomains: Array<{ domain: string; reason: string }> = []
+      let cloudflareSyncedCount = 0
+
+      for (const domain of generatedDomains) {
+        try {
+          const createdDomain = await createManagedDomain(domain, DEFAULT_PROVIDER_ID)
+          createdDomains.push(createdDomain)
+
+          const syncResult = await runCloudflareDomainSync(createdDomain, {
+            silentSuccess: true,
+            silentError: true,
+          })
+          if (syncResult) {
+            cloudflareSyncedCount += 1
+          }
+        } catch (error) {
+          failedDomains.push({
+            domain,
+            reason: getErrorDescription(error, ts("domainAddFailed")),
+          })
+        }
+      }
+
+      if (createdDomains.length > 0) {
+        const createdDomainNames = new Set(createdDomains.map((domain) => domain.domain.toLowerCase()))
+        setManagedDomains((current) =>
+          sortManagedDomains([
+            ...createdDomains,
+            ...current.filter((domain) => !createdDomainNames.has(domain.domain.toLowerCase())),
+          ]),
+        )
+      }
+
+      if (createdDomains.length === 0) {
+        toast({
+          title: ts("domainBatchFailed"),
+          description: failedDomains[0]?.reason ?? ts("domainAddFailed"),
+          color: "danger",
+          variant: "flat",
+        })
+        return
+      }
+
+      toast({
+        title: ts("domainBatchCreated"),
+        description: ts("domainBatchCreatedWithSyncDescription", {
+          created: createdDomains.length,
+          synced: cloudflareSyncedCount,
+          pending: createdDomains.length - cloudflareSyncedCount,
+          skipped: 0,
+          failed: failedDomains.length,
+        }),
+        color:
+          failedDomains.length > 0 || cloudflareSyncedCount < createdDomains.length
+            ? "warning"
+            : "success",
+        variant: "flat",
+      })
+    } finally {
+      setIsCreatingDomainBatch(false)
     }
   }
 
@@ -2240,6 +2471,7 @@ export default function DomainManagementPage({
   const isCloudflareSection = settingsSection === "cloudflare"
   const canRunCloudflareSync =
     cloudflareSettings.enabled && cloudflareSettings.apiTokenConfigured
+  const canBatchCreateManagedDomains = canRunCloudflareSync
   const savedSettings = useMemo(
     () => normalizeSettings(sessionInfo?.systemSettings ?? DEFAULT_SETTINGS),
     [normalizeSettings, sessionInfo?.systemSettings],
@@ -3482,6 +3714,7 @@ export default function DomainManagementPage({
                       <Input
                         label={ts("domainInputLabel")}
                         placeholder={ts("domainInputPlaceholder")}
+                        description={ts("domainInputDescription")}
                         value={managedDomainInput}
                         onValueChange={setManagedDomainInput}
                         variant="bordered"
@@ -3498,6 +3731,52 @@ export default function DomainManagementPage({
                     />
                   </div>
                 </Panel>
+
+                {canBatchCreateManagedDomains && (
+                  <Panel>
+                    <PanelHeader title={ts("domainBatchTitle")} icon={<Sparkles size={16} />} />
+                    <div className="grid gap-3 p-5 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_120px_auto] md:items-end">
+                      <Input
+                        label={ts("domainBatchRootLabel")}
+                        placeholder={ts("domainBatchRootPlaceholder")}
+                        description={ts("domainBatchRootDescription")}
+                        value={batchDomainRootInput}
+                        onValueChange={setBatchDomainRootInput}
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                      <Input
+                        label={ts("domainBatchPrefixLabel")}
+                        placeholder={ts("domainBatchPrefixPlaceholder")}
+                        description={ts("domainBatchPrefixDescription")}
+                        value={batchDomainPrefixInput}
+                        onValueChange={setBatchDomainPrefixInput}
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                      <Input
+                        label={ts("domainBatchCountLabel")}
+                        type="number"
+                        value={batchDomainCountInput}
+                        onValueChange={setBatchDomainCountInput}
+                        min={1}
+                        max={MAX_BATCH_MANAGED_DOMAINS}
+                        variant="bordered"
+                        size="sm"
+                        classNames={TM_INPUT_CLASSNAMES}
+                      />
+                      <IconActionButton
+                        icon={<Sparkles size={14} />}
+                        label={ts("domainBatchCreateAction")}
+                        className="bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-600 dark:text-white dark:hover:bg-emerald-500"
+                        onPress={handleCreateRandomDomainBatch}
+                        isLoading={isCreatingDomainBatch}
+                      />
+                    </div>
+                  </Panel>
+                )}
 
                 {/* Domain list */}
                 {managedDomains.length === 0 ? (
@@ -3556,7 +3835,7 @@ export default function DomainManagementPage({
                             </div>
                           </div>
 
-                          {domain.verificationError && (
+                          {!domain.isVerified && domain.verificationError && (
                             <div className="mt-2 text-xs text-red-600 dark:text-red-400">
                               {ts("lastVerificationError")}: {domain.verificationError}
                             </div>
