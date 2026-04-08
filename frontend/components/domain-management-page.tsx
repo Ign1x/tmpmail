@@ -1752,63 +1752,69 @@ export default function DomainManagementPage({
     }
   }
 
-  const loadBatchCloudflareZones = useCallback(async () => {
-    const requestId = batchCloudflareZoneRequestIdRef.current + 1
-    batchCloudflareZoneRequestIdRef.current = requestId
+  const loadBatchCloudflareZones = useCallback(
+    async (settingsOverride?: ConsoleCloudflareSettings) => {
+      const effectiveSettings = normalizeCloudflareSettings(
+        settingsOverride ?? cloudflareSettings,
+      )
+      const requestId = batchCloudflareZoneRequestIdRef.current + 1
+      batchCloudflareZoneRequestIdRef.current = requestId
 
-    if (!cloudflareSettings.apiTokenConfigured) {
-      if (batchCloudflareZoneRequestIdRef.current === requestId) {
-        setCloudflareZoneOptions([])
-        setCloudflareZonesRequireApiUpdate(false)
-        setCloudflareZonesLoading(false)
+      if (!effectiveSettings.apiTokenConfigured) {
+        if (batchCloudflareZoneRequestIdRef.current === requestId) {
+          setCloudflareZoneOptions([])
+          setCloudflareZonesRequireApiUpdate(false)
+          setCloudflareZonesLoading(false)
+        }
+        return []
       }
-      return []
-    }
 
-    setCloudflareZonesLoading(true)
-    try {
-      const response = await testConsoleCloudflareToken(undefined, DEFAULT_PROVIDER_ID)
-      const zones = Array.from(
-        new Set(
-          (response.zones ?? [])
-            .map(normalizeManagedDomainEntry)
-            .filter(Boolean),
-        ),
-      ).sort((left, right) => left.localeCompare(right))
-      const requiresApiUpdate = response.zoneCount > 0 && zones.length === 0
-      if (batchCloudflareZoneRequestIdRef.current !== requestId) {
+      setCloudflareZonesLoading(true)
+      try {
+        const response = await testConsoleCloudflareToken(undefined, DEFAULT_PROVIDER_ID)
+        const zones = Array.from(
+          new Set(
+            (response.zones ?? [])
+              .map(normalizeManagedDomainEntry)
+              .filter(Boolean),
+          ),
+        ).sort((left, right) => left.localeCompare(right))
+        const requiresApiUpdate = response.zoneCount > 0 && zones.length === 0
+        if (batchCloudflareZoneRequestIdRef.current !== requestId) {
+          return zones
+        }
+
+        setCloudflareZonesRequireApiUpdate(requiresApiUpdate)
+        setCloudflareZoneOptions(zones)
+        if (requiresApiUpdate) {
+          toast({
+            title: ts("cloudflareZoneApiOutdated"),
+            description: ts("cloudflareZoneApiOutdatedDesc"),
+            color: "warning",
+            variant: "flat",
+          })
+        }
         return zones
+      } catch (error) {
+        if (batchCloudflareZoneRequestIdRef.current === requestId) {
+          setCloudflareZoneOptions([])
+          setCloudflareZonesRequireApiUpdate(false)
+          toast({
+            title: ts("cloudflareZoneLoadFailed"),
+            description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
+            color: "warning",
+            variant: "flat",
+          })
+        }
+        return []
+      } finally {
+        if (batchCloudflareZoneRequestIdRef.current === requestId) {
+          setCloudflareZonesLoading(false)
+        }
       }
-
-      setCloudflareZonesRequireApiUpdate(requiresApiUpdate)
-      setCloudflareZoneOptions(zones)
-      if (requiresApiUpdate) {
-        toast({
-          title: ts("cloudflareZoneApiOutdated"),
-          description: ts("cloudflareZoneApiOutdatedDesc"),
-          color: "warning",
-          variant: "flat",
-        })
-      }
-      return zones
-    } catch (error) {
-      if (batchCloudflareZoneRequestIdRef.current === requestId) {
-        setCloudflareZoneOptions([])
-        setCloudflareZonesRequireApiUpdate(false)
-        toast({
-          title: ts("cloudflareZoneLoadFailed"),
-          description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
-          color: "warning",
-          variant: "flat",
-        })
-      }
-      return []
-    } finally {
-      if (batchCloudflareZoneRequestIdRef.current === requestId) {
-        setCloudflareZonesLoading(false)
-      }
-    }
-  }, [cloudflareSettings.apiTokenConfigured, toast, ts])
+    },
+    [cloudflareSettings, toast, ts],
+  )
 
   const handleOpenBatchDomainModal = useCallback(() => {
     setCloudflareZoneOptions([])
@@ -1832,8 +1838,44 @@ export default function DomainManagementPage({
       return
     }
 
-    void loadBatchCloudflareZones()
-  }, [isBatchDomainModalOpen, loadBatchCloudflareZones])
+    let cancelled = false
+
+    void (async () => {
+      try {
+        const latestCloudflareSettings = await fetchConsoleCloudflareSettings(
+          DEFAULT_PROVIDER_ID,
+        )
+        if (cancelled) {
+          return
+        }
+
+        applyCloudflareSettings(latestCloudflareSettings)
+        await loadBatchCloudflareZones(latestCloudflareSettings)
+      } catch (error) {
+        if (cancelled) {
+          return
+        }
+
+        toast({
+          title: ta("cloudflareLoadFailed"),
+          description: getErrorDescription(error, ta("cloudflareLoadFailedDescription")),
+          color: "warning",
+          variant: "flat",
+        })
+        await loadBatchCloudflareZones()
+      }
+    })()
+
+    return () => {
+      cancelled = true
+    }
+  }, [
+    applyCloudflareSettings,
+    isBatchDomainModalOpen,
+    loadBatchCloudflareZones,
+    ta,
+    toast,
+  ])
 
   const handleCreateRandomDomainBatch = async () => {
     if (!hasAdminSession) {
