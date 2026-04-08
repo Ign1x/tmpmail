@@ -338,7 +338,7 @@
     "cloudflareZoneLoadFailedDesc": "Unable to read the zones accessible by the current token. Check whether the token is still valid.",
     "cloudflareZoneRefresh": "Refresh Cloudflare zones",
     "cloudflareZoneApiOutdated": "The API version is outdated",
-    "cloudflareZoneApiOutdatedDesc": "The current backend only returns the zone count, not the full zone list. Redeploy and rebuild the API container, then refresh this dialog.",
+    "cloudflareZoneApiOutdatedDesc": "The current backend only returns the zone count, not the full zone list. Redeploy and rebuild the API container, then reopen this dialog.",
     "domainBatchRootRequired": "Root domain is required",
     "domainBatchRootRequiredDesc": "For example, enter fuckcyh.de and TmpMail will generate third-level domains like app-abc123.fuckcyh.de.",
     "domainBatchRootInvalid": "Invalid root domain format",

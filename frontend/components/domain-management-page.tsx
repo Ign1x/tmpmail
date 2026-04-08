@@ -539,6 +539,7 @@ export default function DomainManagementPage({
   const hasLoadedOpsRef = useRef(false)
   const hasLoadedAccessKeysRef = useRef(false)
   const hasLoadedCloudflareSettingsRef = useRef(false)
+  const batchCloudflareZoneRequestIdRef = useRef(0)
   const isMountedRef = useRef(true)
   const hasClientSession = useSyncExternalStore(
     subscribeToAdminSession,
@@ -1752,9 +1753,15 @@ export default function DomainManagementPage({
   }
 
   const loadBatchCloudflareZones = useCallback(async () => {
+    const requestId = batchCloudflareZoneRequestIdRef.current + 1
+    batchCloudflareZoneRequestIdRef.current = requestId
+
     if (!cloudflareSettings.apiTokenConfigured) {
-      setCloudflareZoneOptions([])
-      setCloudflareZonesRequireApiUpdate(false)
+      if (batchCloudflareZoneRequestIdRef.current === requestId) {
+        setCloudflareZoneOptions([])
+        setCloudflareZonesRequireApiUpdate(false)
+        setCloudflareZonesLoading(false)
+      }
       return []
     }
 
@@ -1769,6 +1776,10 @@ export default function DomainManagementPage({
         ),
       ).sort((left, right) => left.localeCompare(right))
       const requiresApiUpdate = response.zoneCount > 0 && zones.length === 0
+      if (batchCloudflareZoneRequestIdRef.current !== requestId) {
+        return zones
+      }
+
       setCloudflareZonesRequireApiUpdate(requiresApiUpdate)
       setCloudflareZoneOptions(zones)
       if (requiresApiUpdate) {
@@ -1781,32 +1792,48 @@ export default function DomainManagementPage({
       }
       return zones
     } catch (error) {
-      setCloudflareZoneOptions([])
-      setCloudflareZonesRequireApiUpdate(false)
-      toast({
-        title: ts("cloudflareZoneLoadFailed"),
-        description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
-        color: "warning",
-        variant: "flat",
-      })
+      if (batchCloudflareZoneRequestIdRef.current === requestId) {
+        setCloudflareZoneOptions([])
+        setCloudflareZonesRequireApiUpdate(false)
+        toast({
+          title: ts("cloudflareZoneLoadFailed"),
+          description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
+          color: "warning",
+          variant: "flat",
+        })
+      }
       return []
     } finally {
-      setCloudflareZonesLoading(false)
+      if (batchCloudflareZoneRequestIdRef.current === requestId) {
+        setCloudflareZonesLoading(false)
+      }
     }
   }, [cloudflareSettings.apiTokenConfigured, toast, ts])
 
   const handleOpenBatchDomainModal = useCallback(() => {
+    setCloudflareZoneOptions([])
+    setCloudflareZonesRequireApiUpdate(false)
+    setCloudflareZonesLoading(true)
     setIsBatchDomainModalOpen(true)
-    void loadBatchCloudflareZones()
-  }, [loadBatchCloudflareZones])
+  }, [])
 
   const handleCloseBatchDomainModal = useCallback(() => {
     if (isCreatingDomainBatch) {
       return
     }
 
+    batchCloudflareZoneRequestIdRef.current += 1
+    setCloudflareZonesLoading(false)
     setIsBatchDomainModalOpen(false)
   }, [isCreatingDomainBatch])
+
+  useEffect(() => {
+    if (!isBatchDomainModalOpen) {
+      return
+    }
+
+    void loadBatchCloudflareZones()
+  }, [isBatchDomainModalOpen, loadBatchCloudflareZones])
 
   const handleCreateRandomDomainBatch = async () => {
     if (!hasAdminSession) {
@@ -4579,7 +4606,7 @@ export default function DomainManagementPage({
         size="2xl"
         scrollBehavior="inside"
       >
-        <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
+          <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
           <ModalHeader className="flex flex-col gap-1 border-b border-slate-200/80 px-6 pb-5 pt-6 dark:border-slate-800">
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1" />
@@ -4588,13 +4615,7 @@ export default function DomainManagementPage({
                   <Sparkles size={24} className="text-emerald-600 dark:text-emerald-300" />
                 </div>
               </div>
-              <IconActionButton
-                icon={<RefreshCw size={14} />}
-                label={ts("cloudflareZoneRefresh")}
-                tooltip={ts("cloudflareZoneRefresh")}
-                onPress={() => void loadBatchCloudflareZones()}
-                isLoading={cloudflareZonesLoading}
-              />
+              <div className="flex-1" />
             </div>
             <h2 className="text-center text-xl font-semibold text-slate-950 dark:text-white">
               {ts("domainBatchTitle")}
@@ -4630,6 +4651,8 @@ export default function DomainManagementPage({
                 title={
                   cloudflareZonesLoading
                     ? ts("cloudflareZoneLoading")
+                    : !canBatchCreateManagedDomains
+                      ? ts("domainBatchRequiresCloudflare")
                     : cloudflareZonesRequireApiUpdate
                       ? ts("cloudflareZoneApiOutdated")
                     : ts("domainBatchNoSecondLevelDomain")
@@ -4637,6 +4660,8 @@ export default function DomainManagementPage({
                 description={
                   cloudflareZonesLoading
                     ? ts("cloudflareZoneLoadingDesc")
+                    : !canBatchCreateManagedDomains
+                      ? ts("domainBatchRequiresCloudflareDesc")
                     : cloudflareZonesRequireApiUpdate
                       ? ts("cloudflareZoneApiOutdatedDesc")
                     : ts("domainBatchNoSecondLevelDomainDesc")
