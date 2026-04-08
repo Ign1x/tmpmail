@@ -1,7 +1,9 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use std::{env, fs, io::ErrorKind, net::IpAddr};
 
 use reqwest::Url;
+
+use crate::models::{SmtpSecurity, default_smtp_port_for_security};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AdminPasswordMode {
@@ -52,7 +54,7 @@ pub struct Config {
     pub smtp_password: Option<String>,
     pub smtp_from_address: Option<String>,
     pub smtp_from_name: Option<String>,
-    pub smtp_starttls: bool,
+    pub smtp_security: SmtpSecurity,
     pub linux_do_client_secret: Option<String>,
 }
 
@@ -99,7 +101,7 @@ impl Default for Config {
             smtp_password: None,
             smtp_from_address: None,
             smtp_from_name: None,
-            smtp_starttls: true,
+            smtp_security: SmtpSecurity::Starttls,
             linux_do_client_secret: None,
         }
     }
@@ -260,10 +262,27 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
+        let smtp_security = env::var("TMPMAIL_SMTP_SECURITY")
+            .ok()
+            .map(|value| parse_smtp_security(&value))
+            .transpose()?
+            .or_else(|| {
+                env::var("TMPMAIL_SMTP_STARTTLS")
+                    .ok()
+                    .and_then(|value| parse_bool(&value))
+                    .map(|enabled| {
+                        if enabled {
+                            SmtpSecurity::Starttls
+                        } else {
+                            SmtpSecurity::Plain
+                        }
+                    })
+            })
+            .unwrap_or(defaults.smtp_security);
         let smtp_port = env::var("TMPMAIL_SMTP_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
-            .unwrap_or(defaults.smtp_port)
+            .unwrap_or_else(|| default_smtp_port_for_security(smtp_security))
             .clamp(1, u16::MAX);
         let smtp_username = env::var("TMPMAIL_SMTP_USERNAME")
             .ok()
@@ -278,10 +297,6 @@ impl Config {
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty());
-        let smtp_starttls = env::var("TMPMAIL_SMTP_STARTTLS")
-            .ok()
-            .and_then(|value| parse_bool(&value))
-            .unwrap_or(defaults.smtp_starttls);
         let linux_do_client_secret = read_optional_secret("TMPMAIL_LINUX_DO_CLIENT_SECRET")?;
 
         let config = Self {
@@ -325,7 +340,7 @@ impl Config {
             smtp_password,
             smtp_from_address,
             smtp_from_name,
-            smtp_starttls,
+            smtp_security,
             linux_do_client_secret,
         };
         config.validate_runtime_security()?;
@@ -528,6 +543,17 @@ fn parse_bool(value: &str) -> Option<bool> {
     }
 }
 
+fn parse_smtp_security(value: &str) -> Result<SmtpSecurity> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "plain" | "none" | "off" => Ok(SmtpSecurity::Plain),
+        "starttls" => Ok(SmtpSecurity::Starttls),
+        "tls" | "ssl" | "smtps" | "wrapper" | "implicit" | "implicit-tls" => Ok(SmtpSecurity::Tls),
+        other => bail!(
+            "invalid TMPMAIL_SMTP_SECURITY value: {other}; expected one of plain, starttls, tls"
+        ),
+    }
+}
+
 fn parse_admin_password_mode(value: &str) -> Result<AdminPasswordMode> {
     match value.trim().to_ascii_lowercase().as_str() {
         "disabled" => Ok(AdminPasswordMode::Disabled),
@@ -640,9 +666,9 @@ fn normalize_txt_prefix(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_bundled_postgres_url, looks_like_placeholder_secret, normalize_txt_prefix,
-        parse_admin_password_mode, parse_bool, parse_csv, read_optional_secret_file,
-        resolve_database_url, validate_required_admin_password, AdminPasswordMode, Config,
+        AdminPasswordMode, Config, build_bundled_postgres_url, looks_like_placeholder_secret,
+        normalize_txt_prefix, parse_admin_password_mode, parse_bool, parse_csv,
+        read_optional_secret_file, resolve_database_url, validate_required_admin_password,
     };
     use reqwest::Url;
     use std::{

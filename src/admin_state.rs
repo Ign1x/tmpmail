@@ -17,10 +17,11 @@ use crate::{
     config::Config,
     error::{ApiError, AppResult},
     models::{
-        AdminAccessKey, AdminEmailOtpSettings, AdminRegistrationSettings, AdminSystemSettings,
-        AdminUserLimitsSettings, ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole,
-        LinuxDoAuthSettings, LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
-        PublicUpdateNoticeSection,
+        AdminAccessKey, AdminEmailOtpSettings, AdminRegistrationSettings, AdminSmtpSettings,
+        AdminSystemSettings, AdminUserLimitsSettings, ConsoleCloudflareSettings, ConsoleUser,
+        ConsoleUserRole, LinuxDoAuthSettings, LocalizedUpdateNoticeContent, PublicNoticeTone,
+        PublicUpdateNotice, PublicUpdateNoticeSection, SmtpSecurity,
+        default_smtp_port_for_security,
     },
     state::AppState,
 };
@@ -58,6 +59,8 @@ struct PersistedSystemSettings {
     mail_route_target: Option<String>,
     #[serde(default)]
     domain_txt_prefix: Option<String>,
+    #[serde(default)]
+    smtp: PersistedSmtpSettings,
     #[serde(default = "default_registration_settings")]
     registration_settings: AdminRegistrationSettings,
     #[serde(default = "default_user_limits_settings")]
@@ -73,11 +76,33 @@ impl Default for PersistedSystemSettings {
             mail_exchange_host: None,
             mail_route_target: None,
             domain_txt_prefix: None,
+            smtp: PersistedSmtpSettings::default(),
             registration_settings: default_registration_settings(),
             user_limits: default_user_limits_settings(),
             update_notice: default_public_update_notice(),
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct PersistedSmtpSettings {
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default, skip_serializing)]
+    password: Option<String>,
+    #[serde(default)]
+    from_address: Option<String>,
+    #[serde(default)]
+    from_name: Option<String>,
+    #[serde(default)]
+    security: Option<SmtpSecurity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    starttls: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -203,6 +228,14 @@ impl PersistedAdminState {
             .linux_do
             .client_secret = client_secret;
     }
+
+    fn smtp_password(&self) -> Option<String> {
+        self.system_settings.smtp.password.clone()
+    }
+
+    fn apply_smtp_password(&mut self, smtp_password: Option<String>) {
+        self.system_settings.smtp.password = smtp_password;
+    }
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -210,9 +243,10 @@ struct AdminStateRow {
     state: Json<PersistedAdminState>,
     cloudflare_tokens: Json<BTreeMap<String, String>>,
     linux_do_client_secret: Option<String>,
+    smtp_password: Option<String>,
 }
 
-fn redact_cloudflare_tokens_for_serialization(
+fn redact_sensitive_admin_state_for_serialization(
     persisted: &PersistedAdminState,
 ) -> PersistedAdminState {
     let mut serialized = persisted.clone();
@@ -224,6 +258,7 @@ fn redact_cloudflare_tokens_for_serialization(
         .registration_settings
         .linux_do
         .client_secret = None;
+    serialized.system_settings.smtp.password = None;
 
     serialized
 }
@@ -291,6 +326,7 @@ impl AdminStateStore {
             mail_exchange_host: self.persisted.system_settings.mail_exchange_host.clone(),
             mail_route_target: self.persisted.system_settings.mail_route_target.clone(),
             domain_txt_prefix: self.persisted.system_settings.domain_txt_prefix.clone(),
+            smtp: self.persisted.system_settings.smtp.to_public(),
             registration_settings,
             user_limits: self.persisted.system_settings.user_limits.clone(),
             update_notice: self.persisted.system_settings.update_notice.clone(),
@@ -306,6 +342,7 @@ impl AdminStateStore {
         });
         settings.domain_txt_prefix =
             normalize_txt_prefix_setting(Some(config.domain_txt_prefix.as_str()));
+        settings.smtp = smtp_settings_from_config(config);
 
         settings
     }
@@ -375,6 +412,36 @@ impl AdminStateStore {
         ) {
             config.domain_txt_prefix = value.to_owned();
         }
+
+        if let Some(value) = normalize_optional_hostname_or_ip_setting_lossy(
+            self.persisted.system_settings.smtp.host.as_deref(),
+        ) {
+            config.smtp_host = Some(value);
+        }
+        if let Some(value) = self.persisted.system_settings.smtp.port {
+            config.smtp_port = value.clamp(1, u16::MAX);
+        }
+        if let Some(value) =
+            normalize_optional_copy(self.persisted.system_settings.smtp.username.clone())
+        {
+            config.smtp_username = Some(value);
+        }
+        if let Some(value) =
+            normalize_optional_copy(self.persisted.system_settings.smtp.password.clone())
+        {
+            config.smtp_password = Some(value);
+        }
+        if let Some(value) =
+            normalize_optional_copy(self.persisted.system_settings.smtp.from_address.clone())
+        {
+            config.smtp_from_address = Some(value);
+        }
+        if let Some(value) =
+            normalize_optional_copy(self.persisted.system_settings.smtp.from_name.clone())
+        {
+            config.smtp_from_name = Some(value);
+        }
+        config.smtp_security = self.persisted.system_settings.smtp.security();
     }
 
     pub fn bootstrap_first_admin(
@@ -996,6 +1063,7 @@ impl AdminStateStore {
         mail_exchange_host: Option<&str>,
         mail_route_target: Option<&str>,
         domain_txt_prefix: Option<&str>,
+        smtp: Option<AdminSmtpSettings>,
         registration_settings: Option<AdminRegistrationSettings>,
         user_limits: Option<AdminUserLimitsSettings>,
         update_notice: Option<PublicUpdateNotice>,
@@ -1015,6 +1083,10 @@ impl AdminStateStore {
         if let Some(value) = domain_txt_prefix {
             self.persisted.system_settings.domain_txt_prefix =
                 normalize_txt_prefix_setting(Some(value));
+        }
+        if let Some(value) = smtp {
+            self.persisted.system_settings.smtp =
+                normalize_smtp_settings(value, Some(&self.persisted.system_settings.smtp))?;
         }
         if let Some(value) = registration_settings {
             self.persisted.system_settings.registration_settings = normalize_registration_settings(
@@ -1229,7 +1301,7 @@ impl PgAdminStateBackend {
     async fn load_state(&self) -> anyhow::Result<PersistedAdminState> {
         let row = sqlx::query_as::<_, AdminStateRow>(
             r#"
-            SELECT state, cloudflare_tokens, linux_do_client_secret
+            SELECT state, cloudflare_tokens, linux_do_client_secret, smtp_password
             FROM admin_state_store
             WHERE id = TRUE
             "#,
@@ -1242,6 +1314,7 @@ impl PgAdminStateBackend {
             let mut persisted = row.state.0;
             persisted.apply_cloudflare_tokens(&row.cloudflare_tokens.0);
             persisted.apply_linux_do_client_secret(row.linux_do_client_secret);
+            persisted.apply_smtp_password(row.smtp_password);
             return Ok(persisted);
         }
 
@@ -1263,9 +1336,10 @@ impl PgAdminStateBackend {
                     ApiError::internal(format!("failed to build admin state runtime: {error}"))
                 })?
                 .block_on(async move {
-                    let serialized = redact_cloudflare_tokens_for_serialization(&persisted);
+                    let serialized = redact_sensitive_admin_state_for_serialization(&persisted);
                     let cloudflare_tokens = persisted.cloudflare_tokens_map();
                     let linux_do_client_secret = persisted.linux_do_client_secret();
+                    let smtp_password = persisted.smtp_password();
                     let mut connection =
                         PgConnection::connect(&database_url).await.map_err(|error| {
                             ApiError::internal(format!(
@@ -1275,15 +1349,16 @@ impl PgAdminStateBackend {
 
                     sqlx::query(
                         r#"
-                        INSERT INTO admin_state_store (id, state, cloudflare_tokens, linux_do_client_secret, updated_at)
-                        VALUES (TRUE, $1, $2, $3, NOW())
+                        INSERT INTO admin_state_store (id, state, cloudflare_tokens, linux_do_client_secret, smtp_password, updated_at)
+                        VALUES (TRUE, $1, $2, $3, $4, NOW())
                         ON CONFLICT (id)
-                        DO UPDATE SET state = EXCLUDED.state, cloudflare_tokens = EXCLUDED.cloudflare_tokens, linux_do_client_secret = EXCLUDED.linux_do_client_secret, updated_at = NOW()
+                        DO UPDATE SET state = EXCLUDED.state, cloudflare_tokens = EXCLUDED.cloudflare_tokens, linux_do_client_secret = EXCLUDED.linux_do_client_secret, smtp_password = EXCLUDED.smtp_password, updated_at = NOW()
                         "#,
                     )
                     .bind(Json(&serialized))
                     .bind(Json(&cloudflare_tokens))
                     .bind(linux_do_client_secret)
+                    .bind(smtp_password)
                     .execute(&mut connection)
                     .await
                     .map_err(|error| {
@@ -1390,6 +1465,35 @@ pub(crate) fn default_email_otp_subject() -> String {
 
 pub(crate) fn default_email_otp_body() -> String {
     "Your TmpMail verification code is {{code}}. It expires in {{ttlSeconds}} seconds.".to_owned()
+}
+
+fn default_smtp_settings() -> AdminSmtpSettings {
+    AdminSmtpSettings {
+        host: None,
+        port: default_smtp_port_for_security(SmtpSecurity::Starttls),
+        username: None,
+        password: None,
+        password_configured: false,
+        from_address: None,
+        from_name: None,
+        security: SmtpSecurity::Starttls,
+    }
+}
+
+fn smtp_settings_from_config(config: &Config) -> AdminSmtpSettings {
+    let mut settings = default_smtp_settings();
+    settings.host = config.smtp_host.clone();
+    settings.port = config.smtp_port;
+    settings.username = config.smtp_username.clone();
+    settings.password_configured = config
+        .smtp_password
+        .as_deref()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false);
+    settings.from_address = config.smtp_from_address.clone();
+    settings.from_name = config.smtp_from_name.clone();
+    settings.security = config.smtp_security;
+    settings
 }
 
 fn default_linux_do_auth_settings() -> LinuxDoAuthSettings {
@@ -1653,6 +1757,28 @@ fn normalize_registration_settings(
         allowed_email_suffixes,
         email_otp,
         linux_do,
+    })
+}
+
+fn normalize_smtp_settings(
+    value: AdminSmtpSettings,
+    existing: Option<&PersistedSmtpSettings>,
+) -> AppResult<PersistedSmtpSettings> {
+    let security = value.security;
+    Ok(PersistedSmtpSettings {
+        host: normalize_optional_hostname_or_ip_setting(value.host.as_deref())?,
+        port: Some(value.port.clamp(1, u16::MAX)),
+        username: normalize_optional_copy(value.username),
+        password: normalize_optional_copy(value.password).or_else(|| {
+            value
+                .password_configured
+                .then(|| existing.and_then(|settings| settings.password.clone()))
+                .flatten()
+        }),
+        from_address: normalize_optional_copy(value.from_address),
+        from_name: normalize_optional_copy(value.from_name),
+        security: Some(security),
+        starttls: Some(matches!(security, SmtpSecurity::Starttls)),
     })
 }
 
@@ -2027,6 +2153,34 @@ impl PersistedCloudflareSettings {
     }
 }
 
+impl PersistedSmtpSettings {
+    fn security(&self) -> SmtpSecurity {
+        self.security.unwrap_or_else(|| match self.starttls {
+            Some(true) => SmtpSecurity::Starttls,
+            Some(false) => SmtpSecurity::Plain,
+            None => SmtpSecurity::Starttls,
+        })
+    }
+
+    fn to_public(&self) -> AdminSmtpSettings {
+        let mut settings = default_smtp_settings();
+        settings.host = self.host.clone();
+        settings.security = self.security();
+        settings.port = self
+            .port
+            .unwrap_or_else(|| default_smtp_port_for_security(settings.security));
+        settings.username = self.username.clone();
+        settings.password_configured = self
+            .password
+            .as_deref()
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+        settings.from_address = self.from_address.clone();
+        settings.from_name = self.from_name.clone();
+        settings
+    }
+}
+
 impl PersistedConsoleUser {
     fn session_version(&self) -> i64 {
         self.password_updated_at.timestamp_millis()
@@ -2068,6 +2222,7 @@ mod tests {
     use super::AdminStateStore;
     use crate::{
         config::Config,
+        models::{AdminSmtpSettings, SmtpSecurity},
         test_support::{TestDatabase, attach_test_database},
     };
 
@@ -2098,6 +2253,24 @@ mod tests {
                     .expect("load stored admin state");
                 let state: Value = row.try_get("state").expect("decode stored state");
                 serde_json::to_string(&state).expect("serialize stored state")
+            })
+    }
+
+    fn stored_smtp_password(database: &TestDatabase) -> Option<String> {
+        Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async {
+                let mut connection = PgConnection::connect(database.url())
+                    .await
+                    .expect("connect admin state database");
+                let row =
+                    sqlx::query("SELECT smtp_password FROM admin_state_store WHERE id = TRUE")
+                        .fetch_one(&mut connection)
+                        .await
+                        .expect("load smtp password");
+                row.try_get("smtp_password").expect("decode smtp password")
             })
     }
 
@@ -2142,5 +2315,59 @@ mod tests {
         assert_eq!(notice.version, "2026-01-16-storage-upgrade");
         assert_eq!(notice.zh.title, "系统更新通知");
         assert_eq!(notice.en.title, "System Update Notice");
+    }
+
+    #[test]
+    fn smtp_password_is_redacted_from_state_json_and_restored_separately() {
+        let (mut store, database) = load_store("smtp-settings");
+        let smtp_password = "smtp-secret-123";
+
+        store
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                Some(AdminSmtpSettings {
+                    host: Some("smtp.example.com".to_owned()),
+                    port: 587,
+                    username: Some("mailer".to_owned()),
+                    password: Some(smtp_password.to_owned()),
+                    password_configured: false,
+                    from_address: Some("no-reply@example.com".to_owned()),
+                    from_name: Some("TmpMail".to_owned()),
+                    security: SmtpSecurity::Starttls,
+                }),
+                None,
+                None,
+                None,
+            )
+            .expect("save smtp settings");
+
+        let raw = stored_admin_state_json(&database);
+        assert!(!raw.contains(smtp_password));
+        assert_eq!(
+            stored_smtp_password(&database).as_deref(),
+            Some(smtp_password)
+        );
+
+        let mut config = Config::default();
+        config.database_url = database.url().to_owned();
+        let reloaded = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build runtime")
+            .block_on(async { AdminStateStore::load(&config).await.expect("reload state") });
+        reloaded.apply_runtime_overrides(&mut config);
+
+        assert_eq!(config.smtp_host.as_deref(), Some("smtp.example.com"));
+        assert_eq!(config.smtp_password.as_deref(), Some(smtp_password));
+        assert_eq!(
+            reloaded
+                .effective_system_settings(&config)
+                .smtp
+                .password_configured,
+            true
+        );
     }
 }

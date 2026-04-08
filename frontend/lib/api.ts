@@ -71,6 +71,7 @@ export interface AdminSystemSettings {
   mailExchangeHost?: string
   mailRouteTarget?: string
   domainTxtPrefix?: string
+  smtp: AdminSmtpSettings
   registrationSettings: AdminRegistrationSettings
   userLimits: AdminUserLimitsSettings
 }
@@ -87,6 +88,17 @@ export interface AdminEmailOtpSettings {
   body?: string
   ttlSeconds: number
   cooldownSeconds: number
+}
+
+export interface AdminSmtpSettings {
+  host?: string
+  port: number
+  username?: string
+  password?: string
+  passwordConfigured: boolean
+  fromAddress?: string
+  fromName?: string
+  security: "plain" | "starttls" | "tls"
 }
 
 export interface LinuxDoAuthSettings {
@@ -173,6 +185,7 @@ export interface AdminUpdateSystemSettingsRequest {
   mailExchangeHost?: string
   mailRouteTarget?: string
   domainTxtPrefix?: string
+  smtp?: AdminSmtpSettings
   registrationSettings?: AdminRegistrationSettings
   userLimits?: AdminUserLimitsSettings
 }

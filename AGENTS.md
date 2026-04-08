@@ -67,6 +67,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - Default direct-compose deployments must treat proxy headers as untrusted; only enable `TMPMAIL_TRUST_PROXY_HEADERS` when a trusted reverse proxy is explicitly in front and overwrites forwarding headers.
 - Public Prometheus scraping is opt-in through `TMPMAIL_PUBLIC_METRICS_ENABLED`; do not assume `/metrics` is always exposed.
 - `/events` lives outside the protected API middleware path; use `TMPMAIL_SSE_CONNECTION_LIMIT` to cap long-lived SSE fanout.
+- OTP outbound SMTP now supports `TMPMAIL_SMTP_SECURITY=plain|starttls|tls`; legacy `TMPMAIL_SMTP_STARTTLS` is compatibility-only and should not be the primary documented knob anymore.
 - Localized frontend entrypoints are `/zh` and `/en`; the default locale is `zh`.
 - Frontend page files stay thin. Heavy UI lives in `frontend/components/`; shared fetch/session/config logic lives in `frontend/lib/`.
 - There is no dedicated frontend test harness; lint/build/smoke are the expected safety net.
@@ -82,7 +83,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - Do not commit `.env`, `data/`, or legacy generated `inbucket.compose.yml` / `inbucket.env` / `inbucket-data/` artifacts.
 - Do not assume `cargo run` reads `.env`; the Rust binary reads process env directly.
 - Do not assume `cargo run` or tests read `.env`; export `TMPMAIL_DATABASE_URL` explicitly outside Docker unless you are inside the bundled compose path, and remember that compose-specific `*_FILE` secret wiring does not exist in plain host runs.
-- Do not assume env always wins over persisted admin-state overrides for mail/DNS behavior.
+- Do not assume env always wins over persisted admin-state overrides for mail/DNS/SMTP behavior.
 - Do not hardcode `/admin`; `TMPMAIL_ADMIN_ENTRY_PATH` and `frontend/proxy.ts` can rewrite public admin paths.
 
 ## Commands

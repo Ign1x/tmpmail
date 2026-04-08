@@ -123,8 +123,27 @@ const normalizeCloudflareSettings = (
   ...DEFAULT_CLOUDFLARE_SETTINGS,
   ...settings,
 })
+
+function defaultSmtpPortForSecurity(security: AdminSystemSettings["smtp"]["security"]): number {
+  switch (security) {
+    case "plain":
+      return 25
+    case "tls":
+      return 465
+    case "starttls":
+    default:
+      return 587
+  }
+}
+
+const DEFAULT_SMTP_SETTINGS: AdminSystemSettings["smtp"] = {
+  port: defaultSmtpPortForSecurity("starttls"),
+  passwordConfigured: false,
+  security: "starttls",
+}
 const DEFAULT_SETTINGS: AdminSystemSettings = {
   systemEnabled: true,
+  smtp: DEFAULT_SMTP_SETTINGS,
   registrationSettings: {
     openRegistrationEnabled: true,
     allowedEmailSuffixes: [],
@@ -312,6 +331,15 @@ function buildSettingsSavePayload(
   }
   if (draft.domainTxtPrefix !== saved.domainTxtPrefix) {
     payload.domainTxtPrefix = draft.domainTxtPrefix ?? ""
+  }
+  if (!areSettingsEqual(draft.smtp, saved.smtp)) {
+    payload.smtp = {
+      ...draft.smtp,
+      host: draft.smtp.host ?? "",
+      username: draft.smtp.username ?? "",
+      fromAddress: draft.smtp.fromAddress ?? "",
+      fromName: draft.smtp.fromName ?? "",
+    }
   }
   if (!areSettingsEqual(draft.registrationSettings, saved.registrationSettings)) {
     payload.registrationSettings = draft.registrationSettings
@@ -677,6 +705,10 @@ export default function DomainManagementPage({
     return {
       ...DEFAULT_SETTINGS,
       ...settings,
+      smtp: {
+        ...DEFAULT_SMTP_SETTINGS,
+        ...settings.smtp,
+      },
       registrationSettings: {
         ...DEFAULT_SETTINGS.registrationSettings,
         ...settings.registrationSettings,
@@ -3389,118 +3421,170 @@ export default function DomainManagementPage({
                 )}
 
                 {settingsSection === "registration" && (
-                  <div className="grid gap-6 xl:grid-cols-2">
-                    <Panel>
-                      <PanelHeader title={ta("registrationSettingsTitle")} />
-                      <div className="space-y-4 p-5">
-                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
-                              {settingsDraft.registrationSettings.openRegistrationEnabled ? ta("openRegistrationOn") : ta("openRegistrationOff")}
+                  <div className="space-y-6">
+                    <div className="grid gap-6 xl:grid-cols-2">
+                      <Panel>
+                        <PanelHeader title={ta("registrationSettingsTitle")} />
+                        <div className="space-y-4 p-5">
+                          <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                                {settingsDraft.registrationSettings.openRegistrationEnabled ? ta("openRegistrationOn") : ta("openRegistrationOff")}
+                              </div>
+                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                                {ta("openRegistrationDescription")}
+                              </p>
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                              {ta("openRegistrationDescription")}
-                            </p>
-                          </div>
 
-                          <label className="inline-flex cursor-pointer items-center">
-                            <input
-                              type="checkbox"
-                              checked={settingsDraft.registrationSettings.openRegistrationEnabled}
-                              onChange={(event) =>
-                                setSettingsDraft((current) => ({
-                                  ...current,
-                                  registrationSettings: {
-                                    ...current.registrationSettings,
-                                    openRegistrationEnabled: event.target.checked,
-                                  },
-                                }))
-                              }
-                              className="peer sr-only"
-                            />
-                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
-                          </label>
-                        </div>
-
-                        <Input
-                          label={ta("allowedEmailSuffixesLabel")}
-                          placeholder={ta("allowedEmailSuffixesPlaceholder")}
-                          value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
-                          onValueChange={(value) =>
-                            setSettingsDraft((current) => ({
-                              ...current,
-                              registrationSettings: {
-                                ...current.registrationSettings,
-                                allowedEmailSuffixes: parseSuffixList(value),
-                              },
-                            }))
-                          }
-                          variant="bordered"
-                          size="sm"
-                          classNames={TM_INPUT_CLASSNAMES}
-                        />
-                      </div>
-                    </Panel>
-
-                    <Panel>
-                      <PanelHeader title={ta("emailOtpTitle")} />
-                      <div className="space-y-4 p-5">
-                        <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
-                          <div className="min-w-0">
-                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
-                              {settingsDraft.registrationSettings.emailOtp.enabled ? ta("emailOtpEnabledOn") : ta("emailOtpEnabledOff")}
-                            </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                              {ta("emailOtpDescription")}
-                            </p>
-                          </div>
-
-                          <label className="inline-flex cursor-pointer items-center">
-                            <input
-                              type="checkbox"
-                              checked={settingsDraft.registrationSettings.emailOtp.enabled}
-                              onChange={(event) =>
-                                setSettingsDraft((current) => ({
-                                  ...current,
-                                  registrationSettings: {
-                                    ...current.registrationSettings,
-                                    emailOtp: {
-                                      ...current.registrationSettings.emailOtp,
-                                      enabled: event.target.checked,
-                                      subject:
-                                        event.target.checked &&
-                                        !(current.registrationSettings.emailOtp.subject || "").trim()
-                                          ? ta("emailOtpDefaultSubject")
-                                          : current.registrationSettings.emailOtp.subject,
-                                      body:
-                                        event.target.checked &&
-                                        !(current.registrationSettings.emailOtp.body || "").trim()
-                                          ? ta("emailOtpDefaultBody", {
-                                              code: "{{code}}",
-                                              ttlSeconds: "{{ttlSeconds}}",
-                                            })
-                                          : current.registrationSettings.emailOtp.body,
+                            <label className="inline-flex cursor-pointer items-center">
+                              <input
+                                type="checkbox"
+                                checked={settingsDraft.registrationSettings.openRegistrationEnabled}
+                                onChange={(event) =>
+                                  setSettingsDraft((current) => ({
+                                    ...current,
+                                    registrationSettings: {
+                                      ...current.registrationSettings,
+                                      openRegistrationEnabled: event.target.checked,
                                     },
-                                  },
-                                }))
-                              }
-                              className="peer sr-only"
-                            />
-                            <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
-                          </label>
-                        </div>
+                                  }))
+                                }
+                                className="peer sr-only"
+                              />
+                              <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                            </label>
+                          </div>
 
-                        {settingsDraft.registrationSettings.emailOtp.enabled && (
-                          <>
-                            <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
-                              {ta("emailOtpAutoTemplateHint")}
+                          <Input
+                            label={ta("allowedEmailSuffixesLabel")}
+                            placeholder={ta("allowedEmailSuffixesPlaceholder")}
+                            value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                registrationSettings: {
+                                  ...current.registrationSettings,
+                                  allowedEmailSuffixes: parseSuffixList(value),
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                        </div>
+                      </Panel>
+
+                      <Panel>
+                        <PanelHeader title={ta("emailOtpTitle")} />
+                        <div className="space-y-4 p-5">
+                          <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                                {settingsDraft.registrationSettings.emailOtp.enabled ? ta("emailOtpEnabledOn") : ta("emailOtpEnabledOff")}
+                              </div>
+                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                                {ta("emailOtpDescription")}
+                              </p>
                             </div>
 
-                            <div className="grid gap-4 md:grid-cols-2">
+                            <label className="inline-flex cursor-pointer items-center">
+                              <input
+                                type="checkbox"
+                                checked={settingsDraft.registrationSettings.emailOtp.enabled}
+                                onChange={(event) =>
+                                  setSettingsDraft((current) => ({
+                                    ...current,
+                                    registrationSettings: {
+                                      ...current.registrationSettings,
+                                      emailOtp: {
+                                        ...current.registrationSettings.emailOtp,
+                                        enabled: event.target.checked,
+                                        subject:
+                                          event.target.checked &&
+                                          !(current.registrationSettings.emailOtp.subject || "").trim()
+                                            ? ta("emailOtpDefaultSubject")
+                                            : current.registrationSettings.emailOtp.subject,
+                                        body:
+                                          event.target.checked &&
+                                          !(current.registrationSettings.emailOtp.body || "").trim()
+                                            ? ta("emailOtpDefaultBody", {
+                                                code: "{{code}}",
+                                                ttlSeconds: "{{ttlSeconds}}",
+                                              })
+                                            : current.registrationSettings.emailOtp.body,
+                                      },
+                                    },
+                                  }))
+                                }
+                                className="peer sr-only"
+                              />
+                              <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                            </label>
+                          </div>
+
+                          {settingsDraft.registrationSettings.emailOtp.enabled && (
+                            <>
+                              <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
+                                {ta("emailOtpAutoTemplateHint")}
+                              </div>
+
+                              <div className="grid gap-4 md:grid-cols-2">
+                                <Input
+                                  label={ta("emailOtpTtlLabel")}
+                                  type="number"
+                                  value={String(settingsDraft.registrationSettings.emailOtp.ttlSeconds)}
+                                  onValueChange={(value) =>
+                                    setSettingsDraft((current) => ({
+                                      ...current,
+                                      registrationSettings: {
+                                        ...current.registrationSettings,
+                                        emailOtp: {
+                                          ...current.registrationSettings.emailOtp,
+                                          ttlSeconds: parseIntegerInput(
+                                            value,
+                                            current.registrationSettings.emailOtp.ttlSeconds,
+                                            60,
+                                            3600,
+                                          ),
+                                        },
+                                      },
+                                    }))
+                                  }
+                                  variant="bordered"
+                                  size="sm"
+                                  classNames={TM_INPUT_CLASSNAMES}
+                                />
+                                <Input
+                                  label={ta("emailOtpCooldownLabel")}
+                                  type="number"
+                                  value={String(settingsDraft.registrationSettings.emailOtp.cooldownSeconds)}
+                                  onValueChange={(value) =>
+                                    setSettingsDraft((current) => ({
+                                      ...current,
+                                      registrationSettings: {
+                                        ...current.registrationSettings,
+                                        emailOtp: {
+                                          ...current.registrationSettings.emailOtp,
+                                          cooldownSeconds: parseIntegerInput(
+                                            value,
+                                            current.registrationSettings.emailOtp.cooldownSeconds,
+                                            0,
+                                            3600,
+                                          ),
+                                        },
+                                      },
+                                    }))
+                                  }
+                                  variant="bordered"
+                                  size="sm"
+                                  classNames={TM_INPUT_CLASSNAMES}
+                                />
+                              </div>
+
                               <Input
-                                label={ta("emailOtpTtlLabel")}
-                                type="number"
-                                value={String(settingsDraft.registrationSettings.emailOtp.ttlSeconds)}
+                                label={ta("emailOtpSubjectLabel")}
+                                value={settingsDraft.registrationSettings.emailOtp.subject || ""}
                                 onValueChange={(value) =>
                                   setSettingsDraft((current) => ({
                                     ...current,
@@ -3508,12 +3592,7 @@ export default function DomainManagementPage({
                                       ...current.registrationSettings,
                                       emailOtp: {
                                         ...current.registrationSettings.emailOtp,
-                                        ttlSeconds: parseIntegerInput(
-                                          value,
-                                          current.registrationSettings.emailOtp.ttlSeconds,
-                                          60,
-                                          3600,
-                                        ),
+                                        subject: value || undefined,
                                       },
                                     },
                                   }))
@@ -3522,10 +3601,10 @@ export default function DomainManagementPage({
                                 size="sm"
                                 classNames={TM_INPUT_CLASSNAMES}
                               />
-                              <Input
-                                label={ta("emailOtpCooldownLabel")}
-                                type="number"
-                                value={String(settingsDraft.registrationSettings.emailOtp.cooldownSeconds)}
+                              <Textarea
+                                label={ta("emailOtpBodyLabel")}
+                                minRows={4}
+                                value={settingsDraft.registrationSettings.emailOtp.body || ""}
                                 onValueChange={(value) =>
                                   setSettingsDraft((current) => ({
                                     ...current,
@@ -3533,12 +3612,7 @@ export default function DomainManagementPage({
                                       ...current.registrationSettings,
                                       emailOtp: {
                                         ...current.registrationSettings.emailOtp,
-                                        cooldownSeconds: parseIntegerInput(
-                                          value,
-                                          current.registrationSettings.emailOtp.cooldownSeconds,
-                                          0,
-                                          3600,
-                                        ),
+                                        body: value || undefined,
                                       },
                                     },
                                   }))
@@ -3547,20 +3621,140 @@ export default function DomainManagementPage({
                                 size="sm"
                                 classNames={TM_INPUT_CLASSNAMES}
                               />
-                            </div>
+                            </>
+                          )}
+                        </div>
+                      </Panel>
+                    </div>
 
+                    <Panel>
+                      <PanelHeader title={ta("smtpSettingsTitle")} />
+                      <div className="space-y-4 p-5">
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                              {settingsDraft.smtp.host && settingsDraft.smtp.fromAddress
+                                ? ta("smtpConfiguredOn")
+                                : ta("smtpConfiguredOff")}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                              {ta("smtpSettingsDescription")}
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
+                          {ta("smtpSettingsHint")}
+                        </div>
+
+                        <div className="grid gap-4 md:grid-cols-2">
+                          <Input
+                            label={ta("smtpHostLabel")}
+                            placeholder="smtp.example.com"
+                            value={settingsDraft.smtp.host || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  host: value || undefined,
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <Input
+                            label={ta("smtpPortLabel")}
+                            type="number"
+                            value={String(settingsDraft.smtp.port)}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  port: parseIntegerInput(value, current.smtp.port, 1, 65535),
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <Select
+                            label={ta("smtpSecurityLabel")}
+                            selectedKeys={[settingsDraft.smtp.security]}
+                            disallowEmptySelection
+                            onSelectionChange={(keys) => {
+                              const nextSecurity = Array.from(keys)[0]
+                              if (typeof nextSecurity !== "string") {
+                                return
+                              }
+
+                              setSettingsDraft((current) => {
+                                const currentDefaultPort = defaultSmtpPortForSecurity(current.smtp.security)
+                                const nextDefaultPort = defaultSmtpPortForSecurity(
+                                  nextSecurity as AdminSystemSettings["smtp"]["security"],
+                                )
+
+                                return {
+                                  ...current,
+                                  smtp: {
+                                    ...current.smtp,
+                                    security: nextSecurity as AdminSystemSettings["smtp"]["security"],
+                                    port: current.smtp.port === currentDefaultPort
+                                      ? nextDefaultPort
+                                      : current.smtp.port,
+                                  },
+                                }
+                              })
+                            }}
+                            variant="bordered"
+                            size="sm"
+                          >
+                            <SelectItem key="starttls" textValue={ta("smtpSecurityStarttlsLabel")}>
+                              {ta("smtpSecurityStarttlsLabel")}
+                            </SelectItem>
+                            <SelectItem key="tls" textValue={ta("smtpSecurityTlsLabel")}>
+                              {ta("smtpSecurityTlsLabel")}
+                            </SelectItem>
+                            <SelectItem key="plain" textValue={ta("smtpSecurityPlainLabel")}>
+                              {ta("smtpSecurityPlainLabel")}
+                            </SelectItem>
+                          </Select>
+                          <Input
+                            label={ta("smtpUsernameLabel")}
+                            value={settingsDraft.smtp.username || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  username: value || undefined,
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <div className="space-y-1.5">
                             <Input
-                              label={ta("emailOtpSubjectLabel")}
-                              value={settingsDraft.registrationSettings.emailOtp.subject || ""}
+                              label={ta("smtpPasswordLabel")}
+                              type="password"
+                              placeholder={
+                                settingsDraft.smtp.passwordConfigured
+                                  ? ta("smtpPasswordPlaceholderConfigured")
+                                  : ta("smtpPasswordPlaceholder")
+                              }
+                              value={settingsDraft.smtp.password || ""}
                               onValueChange={(value) =>
                                 setSettingsDraft((current) => ({
                                   ...current,
-                                  registrationSettings: {
-                                    ...current.registrationSettings,
-                                    emailOtp: {
-                                      ...current.registrationSettings.emailOtp,
-                                      subject: value || undefined,
-                                    },
+                                  smtp: {
+                                    ...current.smtp,
+                                    password: value || undefined,
                                   },
                                 }))
                               }
@@ -3568,28 +3762,55 @@ export default function DomainManagementPage({
                               size="sm"
                               classNames={TM_INPUT_CLASSNAMES}
                             />
-                            <Textarea
-                              label={ta("emailOtpBodyLabel")}
-                              minRows={4}
-                              value={settingsDraft.registrationSettings.emailOtp.body || ""}
-                              onValueChange={(value) =>
-                                setSettingsDraft((current) => ({
-                                  ...current,
-                                  registrationSettings: {
-                                    ...current.registrationSettings,
-                                    emailOtp: {
-                                      ...current.registrationSettings.emailOtp,
-                                      body: value || undefined,
-                                    },
-                                  },
-                                }))
-                              }
-                              variant="bordered"
-                              size="sm"
-                              classNames={TM_INPUT_CLASSNAMES}
-                            />
-                          </>
-                        )}
+                            <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
+                              {settingsDraft.smtp.passwordConfigured
+                                ? ta("smtpPasswordConfiguredHint")
+                                : ta("smtpPasswordHint")}
+                            </p>
+                          </div>
+                          <Input
+                            label={ta("smtpFromAddressLabel")}
+                            placeholder="no-reply@example.com"
+                            value={settingsDraft.smtp.fromAddress || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  fromAddress: value || undefined,
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                          <Input
+                            label={ta("smtpFromNameLabel")}
+                            placeholder="TmpMail"
+                            value={settingsDraft.smtp.fromName || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  fromName: value || undefined,
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                        </div>
+
+                        <p className="px-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
+                          {settingsDraft.smtp.security === "starttls"
+                            ? ta("smtpSecurityStarttlsHint")
+                            : settingsDraft.smtp.security === "tls"
+                              ? ta("smtpSecurityTlsHint")
+                              : ta("smtpSecurityPlainHint")}
+                        </p>
                       </div>
                     </Panel>
                   </div>

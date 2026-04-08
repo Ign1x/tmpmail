@@ -16,6 +16,7 @@ use crate::{
     admin_state::{self, default_email_otp_body, default_email_otp_subject},
     auth, cloudflare,
     error::{ApiError, AppResult},
+    mailer::MailSender,
     models::{
         AdminAccessKeyInfoResponse, AdminAccessKeyListResponse, AdminAccessKeyResponse,
         AdminBootstrapRequest, AdminCreateAccessKeyRequest, AdminCreateUserRequest,
@@ -877,6 +878,7 @@ pub async fn update_settings(
             payload.mail_exchange_host.as_deref(),
             payload.mail_route_target.as_deref(),
             payload.domain_txt_prefix.as_deref(),
+            payload.smtp,
             payload.registration_settings,
             payload.user_limits,
             payload.update_notice,
@@ -890,11 +892,17 @@ pub async fn update_settings(
             "default".to_owned(),
             Some(actor.id.to_string()),
             format!(
-                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} open_registration_enabled={} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
+                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
                 settings.system_enabled,
                 settings.mail_exchange_host,
                 settings.mail_route_target,
                 settings.domain_txt_prefix,
+                settings.smtp.host,
+                settings.smtp.port,
+                settings.smtp.security,
+                settings.smtp.username,
+                settings.smtp.from_address,
+                settings.smtp.password_configured,
                 settings
                     .registration_settings
                     .open_registration_enabled,
@@ -1115,7 +1123,10 @@ fn truncate_upstream_error(value: String) -> String {
     }
 }
 
-fn request_origin_from_headers(headers: &HeaderMap, trust_proxy_headers: bool) -> AppResult<String> {
+fn request_origin_from_headers(
+    headers: &HeaderMap,
+    trust_proxy_headers: bool,
+) -> AppResult<String> {
     let scheme = forwarded_proto_from_headers(headers, trust_proxy_headers).unwrap_or_else(|| {
         if is_local_linux_do_host(host_from_headers(headers).as_deref()) {
             "http".to_owned()
@@ -1227,9 +1238,8 @@ pub(crate) async fn send_email_otp(
     }
     auth::enforce_otp_send_limit(state, headers).await?;
 
-    let mail_sender = state
-        .mail_sender
-        .as_ref()
+    let effective_config = state.effective_runtime_config().await;
+    let mail_sender = MailSender::from_config(&effective_config)
         .ok_or_else(|| ApiError::forbidden("email otp delivery is not configured"))?;
     let code = state
         .otp_store
@@ -1575,6 +1585,7 @@ mod tests {
         registration_settings.email_otp.enabled = true;
         admin_state
             .update_system_settings(
+                None,
                 None,
                 None,
                 None,

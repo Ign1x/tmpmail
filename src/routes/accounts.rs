@@ -400,6 +400,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
                 Some(registration_settings),
                 None,
                 None,

@@ -6,6 +6,7 @@ use lettre::{
 use crate::{
     config::Config,
     error::{ApiError, AppResult},
+    models::SmtpSecurity,
 };
 
 pub struct MailSender {
@@ -36,42 +37,31 @@ impl MailSender {
             Mailbox::new(None, from_address.parse().ok()?)
         };
 
-        let transport = if config.smtp_starttls {
-            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+        let mut builder = match config.smtp_security {
+            SmtpSecurity::Plain => {
+                AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host).port(config.smtp_port)
+            }
+            SmtpSecurity::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
                 .ok()?
-                .port(config.smtp_port);
-
-            if let Some(username) = config
-                .smtp_username
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                builder = builder.credentials(Credentials::new(
-                    username.to_owned(),
-                    config.smtp_password.clone().unwrap_or_default(),
-                ));
-            }
-
-            builder.build()
-        } else {
-            let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
-                .port(config.smtp_port);
-
-            if let Some(username) = config
-                .smtp_username
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                builder = builder.credentials(Credentials::new(
-                    username.to_owned(),
-                    config.smtp_password.clone().unwrap_or_default(),
-                ));
-            }
-
-            builder.build()
+                .port(config.smtp_port),
+            SmtpSecurity::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+                .ok()?
+                .port(config.smtp_port),
         };
+
+        if let Some(username) = config
+            .smtp_username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            builder = builder.credentials(Credentials::new(
+                username.to_owned(),
+                config.smtp_password.clone().unwrap_or_default(),
+            ));
+        }
+
+        let transport = builder.build();
 
         Some(Self { from, transport })
     }

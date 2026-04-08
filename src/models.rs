@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug, Serialize)]
 pub struct HydraCollection<T> {
@@ -256,6 +256,40 @@ pub struct AdminUserLimitsSettings {
     pub api_key_limit: u32,
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum SmtpSecurity {
+    Plain,
+    Starttls,
+    Tls,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminSmtpSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(default = "default_smtp_port")]
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub password_configured: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_address: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    #[serde(
+        default = "default_smtp_security",
+        alias = "starttls",
+        deserialize_with = "deserialize_smtp_security"
+    )]
+    pub security: SmtpSecurity,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleCloudflareSettings {
@@ -274,6 +308,7 @@ pub struct AdminSystemSettings {
     pub mail_route_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_txt_prefix: Option<String>,
+    pub smtp: AdminSmtpSettings,
     pub registration_settings: AdminRegistrationSettings,
     pub user_limits: AdminUserLimitsSettings,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -575,6 +610,7 @@ pub struct AdminUpdateSystemSettingsRequest {
     pub mail_exchange_host: Option<String>,
     pub mail_route_target: Option<String>,
     pub domain_txt_prefix: Option<String>,
+    pub smtp: Option<AdminSmtpSettings>,
     pub registration_settings: Option<AdminRegistrationSettings>,
     pub user_limits: Option<AdminUserLimitsSettings>,
     pub update_notice: Option<PublicUpdateNotice>,
@@ -616,6 +652,43 @@ pub struct CloudflareTokenValidationResponse {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_smtp_security() -> SmtpSecurity {
+    SmtpSecurity::Starttls
+}
+
+fn default_smtp_port() -> u16 {
+    default_smtp_port_for_security(default_smtp_security())
+}
+
+pub fn default_smtp_port_for_security(security: SmtpSecurity) -> u16 {
+    match security {
+        SmtpSecurity::Plain => 25,
+        SmtpSecurity::Starttls => 587,
+        SmtpSecurity::Tls => 465,
+    }
+}
+
+fn deserialize_smtp_security<'de, D>(deserializer: D) -> Result<SmtpSecurity, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawSmtpSecurity {
+        Security(SmtpSecurity),
+        LegacyStarttls(bool),
+    }
+
+    Ok(
+        match Option::<RawSmtpSecurity>::deserialize(deserializer)? {
+            Some(RawSmtpSecurity::Security(security)) => security,
+            Some(RawSmtpSecurity::LegacyStarttls(true)) => SmtpSecurity::Starttls,
+            Some(RawSmtpSecurity::LegacyStarttls(false)) => SmtpSecurity::Plain,
+            None => default_smtp_security(),
+        },
+    )
 }
 
 #[derive(Clone, Debug)]

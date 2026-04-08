@@ -13,7 +13,6 @@ use crate::{
     app_store::AppStore,
     config::{AdminPasswordMode, Config},
     inbucket::InbucketClient,
-    mailer::MailSender,
     metrics::AppMetrics,
     otp::OtpStore,
     rate_limit::FixedWindowRateLimiter,
@@ -26,7 +25,6 @@ pub struct AppState {
     pub inbucket_client: Option<Arc<InbucketClient>>,
     pub admin_state: Arc<RwLock<AdminStateStore>>,
     pub metrics: Arc<AppMetrics>,
-    pub mail_sender: Option<Arc<MailSender>>,
     pub auth_attempt_limiter: Arc<Mutex<FixedWindowRateLimiter>>,
     pub otp_send_limiter: Arc<Mutex<FixedWindowRateLimiter>>,
     pub otp_store: Arc<OtpStore>,
@@ -107,7 +105,6 @@ impl AppState {
             None
         };
         let metrics = Arc::new(AppMetrics::default());
-        let mail_sender = MailSender::from_config(&config).map(Arc::new);
         let auth_attempt_limiter = Arc::new(Mutex::new(FixedWindowRateLimiter::default()));
         let otp_send_limiter = Arc::new(Mutex::new(FixedWindowRateLimiter::default()));
         let otp_store = Arc::new(OtpStore::new(&config).await.with_context(|| {
@@ -123,7 +120,6 @@ impl AppState {
             inbucket_client,
             admin_state: Arc::new(RwLock::new(admin_state)),
             metrics,
-            mail_sender,
             auth_attempt_limiter,
             otp_send_limiter,
             otp_store,

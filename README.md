@@ -175,7 +175,9 @@
   - 国内或受限网络如果卡在 `npm ci`，可在 `.env` 里配置 `TMPMAIL_NPM_REGISTRY=https://registry.npmmirror.com`
   - 因为 lockfile 里写的是 `registry.npmjs.org`，镜像构建会自动启用 `replace-registry-host=always`，确保 tarball 下载也走镜像源
   - 后续在同一台机器重复构建时，npm 依赖会优先命中本地 BuildKit 缓存
-- 邮箱 OTP 发信依赖 SMTP 配置：`TMPMAIL_SMTP_HOST`、`TMPMAIL_SMTP_PORT`、`TMPMAIL_SMTP_USERNAME`、`TMPMAIL_SMTP_PASSWORD`、`TMPMAIL_SMTP_FROM_ADDRESS`、`TMPMAIL_SMTP_FROM_NAME`、`TMPMAIL_SMTP_STARTTLS`
+- 邮箱 OTP 发信依赖 SMTP 配置：`TMPMAIL_SMTP_HOST`、`TMPMAIL_SMTP_PORT`、`TMPMAIL_SMTP_SECURITY`、`TMPMAIL_SMTP_USERNAME`、`TMPMAIL_SMTP_PASSWORD`、`TMPMAIL_SMTP_FROM_ADDRESS`、`TMPMAIL_SMTP_FROM_NAME`
+- `TMPMAIL_SMTP_SECURITY` 支持 `plain`、`starttls`、`tls` 三种模式；旧的 `TMPMAIL_SMTP_STARTTLS` 仍作为兼容回退保留，但不再推荐继续使用
+- 这些 SMTP 参数现在也可以在管理后台的“注册配置 -> SMTP 发信”里维护；保存后新的 OTP 发信会立即使用最新配置，不需要重启 `api`
 - Linux Do OAuth 如需在启动时覆盖 `clientSecret`，可通过 `TMPMAIL_LINUX_DO_CLIENT_SECRET` 提供；运行中的持久化存储在 PostgreSQL
 - 前端依赖已经去掉 `latest` 漂移，并通过 lockfile + `overrides` 固定了已验证版本；`npm audit` 当前应为 0 漏洞。
 - 邮件原文和附件下载统一走当前 API：
