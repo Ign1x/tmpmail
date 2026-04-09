@@ -13,6 +13,20 @@ function trustProxyHeaders(): boolean {
   return ["1", "true", "yes", "on"].includes(value || "")
 }
 
+function resolveForwardedProto(request: NextRequest): string {
+  const protocol = request.nextUrl.protocol.replace(":", "").trim().toLowerCase()
+  return protocol === "https" ? "https" : "http"
+}
+
+function resolveForwardedHost(request: NextRequest): string {
+  const host = request.nextUrl.host.trim()
+  if (!host || /\s|,|\//.test(host)) {
+    return ""
+  }
+
+  return host
+}
+
 export async function GET(request: NextRequest) {
   const authHeader = request.headers.get("Authorization")?.trim()
   if (!authHeader) {
@@ -33,16 +47,13 @@ export async function GET(request: NextRequest) {
   try {
     const upstreamBaseUrl = getApiBaseUrl().replace(/\/+$/, "")
     const upstreamUrl = `${upstreamBaseUrl}/events?accountId=${encodeURIComponent(accountId)}`
-    const forwardedProto = trustProxyHeaders()
-      ? request.headers.get("X-Forwarded-Proto")?.trim() ||
-        request.nextUrl.protocol.replace(":", "")
-      : request.nextUrl.protocol.replace(":", "")
-    const forwardedHost = trustProxyHeaders()
-      ? request.headers.get("X-Forwarded-Host")?.trim() ||
-        request.nextUrl.host ||
-        request.headers.get("Host")?.trim() ||
-        ""
-      : request.nextUrl.host || request.headers.get("Host")?.trim() || ""
+    const forwardedHost = resolveForwardedHost(request)
+    const forwardedHeaders = trustProxyHeaders()
+      ? {
+          "X-Forwarded-Proto": resolveForwardedProto(request),
+          ...(forwardedHost ? { "X-Forwarded-Host": forwardedHost } : {}),
+        }
+      : {}
 
     const upstream = await fetch(upstreamUrl, {
       method: "GET",
@@ -50,8 +61,7 @@ export async function GET(request: NextRequest) {
         Authorization: authHeader,
         Accept: "text/event-stream",
         "Cache-Control": "no-cache",
-        ...(forwardedProto ? { "X-Forwarded-Proto": forwardedProto } : {}),
-        ...(forwardedHost ? { "X-Forwarded-Host": forwardedHost } : {}),
+        ...forwardedHeaders,
       },
       signal: controller.signal,
       cache: "no-store",

@@ -1878,6 +1878,53 @@ mod tests {
         assert!(body.get("sessionToken").is_some());
     }
 
+    #[tokio::test]
+    async fn linux_do_complete_rejects_trust_level_below_minimum() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        configure_linux_do_registration(&state, false).await;
+        {
+            let mut admin_state = state.admin_state.write().await;
+            let mut registration_settings = admin_state.registration_settings();
+            registration_settings.linux_do.minimum_trust_level = 2;
+            admin_state
+                .update_system_settings(
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(registration_settings),
+                    None,
+                    None,
+                )
+                .expect("raise linux.do minimum trust level");
+        }
+        let pending_token = auth::issue_linux_do_pending_registration_token(
+            "linuxdo-3003",
+            "low-trust-user",
+            1,
+            &state.config,
+        )
+        .expect("issue low-trust pending token");
+
+        let response = build_router(state.clone())
+            .oneshot(json_request(
+                "/admin/linux-do/complete",
+                json!({
+                    "redirectUri": "http://localhost/zh/auth/linux-do",
+                    "pendingToken": pending_token,
+                }),
+            ))
+            .await
+            .expect("low-trust linux.do response");
+
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let admin_state = state.admin_state.read().await;
+        assert_eq!(admin_state.users_total(), 1);
+    }
+
     #[test]
     fn linux_do_redirect_uri_requires_allowlisted_callback_match() {
         let mut headers = HeaderMap::new();

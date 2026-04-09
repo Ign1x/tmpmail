@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { Avatar } from "@heroui/avatar"
 import { Button } from "@heroui/button"
 import { Card, CardBody } from "@heroui/card"
@@ -44,11 +44,210 @@ function formatFileSize(size: number) {
   return `${Math.round(size / 1024 / 102.4) / 10} MB`
 }
 
+const BLOCKED_EMAIL_TAGS = new Set([
+  "script",
+  "style",
+  "link",
+  "meta",
+  "base",
+  "iframe",
+  "frame",
+  "frameset",
+  "object",
+  "embed",
+  "applet",
+  "form",
+  "input",
+  "button",
+  "textarea",
+  "select",
+  "option",
+  "img",
+  "picture",
+  "source",
+  "video",
+  "audio",
+  "track",
+  "svg",
+  "math",
+  "canvas",
+])
+
+const EMAIL_RESOURCE_ATTRS = new Set(["src", "srcset", "poster", "background"])
+const EMAIL_NAVIGATION_ATTRS = new Set(["href", "action", "formaction", "xlink:href"])
+const EMAIL_IFRAME_CSP = [
+  "default-src 'none'",
+  "img-src data:",
+  "style-src 'unsafe-inline'",
+  "font-src data:",
+  "media-src 'none'",
+  "connect-src 'none'",
+  "frame-src 'none'",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ")
+
+function isAllowedEmailLink(value: string): boolean {
+  const trimmed = value.trim()
+  if (!trimmed) {
+    return false
+  }
+
+  if (trimmed.startsWith("#")) {
+    return true
+  }
+
+  try {
+    const parsed = new URL(trimmed, "https://tmpmail.invalid")
+    return ["http:", "https:", "mailto:"].includes(parsed.protocol)
+  } catch {
+    return false
+  }
+}
+
+function sanitizeEmailHtml(htmlParts: string[]): string {
+  const rawHtml = htmlParts.join("").trim()
+  if (!rawHtml) {
+    return ""
+  }
+
+  if (typeof DOMParser === "undefined") {
+    return ""
+  }
+
+  const parsed = new DOMParser().parseFromString(`<div>${rawHtml}</div>`, "text/html")
+  const root = parsed.body.firstElementChild instanceof HTMLDivElement
+    ? parsed.body.firstElementChild
+    : parsed.body
+
+  for (const element of Array.from(root.querySelectorAll("*"))) {
+    const tagName = element.tagName.toLowerCase()
+    if (BLOCKED_EMAIL_TAGS.has(tagName)) {
+      element.remove()
+      continue
+    }
+
+    for (const attribute of Array.from(element.attributes)) {
+      const name = attribute.name.toLowerCase()
+      const value = attribute.value.trim()
+
+      if (
+        name.startsWith("on") ||
+        name === "style" ||
+        name === "target" ||
+        name === "download" ||
+        name === "ping" ||
+        name === "referrerpolicy" ||
+        name === "srcdoc"
+      ) {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+
+      if (EMAIL_RESOURCE_ATTRS.has(name)) {
+        element.removeAttribute(attribute.name)
+        continue
+      }
+
+      if (EMAIL_NAVIGATION_ATTRS.has(name)) {
+        if (tagName === "a" && name === "href" && isAllowedEmailLink(value)) {
+          element.setAttribute("rel", "noopener noreferrer nofollow")
+          continue
+        }
+
+        element.removeAttribute(attribute.name)
+      }
+    }
+  }
+
+  return root.innerHTML.trim()
+}
+
+function buildEmailIframeDocument(content: string, isMobile: boolean): string {
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta http-equiv="Content-Security-Policy" content="${EMAIL_IFRAME_CSP}">
+      <style>
+        :root {
+          color-scheme: light;
+        }
+
+        html {
+          overflow-x: hidden;
+          background: #ffffff;
+        }
+
+        body {
+          margin: 0;
+          padding: ${isMobile ? "16px" : "20px"};
+          font-family: Inter, "Segoe UI", Arial, sans-serif;
+          font-size: ${isMobile ? "14px" : "15px"};
+          line-height: 1.75;
+          word-wrap: break-word;
+          overflow-wrap: anywhere;
+          background: #ffffff;
+          color: #0f172a;
+        }
+
+        * {
+          max-width: 100%;
+          box-sizing: border-box;
+        }
+
+        table {
+          width: 100%;
+          max-width: 100%;
+          border-collapse: collapse;
+        }
+
+        th,
+        td {
+          border: 1px solid #e2e8f0;
+          padding: 8px 10px;
+          vertical-align: top;
+        }
+
+        blockquote {
+          margin: 0;
+          padding: 12px 16px;
+          border-left: 4px solid #0ea5e9;
+          background: #f8fafc;
+          border-radius: 0 14px 14px 0;
+        }
+
+        a {
+          color: #0369a1;
+          word-break: break-all;
+        }
+
+        pre,
+        code {
+          font-family: "JetBrains Mono", ui-monospace, monospace;
+          white-space: pre-wrap;
+          word-break: break-word;
+        }
+      </style>
+    </head>
+    <body>${content}</body>
+    </html>
+  `
+}
+
 function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string; isMobile: boolean }) {
   const iframeRef = useRef<HTMLIFrameElement>(null)
   const [iframeHeight, setIframeHeight] = useState(240)
   const resizeTimeoutIdsRef = useRef<number[]>([])
-  const hasHtml = Boolean(html && html.some((part) => part.trim()))
+  const sanitizedHtml = useMemo(() => sanitizeEmailHtml(html ?? []), [html])
+  const hasHtml = Boolean(sanitizedHtml)
+  const iframeDocument = useMemo(
+    () => (hasHtml ? buildEmailIframeDocument(sanitizedHtml, isMobile) : ""),
+    [hasHtml, isMobile, sanitizedHtml],
+  )
 
   const clearResizeTimeouts = useCallback(() => {
     resizeTimeoutIdsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId))
@@ -73,103 +272,15 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
       return
     }
 
-    const iframe = iframeRef.current
-    if (!iframe) return
-
-    const content = html?.join("") ?? ""
-
-    const wrappedContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          :root {
-            color-scheme: light;
-          }
-
-          html {
-            overflow-x: hidden;
-            background: #ffffff;
-          }
-
-          body {
-            margin: 0;
-            padding: ${isMobile ? "16px" : "20px"};
-            font-family: Inter, "Segoe UI", Arial, sans-serif;
-            font-size: ${isMobile ? "14px" : "15px"};
-            line-height: 1.75;
-            word-wrap: break-word;
-            overflow-wrap: anywhere;
-            background: #ffffff;
-            color: #0f172a;
-          }
-
-          * {
-            max-width: 100%;
-            box-sizing: border-box;
-          }
-
-          img,
-          video {
-            max-width: 100%;
-            height: auto;
-            border-radius: 14px;
-          }
-
-          table {
-            width: 100%;
-            max-width: 100%;
-            border-collapse: collapse;
-          }
-
-          th,
-          td {
-            border: 1px solid #e2e8f0;
-            padding: 8px 10px;
-            vertical-align: top;
-          }
-
-          blockquote {
-            margin: 0;
-            padding: 12px 16px;
-            border-left: 4px solid #0ea5e9;
-            background: #f8fafc;
-            border-radius: 0 14px 14px 0;
-          }
-
-          a {
-            color: #0369a1;
-          }
-
-          pre,
-          code {
-            font-family: "JetBrains Mono", ui-monospace, monospace;
-            white-space: pre-wrap;
-            word-break: break-word;
-          }
-        </style>
-      </head>
-      <body>${content}</body>
-      </html>
-    `
-
-    const doc = iframe.contentWindow?.document
-    if (doc) {
-      doc.open()
-      doc.write(wrappedContent)
-      doc.close()
-      iframe.onload = () => adjustIframeHeight()
-      clearResizeTimeouts()
-      resizeTimeoutIdsRef.current = [120, 500, 900].map((delay) => window.setTimeout(adjustIframeHeight, delay))
-    }
+    clearResizeTimeouts()
+    resizeTimeoutIdsRef.current = [120, 500, 900].map((delay) =>
+      window.setTimeout(adjustIframeHeight, delay),
+    )
 
     return () => {
       clearResizeTimeouts()
-      iframe.onload = null
     }
-  }, [adjustIframeHeight, clearResizeTimeouts, hasHtml, html, isMobile])
+  }, [adjustIframeHeight, clearResizeTimeouts, hasHtml, iframeDocument])
 
   if (!hasHtml) {
     return (
@@ -190,7 +301,10 @@ function EmailContent({ html, text, isMobile }: { html?: string[]; text?: string
       <iframe
         ref={iframeRef}
         title="Email Content"
+        srcDoc={iframeDocument}
         sandbox="allow-same-origin"
+        referrerPolicy="no-referrer"
+        onLoad={adjustIframeHeight}
         style={{
           width: "100%",
           height: `${iframeHeight}px`,

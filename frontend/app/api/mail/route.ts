@@ -73,6 +73,20 @@ function buildResponseHeaders(response: Response): Headers {
   return headers;
 }
 
+function resolveForwardedProto(request: NextRequest): string {
+  const protocol = request.nextUrl.protocol.replace(":", "").trim().toLowerCase()
+  return protocol === "https" ? "https" : "http"
+}
+
+function resolveForwardedHost(request: NextRequest): string {
+  const host = request.nextUrl.host.trim()
+  if (!host || /\s|,|\//.test(host)) {
+    return ""
+  }
+
+  return host
+}
+
 function logUpstreamFailure(endpoint: string, response: Response): void {
   const contentType = response.headers.get("content-type") || "unknown";
 
@@ -281,16 +295,6 @@ function createAuthHeaders(
     !authHeader && isAdminSessionProxyRequest(request)
       ? readAdminSessionCookie(request)
       : "";
-  const forwardedProto = trustProxyHeaders()
-    ? request.headers.get("X-Forwarded-Proto")?.trim() ||
-      request.nextUrl.protocol.replace(":", "")
-    : request.nextUrl.protocol.replace(":", "")
-  const forwardedHost = trustProxyHeaders()
-    ? request.headers.get("X-Forwarded-Host")?.trim() ||
-      request.nextUrl.host ||
-      request.headers.get("Host")?.trim() ||
-      ""
-    : request.nextUrl.host || request.headers.get("Host")?.trim() || ""
   const headers: Record<string, string> = {};
 
   if (authHeader) {
@@ -299,12 +303,15 @@ function createAuthHeaders(
     headers.Authorization = `Bearer ${sessionToken}`;
   }
 
-  if (forwardedProto) {
-    headers["X-Forwarded-Proto"] = forwardedProto;
-  }
-
-  if (forwardedHost) {
-    headers["X-Forwarded-Host"] = forwardedHost;
+  if (trustProxyHeaders()) {
+    const forwardedProto = resolveForwardedProto(request)
+    const forwardedHost = resolveForwardedHost(request)
+    if (forwardedProto) {
+      headers["X-Forwarded-Proto"] = forwardedProto;
+    }
+    if (forwardedHost) {
+      headers["X-Forwarded-Host"] = forwardedHost;
+    }
   }
 
   if (contentType) {

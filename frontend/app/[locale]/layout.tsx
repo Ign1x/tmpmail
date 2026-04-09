@@ -10,6 +10,7 @@ import { Providers } from "./providers"
 import { MailStatusProvider } from "@/contexts/mail-status-context"
 import { AuthProvider } from "@/contexts/auth-context"
 import { getServerSiteBranding } from "@/lib/site-branding-server"
+import { resolveMetadataBrandLogoUrl } from "@/lib/site-branding"
 
 type AppLocale = (typeof routing.locales)[number]
 
@@ -47,6 +48,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { locale } = await params
   const branding = await getServerSiteBranding()
+  const metadataLogoUrl = resolveMetadataBrandLogoUrl(branding.brandLogoUrl)
 
   const isZh = locale === "zh"
 
@@ -58,9 +60,9 @@ export async function generateMetadata({
       ? `使用 ${branding.brandName} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
       : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${branding.brandName}.`,
     icons: {
-      icon: branding.brandLogoUrl,
-      shortcut: branding.brandLogoUrl,
-      apple: branding.brandLogoUrl,
+      icon: metadataLogoUrl,
+      shortcut: metadataLogoUrl,
+      apple: metadataLogoUrl,
     },
     alternates: {
       languages: {

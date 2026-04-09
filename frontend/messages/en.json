@@ -610,7 +610,7 @@
     "brandingSettingsTitle": "Site branding",
     "brandingNameLabel": "Site name",
     "brandingLogoUrlLabel": "Logo URL",
-    "brandingLogoUrlDescription": "Use /logo.svg, https://..., or data:image/.... Leave it blank to keep the default logo.",
+    "brandingLogoUrlDescription": "Use /logo.svg, https://..., or data:image/png|jpeg|gif|webp|avif. Leave it blank to keep the default logo.",
     "brandingPreviewLabel": "Preview",
     "brandingPreviewDescription": "Saving updates the page title, entry page, sidebar, and site icons together.",
     "registrationSettingsTitle": "Registration settings",

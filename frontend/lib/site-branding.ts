@@ -11,9 +11,29 @@ export const DEFAULT_SITE_BRANDING: ResolvedSiteBranding = {
   brandLogoUrl: DEFAULT_BRAND_LOGO_URL,
 }
 
+const SAFE_DATA_IMAGE_PREFIXES = [
+  "data:image/png;",
+  "data:image/png,",
+  "data:image/jpeg;",
+  "data:image/jpeg,",
+  "data:image/jpg;",
+  "data:image/jpg,",
+  "data:image/gif;",
+  "data:image/gif,",
+  "data:image/webp;",
+  "data:image/webp,",
+  "data:image/avif;",
+  "data:image/avif,",
+] as const
+
 function normalizeText(value: string | undefined): string | undefined {
   const normalized = value?.trim()
   return normalized ? normalized : undefined
+}
+
+function isSafeBrandLogoDataUrl(value: string): boolean {
+  const normalized = value.trim().toLowerCase()
+  return SAFE_DATA_IMAGE_PREFIXES.some((prefix) => normalized.startsWith(prefix))
 }
 
 export function normalizeBrandLogoUrl(value: string | undefined): string | undefined {
@@ -22,9 +42,12 @@ export function normalizeBrandLogoUrl(value: string | undefined): string | undef
     return undefined
   }
 
+  if (normalized.startsWith("data:image/")) {
+    return isSafeBrandLogoDataUrl(normalized) ? normalized : undefined
+  }
+
   if (
     normalized.startsWith("/") ||
-    normalized.startsWith("data:image/") ||
     normalized.startsWith("http://") ||
     normalized.startsWith("https://")
   ) {
@@ -42,6 +65,10 @@ export function resolveSiteBranding(
     brandLogoUrl:
       normalizeBrandLogoUrl(branding?.logoUrl) ?? DEFAULT_SITE_BRANDING.brandLogoUrl,
   }
+}
+
+export function resolveMetadataBrandLogoUrl(brandLogoUrl: string): string {
+  return brandLogoUrl.startsWith("data:") ? DEFAULT_SITE_BRANDING.brandLogoUrl : brandLogoUrl
 }
 
 export function replaceBrandNameText(text: string, brandName: string): string {

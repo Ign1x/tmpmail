@@ -929,6 +929,8 @@ impl AdminStateStore {
         let trimmed_linux_do_username = linux_do_username.trim();
         let now = Utc::now();
 
+        self.ensure_linux_do_trust_level_allowed(trust_level)?;
+
         if let Some(user) = self.persisted.users.iter_mut().find(|candidate| {
             candidate.linux_do_user_id.as_deref() == Some(normalized_user_id.as_str())
         }) {
@@ -974,6 +976,23 @@ impl AdminStateStore {
         self.save()?;
 
         Ok(authenticated)
+    }
+
+    fn ensure_linux_do_trust_level_allowed(&self, trust_level: u8) -> AppResult<()> {
+        let minimum = self
+            .persisted
+            .system_settings
+            .registration_settings
+            .linux_do
+            .minimum_trust_level;
+
+        if trust_level < minimum {
+            return Err(ApiError::forbidden(format!(
+                "linux.do trust level {trust_level} is below the minimum required level {minimum}"
+            )));
+        }
+
+        Ok(())
     }
 
     pub fn delete_user(&mut self, user_id: Uuid) -> AppResult<()> {
@@ -1977,6 +1996,26 @@ fn normalize_branding_settings(value: SiteBrandingSettings) -> AppResult<SiteBra
     Ok(SiteBrandingSettings { name, logo_url })
 }
 
+fn is_safe_branding_logo_data_url(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    [
+        "data:image/png;",
+        "data:image/png,",
+        "data:image/jpeg;",
+        "data:image/jpeg,",
+        "data:image/jpg;",
+        "data:image/jpg,",
+        "data:image/gif;",
+        "data:image/gif,",
+        "data:image/webp;",
+        "data:image/webp,",
+        "data:image/avif;",
+        "data:image/avif,",
+    ]
+    .iter()
+    .any(|prefix| normalized.starts_with(prefix))
+}
+
 fn normalize_optional_logo_url(value: Option<&str>) -> AppResult<Option<String>> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(None);
@@ -1989,6 +2028,12 @@ fn normalize_optional_logo_url(value: Option<&str>) -> AppResult<Option<String>>
     if value.starts_with("data:image/") {
         if value.len() > 64 * 1024 {
             return Err(ApiError::validation("branding logo url is too large"));
+        }
+
+        if !is_safe_branding_logo_data_url(value) {
+            return Err(ApiError::validation(
+                "branding logo data URL must use png, jpeg, gif, webp, or avif",
+            ));
         }
 
         return Ok(Some(value.to_owned()));
@@ -2691,6 +2736,33 @@ mod tests {
     }
 
     #[test]
+    fn branding_settings_reject_unsafe_logo_data_urls() {
+        let (mut store, _database) = load_store("branding-unsafe-logo");
+
+        let error = store
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                Some(SiteBrandingSettings {
+                    name: Some("Demo Mail".to_owned()),
+                    logo_url: Some("data:image/svg+xml,<svg></svg>".to_owned()),
+                }),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect_err("svg data URLs should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "branding logo data URL must use png, jpeg, gif, webp, or avif"
+        );
+    }
+
+    #[test]
     fn smtp_password_is_redacted_from_state_json_and_restored_separately() {
         let (mut store, database) = load_store("smtp-settings");
         let smtp_password = "smtp-secret-123";
@@ -2791,6 +2863,77 @@ mod tests {
             &settings,
             "mail.other.example",
         ));
+    }
+
+    #[test]
+    fn linux_do_auth_rejects_below_minimum_trust_level_for_new_users() {
+        let (mut store, _database) = load_store("linux-do-min-trust-new");
+        store
+            .bootstrap_first_admin("admin", "AdminPass123!")
+            .expect("bootstrap admin");
+
+        let mut settings = store.registration_settings();
+        settings.linux_do.minimum_trust_level = 2;
+        store
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(settings),
+                None,
+                None,
+            )
+            .expect("save registration settings");
+
+        let error = store
+            .authenticate_linux_do("linuxdo-low-trust", "low-trust-user", 1, None)
+            .expect_err("low trust level should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "linux.do trust level 1 is below the minimum required level 2"
+        );
+        assert_eq!(store.users_total(), 1);
+    }
+
+    #[test]
+    fn linux_do_auth_rejects_existing_users_below_minimum_trust_level() {
+        let (mut store, _database) = load_store("linux-do-min-trust-existing");
+        store
+            .bootstrap_first_admin("admin", "AdminPass123!")
+            .expect("bootstrap admin");
+        store
+            .authenticate_linux_do("linuxdo-existing", "existing-user", 2, None)
+            .expect("seed linux.do user");
+
+        let mut settings = store.registration_settings();
+        settings.linux_do.minimum_trust_level = 3;
+        store
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(settings),
+                None,
+                None,
+            )
+            .expect("save registration settings");
+
+        let error = store
+            .authenticate_linux_do("linuxdo-existing", "existing-user", 2, None)
+            .expect_err("existing user should be blocked after the minimum trust level increases");
+
+        assert_eq!(
+            error.to_string(),
+            "linux.do trust level 2 is below the minimum required level 3"
+        );
+        assert_eq!(store.users_total(), 2);
     }
 
     #[test]
