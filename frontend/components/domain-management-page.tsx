@@ -13,6 +13,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion"
 import { Button } from "@heroui/button"
 import { Modal, ModalBody, ModalContent, ModalFooter, ModalHeader } from "@heroui/modal"
+import { Spinner } from "@heroui/spinner"
 import {
   Activity,
   Check,
@@ -117,6 +118,7 @@ const MAX_BATCH_MANAGED_DOMAINS = 50
 const MAX_BATCH_DOMAIN_PREFIX_LENGTH = 40
 const MIN_BATCH_DOMAIN_RANDOM_LENGTH = 4
 const MAX_BATCH_DOMAIN_RANDOM_LENGTH = 20
+const BATCH_CLOUDFLARE_ZONE_LOAD_TIMEOUT_MS = 12_000
 const LINUX_DO_CONNECT_PORTAL_URL = "https://connect.linux.do/"
 const LINUX_DO_DEFAULT_AUTHORIZE_URL = "https://connect.linux.do/oauth2/authorize"
 const LINUX_DO_DEFAULT_TOKEN_URL = "https://connect.linux.do/oauth2/token"
@@ -151,6 +153,7 @@ const DEFAULT_SETTINGS: AdminSystemSettings = {
   smtp: DEFAULT_SMTP_SETTINGS,
   registrationSettings: {
     openRegistrationEnabled: true,
+    publicDomains: [],
     allowedEmailSuffixes: [],
     emailOtp: {
       enabled: false,
@@ -370,6 +373,29 @@ function getErrorDescription(error: unknown, fallback: string): string {
   return fallback
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  errorMessage: string,
+): Promise<T> {
+  let timeoutId: ReturnType<typeof setTimeout> | null = null
+
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(errorMessage))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timeoutId) {
+      clearTimeout(timeoutId)
+    }
+  }
+}
+
 function areSettingsEqual(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
@@ -538,6 +564,7 @@ export default function DomainManagementPage({
   const [cloudflareZoneOptions, setCloudflareZoneOptions] = useState<string[]>([])
   const [cloudflareZonesLoading, setCloudflareZonesLoading] = useState(false)
   const [cloudflareZonesRequireApiUpdate, setCloudflareZonesRequireApiUpdate] = useState(false)
+  const [cloudflareZoneLoadError, setCloudflareZoneLoadError] = useState<string | null>(null)
   const [batchDomainRootInput, setBatchDomainRootInput] = useState("")
   const [batchDomainPrefixInput, setBatchDomainPrefixInput] = useState("")
   const [batchDomainRandomLengthInput, setBatchDomainRandomLengthInput] = useState("6")
@@ -711,6 +738,36 @@ export default function DomainManagementPage({
   const activeMailboxAccountsCount = mailboxAccounts.filter(
     (account) => !account.isDeleted && !account.isDisabled,
   ).length
+  const currentUserManagedDomainLimit = currentUser?.domainLimit ?? settingsDraft.userLimits.defaultDomainLimit
+  const publicRegistrationDomainOptions = useMemo(
+    () =>
+      managedDomains
+        .filter(
+          (domain) =>
+            !domain.ownerUserId && (domain.isVerified || domain.status === "active"),
+        )
+        .map((domain) => domain.domain)
+        .sort((left, right) => left.localeCompare(right)),
+    [managedDomains],
+  )
+  const publicRegistrationDomainOptionSet = useMemo(
+    () => new Set(publicRegistrationDomainOptions),
+    [publicRegistrationDomainOptions],
+  )
+  const selectedPublicRegistrationDomains = useMemo(
+    () =>
+      settingsDraft.registrationSettings.publicDomains.filter((domain) =>
+        publicRegistrationDomainOptionSet.has(domain),
+      ),
+    [publicRegistrationDomainOptionSet, settingsDraft.registrationSettings.publicDomains],
+  )
+  const additionalAllowedEmailSuffixes = useMemo(
+    () =>
+      settingsDraft.registrationSettings.allowedEmailSuffixes.filter(
+        (suffix) => !publicRegistrationDomainOptionSet.has(suffix),
+      ),
+    [publicRegistrationDomainOptionSet, settingsDraft.registrationSettings.allowedEmailSuffixes],
+  )
   const availableMailboxDomains = useMemo(
     () => managedDomains.filter((domain) => domain.isVerified || domain.status === "active"),
     [managedDomains],
@@ -849,6 +906,7 @@ export default function DomainManagementPage({
       registrationSettings: {
         ...DEFAULT_SETTINGS.registrationSettings,
         ...settings.registrationSettings,
+        publicDomains: settings.registrationSettings?.publicDomains ?? [],
         allowedEmailSuffixes: settings.registrationSettings?.allowedEmailSuffixes ?? [],
         emailOtp: {
           ...DEFAULT_SETTINGS.registrationSettings.emailOtp,
@@ -1898,24 +1956,43 @@ export default function DomainManagementPage({
 
   const loadBatchCloudflareZones = useCallback(
     async (settingsOverride?: ConsoleCloudflareSettings) => {
-      const effectiveSettings = normalizeCloudflareSettings(
-        settingsOverride ?? cloudflareSettings,
-      )
       const requestId = batchCloudflareZoneRequestIdRef.current + 1
       batchCloudflareZoneRequestIdRef.current = requestId
-
-      if (!effectiveSettings.apiTokenConfigured) {
-        if (batchCloudflareZoneRequestIdRef.current === requestId) {
-          setCloudflareZoneOptions([])
-          setCloudflareZonesRequireApiUpdate(false)
-          setCloudflareZonesLoading(false)
-        }
-        return []
-      }
-
+      setCloudflareZoneLoadError(null)
       setCloudflareZonesLoading(true)
+
+      let effectiveSettings = normalizeCloudflareSettings(settingsOverride ?? cloudflareSettings)
+
       try {
-        const response = await testConsoleCloudflareToken(undefined, DEFAULT_PROVIDER_ID)
+        if (!settingsOverride) {
+          effectiveSettings = normalizeCloudflareSettings(
+            await withTimeout(
+              fetchConsoleCloudflareSettings(DEFAULT_PROVIDER_ID),
+              BATCH_CLOUDFLARE_ZONE_LOAD_TIMEOUT_MS,
+              ts("cloudflareZoneLoadTimeoutDesc"),
+            ),
+          )
+
+          if (batchCloudflareZoneRequestIdRef.current !== requestId) {
+            return []
+          }
+
+          applyCloudflareSettings(effectiveSettings)
+        }
+
+        if (!effectiveSettings.apiTokenConfigured) {
+          if (batchCloudflareZoneRequestIdRef.current === requestId) {
+            setCloudflareZoneOptions([])
+            setCloudflareZonesRequireApiUpdate(false)
+          }
+          return []
+        }
+
+        const response = await withTimeout(
+          testConsoleCloudflareToken(undefined, DEFAULT_PROVIDER_ID),
+          BATCH_CLOUDFLARE_ZONE_LOAD_TIMEOUT_MS,
+          ts("cloudflareZoneLoadTimeoutDesc"),
+        )
         const zones = Array.from(
           new Set(
             (response.zones ?? [])
@@ -1943,12 +2020,7 @@ export default function DomainManagementPage({
         if (batchCloudflareZoneRequestIdRef.current === requestId) {
           setCloudflareZoneOptions([])
           setCloudflareZonesRequireApiUpdate(false)
-          toast({
-            title: ts("cloudflareZoneLoadFailed"),
-            description: getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")),
-            color: "warning",
-            variant: "flat",
-          })
+          setCloudflareZoneLoadError(getErrorDescription(error, ts("cloudflareZoneLoadFailedDesc")))
         }
         return []
       } finally {
@@ -1957,13 +2029,14 @@ export default function DomainManagementPage({
         }
       }
     },
-    [cloudflareSettings, toast, ts],
+    [applyCloudflareSettings, cloudflareSettings, toast, ts],
   )
 
   const handleOpenBatchDomainModal = useCallback(() => {
     setCloudflareZoneOptions([])
     setCloudflareZonesRequireApiUpdate(false)
-    setCloudflareZonesLoading(true)
+    setCloudflareZoneLoadError(null)
+    setCloudflareZonesLoading(false)
     setBatchDomainProgress(null)
     setIsBatchDomainModalOpen(true)
   }, [])
@@ -1975,6 +2048,7 @@ export default function DomainManagementPage({
 
     batchCloudflareZoneRequestIdRef.current += 1
     setCloudflareZonesLoading(false)
+    setCloudflareZoneLoadError(null)
     setBatchDomainProgress(null)
     setIsBatchDomainModalOpen(false)
   }, [isCreatingDomainBatch])
@@ -1988,27 +2062,11 @@ export default function DomainManagementPage({
 
     void (async () => {
       try {
-        const latestCloudflareSettings = await fetchConsoleCloudflareSettings(
-          DEFAULT_PROVIDER_ID,
-        )
-        if (cancelled) {
-          return
-        }
-
-        applyCloudflareSettings(latestCloudflareSettings)
-        await loadBatchCloudflareZones(latestCloudflareSettings)
-      } catch (error) {
-        if (cancelled) {
-          return
-        }
-
-        toast({
-          title: ta("cloudflareLoadFailed"),
-          description: getErrorDescription(error, ta("cloudflareLoadFailedDescription")),
-          color: "warning",
-          variant: "flat",
-        })
         await loadBatchCloudflareZones()
+      } finally {
+        if (cancelled) {
+          batchCloudflareZoneRequestIdRef.current += 1
+        }
       }
     })()
 
@@ -2016,11 +2074,8 @@ export default function DomainManagementPage({
       cancelled = true
     }
   }, [
-    applyCloudflareSettings,
     isBatchDomainModalOpen,
     loadBatchCloudflareZones,
-    ta,
-    toast,
   ])
 
   const handleCreateRandomDomainBatch = async () => {
@@ -2592,6 +2647,45 @@ export default function DomainManagementPage({
     await handlePatchUser(user, { domainLimit: parsed })
   }
 
+  const updateRegistrationAvailabilityDraft = useCallback(
+    (nextPublicDomains: string[], nextAllowedSuffixes: string[]) => {
+      setSettingsDraft((current) => ({
+        ...current,
+        registrationSettings: {
+          ...current.registrationSettings,
+          publicDomains: Array.from(
+            new Set(nextPublicDomains.map(normalizeManagedDomainEntry).filter(Boolean)),
+          ).sort((left, right) => left.localeCompare(right)),
+          allowedEmailSuffixes: Array.from(
+            new Set(nextAllowedSuffixes.map(normalizeManagedDomainEntry).filter(Boolean)),
+          ).sort((left, right) => left.localeCompare(right)),
+        },
+      }))
+    },
+    [],
+  )
+
+  const handleTogglePublicRegistrationDomain = useCallback(
+    (domainName: string) => {
+      const selected = new Set(selectedPublicRegistrationDomains)
+      if (selected.has(domainName)) {
+        selected.delete(domainName)
+      } else {
+        selected.add(domainName)
+      }
+
+      updateRegistrationAvailabilityDraft(
+        Array.from(selected),
+        additionalAllowedEmailSuffixes,
+      )
+    },
+    [
+      additionalAllowedEmailSuffixes,
+      selectedPublicRegistrationDomains,
+      updateRegistrationAvailabilityDraft,
+    ],
+  )
+
   const saveSettings = async (payload: AdminUpdateSystemSettingsRequest) => {
     if (!hasAdminSession || !isAdmin) {
       return null
@@ -3090,6 +3184,7 @@ export default function DomainManagementPage({
           serviceStatus={serviceStatus}
           mailboxCount={activeMailboxAccountsCount}
           managedDomainsCount={managedDomains.length}
+          managedDomainsLimit={!isAdmin ? currentUserManagedDomainLimit : undefined}
           activeDomainsCount={activeDomainsCount}
           pendingDomainsCount={pendingDomainsCount}
           statusLabels={{
@@ -3546,6 +3641,10 @@ export default function DomainManagementPage({
                       <MetricCard
                         label={ta("managedDomainCount")}
                         value={String(managedDomains.length)}
+                        detail={ta("managedDomainUsageSummary", {
+                          count: managedDomains.length,
+                          limit: currentUserManagedDomainLimit,
+                        })}
                         tone="neutral"
                       />
                     </motion.div>
@@ -3780,18 +3879,57 @@ export default function DomainManagementPage({
                             </label>
                           </div>
 
+                          <div className="space-y-3 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                            <div>
+                              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                                {ta("publicDomainsLabel")}
+                              </div>
+                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                                {ta("publicDomainsDescription")}
+                              </p>
+                            </div>
+
+                            {publicRegistrationDomainOptions.length > 0 ? (
+                              <div className="flex flex-wrap gap-2">
+                                {publicRegistrationDomainOptions.map((domainName) => {
+                                  const active = selectedPublicRegistrationDomains.includes(domainName)
+
+                                  return (
+                                    <Button
+                                      key={domainName}
+                                      size="sm"
+                                      variant={active ? "flat" : "bordered"}
+                                      className={`rounded-full px-3 ${
+                                        active
+                                          ? "bg-sky-100 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100"
+                                          : "border-slate-200 bg-white/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300"
+                                      }`}
+                                      onPress={() => handleTogglePublicRegistrationDomain(domainName)}
+                                    >
+                                      {domainName}
+                                    </Button>
+                                  )
+                                })}
+                              </div>
+                            ) : (
+                              <EmptyState
+                                compact
+                                title={ta("publicDomainsEmptyTitle")}
+                                description={ta("publicDomainsEmptyDescription")}
+                              />
+                            )}
+                          </div>
+
                           <Input
                             label={ta("allowedEmailSuffixesLabel")}
                             placeholder={ta("allowedEmailSuffixesPlaceholder")}
-                            value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
+                            description={ta("allowedEmailSuffixesDescription")}
+                            value={additionalAllowedEmailSuffixes.join(", ")}
                             onValueChange={(value) =>
-                              setSettingsDraft((current) => ({
-                                ...current,
-                                registrationSettings: {
-                                  ...current.registrationSettings,
-                                  allowedEmailSuffixes: parseSuffixList(value),
-                                },
-                              }))
+                              updateRegistrationAvailabilityDraft(
+                                selectedPublicRegistrationDomains,
+                                parseSuffixList(value),
+                              )
                             }
                             variant="bordered"
                             size="sm"
@@ -4400,7 +4538,19 @@ export default function DomainManagementPage({
                   variants={{ hidden: {}, visible: { transition: { staggerChildren: 0.06 } } }}
                 >
                   <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
-                    <MetricCard label={ta("managedDomainCount")} value={String(managedDomains.length)} tone="neutral" />
+                    <MetricCard
+                      label={ta("managedDomainCount")}
+                      value={String(managedDomains.length)}
+                      detail={
+                        !isAdmin
+                          ? ta("managedDomainUsageSummary", {
+                              count: managedDomains.length,
+                              limit: currentUserManagedDomainLimit,
+                            })
+                          : undefined
+                      }
+                      tone="neutral"
+                    />
                   </motion.div>
                   <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
                     <MetricCard label={ts("domainStatusActive")} value={String(activeDomainsCount)} tone="success" />
@@ -4919,6 +5069,7 @@ export default function DomainManagementPage({
               serviceStatus={serviceStatus}
               mailboxCount={activeMailboxAccountsCount}
               managedDomainsCount={managedDomains.length}
+              managedDomainsLimit={!isAdmin ? currentUserManagedDomainLimit : undefined}
               activeDomainsCount={activeDomainsCount}
               pendingDomainsCount={pendingDomainsCount}
               statusLabels={{
@@ -4952,7 +5103,7 @@ export default function DomainManagementPage({
         size="2xl"
         scrollBehavior="inside"
       >
-          <ModalContent className="overflow-hidden rounded-[2rem] border border-white/70 bg-white/92 shadow-[0_30px_90px_rgba(15,23,42,0.16)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
+          <ModalContent className="overflow-hidden rounded-[2rem] border border-slate-200/80 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(248,250,252,0.96))] shadow-[0_30px_90px_rgba(15,23,42,0.12)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/92 dark:shadow-none">
           <ModalHeader className="flex flex-col gap-1 border-b border-slate-200/80 px-6 pb-5 pt-6 dark:border-slate-800">
             <div className="flex items-start justify-between gap-3">
               <div className="flex-1" />
@@ -4971,7 +5122,7 @@ export default function DomainManagementPage({
             </p>
           </ModalHeader>
 
-          <ModalBody className="space-y-4 px-6 py-5">
+          <ModalBody className="space-y-4 bg-slate-50/65 px-6 py-5 dark:bg-transparent">
             {cloudflareZoneOptions.length > 0 ? (
               <Select
                 label={ts("domainBatchRootLabel")}
@@ -4992,27 +5143,48 @@ export default function DomainManagementPage({
                 ))}
               </Select>
             ) : (
-              <EmptyState
-                compact
-                title={
-                  cloudflareZonesLoading
-                    ? ts("cloudflareZoneLoading")
-                    : !canBatchCreateManagedDomains
-                      ? ts("domainBatchRequiresCloudflare")
-                    : cloudflareZonesRequireApiUpdate
-                      ? ts("cloudflareZoneApiOutdated")
-                    : ts("domainBatchNoSecondLevelDomain")
-                }
-                description={
-                  cloudflareZonesLoading
-                    ? ts("cloudflareZoneLoadingDesc")
-                    : !canBatchCreateManagedDomains
-                      ? ts("domainBatchRequiresCloudflareDesc")
-                    : cloudflareZonesRequireApiUpdate
-                      ? ts("cloudflareZoneApiOutdatedDesc")
-                    : ts("domainBatchNoSecondLevelDomainDesc")
-                }
-              />
+              <div className="rounded-[1.5rem] border border-slate-200/80 bg-white/90 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-slate-900 dark:text-white">
+                      {cloudflareZonesLoading
+                        ? ts("cloudflareZoneLoading")
+                        : cloudflareZoneLoadError
+                          ? ts("cloudflareZoneLoadFailed")
+                          : !canBatchCreateManagedDomains
+                            ? ts("domainBatchRequiresCloudflare")
+                            : cloudflareZonesRequireApiUpdate
+                              ? ts("cloudflareZoneApiOutdated")
+                              : ts("domainBatchNoSecondLevelDomain")}
+                    </div>
+                    <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                      {cloudflareZonesLoading
+                        ? ts("cloudflareZoneLoadingDesc")
+                        : cloudflareZoneLoadError ||
+                          (!canBatchCreateManagedDomains
+                            ? ts("domainBatchRequiresCloudflareDesc")
+                            : cloudflareZonesRequireApiUpdate
+                              ? ts("cloudflareZoneApiOutdatedDesc")
+                              : ts("domainBatchNoSecondLevelDomainDesc"))}
+                    </p>
+                  </div>
+
+                  {canBatchCreateManagedDomains ? (
+                    <Button
+                      size="sm"
+                      variant="flat"
+                      startContent={
+                        cloudflareZonesLoading ? <Spinner size="sm" /> : <RefreshCw size={14} />
+                      }
+                      className="h-10 rounded-2xl bg-slate-100/90 px-4 text-slate-700 hover:bg-slate-200/90 dark:bg-slate-800/70 dark:text-slate-100 dark:hover:bg-slate-700/80"
+                      onPress={() => void loadBatchCloudflareZones()}
+                      isDisabled={cloudflareZonesLoading}
+                    >
+                      {ts("cloudflareZoneRefresh")}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
             )}
 
             <div className="grid gap-4 md:grid-cols-2">
@@ -5174,6 +5346,7 @@ function AdminConsoleSidebar({
   serviceStatus,
   mailboxCount,
   managedDomainsCount,
+  managedDomainsLimit,
   activeDomainsCount,
   pendingDomainsCount,
   statusLabels,
@@ -5196,6 +5369,7 @@ function AdminConsoleSidebar({
   } | null
   mailboxCount: number
   managedDomainsCount: number
+  managedDomainsLimit?: number
   activeDomainsCount: number
   pendingDomainsCount: number
   statusLabels: {
@@ -5366,7 +5540,10 @@ function AdminConsoleSidebar({
             </div>
             <div className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white/80 px-3 py-1.5 text-[11px] font-semibold text-slate-600 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
               <Globe2 size={12} />
-              {ta("managedDomainCount")} {managedDomainsCount}
+              {ta("managedDomainCount")}{" "}
+              {managedDomainsLimit !== undefined
+                ? `${managedDomainsCount}/${managedDomainsLimit}`
+                : managedDomainsCount}
             </div>
           </div>
 

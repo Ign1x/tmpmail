@@ -243,6 +243,8 @@ pub struct LinuxDoAuthSettings {
 pub struct AdminRegistrationSettings {
     pub open_registration_enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_domains: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_email_suffixes: Vec<String>,
     pub email_otp: AdminEmailOtpSettings,
     pub linux_do: LinuxDoAuthSettings,

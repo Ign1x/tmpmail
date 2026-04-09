@@ -381,17 +381,10 @@ impl AdminStateStore {
     }
 
     pub fn is_domain_allowed_for_public_registration(&self, domain: &str) -> bool {
-        let normalized_domain = normalize_hostname_like(domain);
-        let allowed_suffixes = &self
-            .persisted
-            .system_settings
-            .registration_settings
-            .allowed_email_suffixes;
-
-        allowed_suffixes.is_empty()
-            || allowed_suffixes.iter().any(|suffix| {
-                normalized_domain == *suffix || normalized_domain.ends_with(&format!(".{suffix}"))
-            })
+        domain_matches_public_registration_rules(
+            &self.persisted.system_settings.registration_settings,
+            domain,
+        )
     }
 
     pub fn apply_runtime_overrides(&self, config: &mut Config) {
@@ -1424,6 +1417,29 @@ pub async fn require_admin_access(
     Ok(user)
 }
 
+fn domain_matches_public_registration_rules(
+    registration_settings: &AdminRegistrationSettings,
+    domain: &str,
+) -> bool {
+    let normalized_domain = normalize_hostname_like(domain);
+    if registration_settings.public_domains.is_empty()
+        && registration_settings.allowed_email_suffixes.is_empty()
+    {
+        return true;
+    }
+
+    registration_settings
+        .public_domains
+        .iter()
+        .any(|public_domain| normalized_domain == *public_domain)
+        || registration_settings
+            .allowed_email_suffixes
+            .iter()
+            .any(|suffix| {
+                normalized_domain == *suffix || normalized_domain.ends_with(&format!(".{suffix}"))
+            })
+}
+
 fn default_true() -> bool {
     true
 }
@@ -1435,6 +1451,7 @@ fn default_cloudflare_auto_sync_enabled() -> bool {
 fn default_registration_settings() -> AdminRegistrationSettings {
     AdminRegistrationSettings {
         open_registration_enabled: true,
+        public_domains: Vec::new(),
         allowed_email_suffixes: Vec::new(),
         email_otp: default_email_otp_settings(),
         linux_do: default_linux_do_auth_settings(),
@@ -1688,6 +1705,13 @@ fn normalize_registration_settings(
     value: AdminRegistrationSettings,
     existing: Option<&AdminRegistrationSettings>,
 ) -> AppResult<AdminRegistrationSettings> {
+    let public_domains = value
+        .public_domains
+        .into_iter()
+        .filter_map(normalize_public_domain_setting)
+        .collect::<AppResult<BTreeSet<_>>>()?
+        .into_iter()
+        .collect::<Vec<_>>();
     let allowed_email_suffixes = value
         .allowed_email_suffixes
         .into_iter()
@@ -1754,6 +1778,7 @@ fn normalize_registration_settings(
 
     Ok(AdminRegistrationSettings {
         open_registration_enabled: value.open_registration_enabled,
+        public_domains,
         allowed_email_suffixes,
         email_otp,
         linux_do,
@@ -1972,6 +1997,19 @@ fn normalize_email_suffix_setting(value: String) -> Option<AppResult<String>> {
     Some(
         normalize_optional_hostname_setting(Some(&normalized)).and_then(|value| {
             value.ok_or_else(|| ApiError::validation("registration email suffix cannot be empty"))
+        }),
+    )
+}
+
+fn normalize_public_domain_setting(value: String) -> Option<AppResult<String>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    Some(
+        normalize_optional_hostname_setting(Some(trimmed)).and_then(|value| {
+            value.ok_or_else(|| ApiError::validation("public domain cannot be empty"))
         }),
     )
 }
@@ -2219,10 +2257,12 @@ mod tests {
     use sqlx::{Connection, PgConnection, Row};
     use tokio::runtime::Builder;
 
-    use super::AdminStateStore;
+    use super::{
+        AdminStateStore, default_registration_settings, domain_matches_public_registration_rules,
+    };
     use crate::{
         config::Config,
-        models::{AdminSmtpSettings, SmtpSecurity},
+        models::{AdminRegistrationSettings, AdminSmtpSettings, SmtpSecurity},
         test_support::{TestDatabase, attach_test_database},
     };
 
@@ -2369,5 +2409,53 @@ mod tests {
                 .password_configured,
             true
         );
+    }
+
+    #[test]
+    fn public_registration_rules_allow_all_when_unconfigured() {
+        let settings = default_registration_settings();
+
+        assert!(domain_matches_public_registration_rules(
+            &settings,
+            "mail.example.com",
+        ));
+    }
+
+    #[test]
+    fn public_registration_rules_match_exact_public_domains() {
+        let settings = AdminRegistrationSettings {
+            public_domains: vec!["mail.example.com".to_owned()],
+            ..default_registration_settings()
+        };
+
+        assert!(domain_matches_public_registration_rules(
+            &settings,
+            "mail.example.com",
+        ));
+        assert!(!domain_matches_public_registration_rules(
+            &settings,
+            "other.example.com",
+        ));
+    }
+
+    #[test]
+    fn public_registration_rules_match_allowed_suffixes() {
+        let settings = AdminRegistrationSettings {
+            allowed_email_suffixes: vec!["example.com".to_owned()],
+            ..default_registration_settings()
+        };
+
+        assert!(domain_matches_public_registration_rules(
+            &settings,
+            "mail.example.com",
+        ));
+        assert!(domain_matches_public_registration_rules(
+            &settings,
+            "example.com",
+        ));
+        assert!(!domain_matches_public_registration_rules(
+            &settings,
+            "mail.other.example",
+        ));
     }
 }

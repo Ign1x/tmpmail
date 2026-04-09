@@ -115,6 +115,7 @@ export interface LinuxDoAuthSettings {
 
 export interface AdminRegistrationSettings {
   openRegistrationEnabled: boolean
+  publicDomains: string[]
   allowedEmailSuffixes: string[]
   emailOtp: AdminEmailOtpSettings
   linuxDo: LinuxDoAuthSettings

@@ -108,7 +108,7 @@
 - 后台 API Key 现在按 console 用户分别生成，服务端只保存哈希；明文只会在签发或轮换当次显示。
 - `/domains` 旧入口仍然保留，但会重定向到当前配置的管理员入口。
 - 后端会按 `TMPMAIL_DOMAIN_VERIFICATION_POLL_INTERVAL_SECONDS` 自动轮询未验证域名。
-- 托管域名只有在状态变为 `active` 后才允许所有用户创建邮箱账户。
+- 托管域名只有在状态变为 `active` 后才会进入可用域名范围；是否对公开注册开放，可在后台“公开可用域名”里单独控制。
 - 默认 DNS 方案会生成：
   - `CNAME mail.<domain> -> <共享收件主机>`，例如 `mail.fuckmail.online`
   - `MX <domain> -> <共享收件主机>`

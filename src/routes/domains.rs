@@ -27,30 +27,21 @@ pub async fn list_domains(
             state.store.list_domains_for_owner(user.id).await?
         }
     } else {
-        let (registration_enabled, allowed_suffixes) = {
+        let registration_enabled = {
             let admin_state = state.admin_state.read().await;
-            (
-                admin_state.is_public_registration_enabled(),
-                admin_state.registration_settings().allowed_email_suffixes,
-            )
+            admin_state.is_public_registration_enabled()
         };
         if !registration_enabled {
             Vec::new()
         } else {
             let domains = state.store.list_domains().await?;
-            if allowed_suffixes.is_empty() {
-                domains
-            } else {
-                domains
-                    .into_iter()
-                    .filter(|domain| {
-                        allowed_suffixes.iter().any(|suffix| {
-                            domain.domain == *suffix
-                                || domain.domain.ends_with(&format!(".{suffix}"))
-                        })
-                    })
-                    .collect()
-            }
+            let admin_state = state.admin_state.read().await;
+            domains
+                .into_iter()
+                .filter(|domain| {
+                    admin_state.is_domain_allowed_for_public_registration(&domain.domain)
+                })
+                .collect()
         }
     };
     let total = domains.len();

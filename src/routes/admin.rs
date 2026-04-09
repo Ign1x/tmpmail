@@ -892,7 +892,7 @@ pub async fn update_settings(
             "default".to_owned(),
             Some(actor.id.to_string()),
             format!(
-                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
+                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} public_domains={:?} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
                 settings.system_enabled,
                 settings.mail_exchange_host,
                 settings.mail_route_target,
@@ -906,6 +906,7 @@ pub async fn update_settings(
                 settings
                     .registration_settings
                     .open_registration_enabled,
+                settings.registration_settings.public_domains,
                 settings.registration_settings.allowed_email_suffixes,
                 settings.registration_settings.email_otp.enabled,
                 settings.registration_settings.linux_do.enabled,
@@ -1143,7 +1144,10 @@ fn request_origin_from_headers(
     Ok(parsed.origin().ascii_serialization())
 }
 
-fn request_authority_from_headers(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
+fn request_authority_from_headers(
+    headers: &HeaderMap,
+    trust_proxy_headers: bool,
+) -> Option<String> {
     if trust_proxy_headers {
         forwarded_host_from_headers(headers).or_else(|| host_from_headers(headers))
     } else {
