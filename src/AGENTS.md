@@ -24,7 +24,7 @@ Backend core modules own config, state, storage, workers, auth, and domain logic
 ## Invariants
 - `AppStore` is a PostgreSQL facade; do not reintroduce an in-memory or file-backed fallback.
 - `AppStore` owns its backend-specific concurrency; do not reintroduce a global outer mutex around it.
-- Business data lives in `AppStore`; console users/settings/API keys/Cloudflare credentials live in `AdminStateStore`.
+- Business data lives in `AppStore`; console users/settings/API keys/invite codes/Cloudflare credentials live in `AdminStateStore`.
 - OTP state lives in `otp.rs` and persists through the `otp_codes` table.
 - Linux Do client secrets can be seeded from `TMPMAIL_LINUX_DO_CLIENT_SECRET`; `AdminStateStore` persists the secret separately in PostgreSQL.
 - Domain code should use `effective_runtime_config()` when admin-managed overrides can affect DNS or routing behavior.

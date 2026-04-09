@@ -43,6 +43,7 @@ import { replaceBrowserPath } from "@/lib/admin-entry"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
+const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
 
 type EntryMode = "register" | "login"
 
@@ -108,6 +109,7 @@ export default function AdminEntryPage({
   const [registerEmail, setRegisterEmail] = useState("")
   const [registerPassword, setRegisterPassword] = useState("")
   const [registerOtpCode, setRegisterOtpCode] = useState("")
+  const [registerInviteCode, setRegisterInviteCode] = useState("")
   const [recoveryToken, setRecoveryToken] = useState("")
   const [recoveryUsername, setRecoveryUsername] = useState("admin")
   const [recoveryPassword, setRecoveryPassword] = useState("")
@@ -128,6 +130,7 @@ export default function AdminEntryPage({
 
   const needsSetup = status?.isBootstrapRequired ?? true
   const canRegister = status?.openRegistrationEnabled ?? false
+  const inviteCodeRequired = status?.consoleInviteCodeRequired ?? false
   const emailOtpEnabled = status?.emailOtpEnabled ?? false
   const canUseLinuxDo = canRegister && (status?.linuxDoEnabled ?? false)
   const canUseSensitiveAdminActions = !requireSecureTransport || isSecureAdminContext
@@ -165,6 +168,12 @@ export default function AdminEntryPage({
       setRegisterOtpCooldown(0)
     }
   }, [emailOtpEnabled])
+
+  useEffect(() => {
+    if (!inviteCodeRequired) {
+      setRegisterInviteCode("")
+    }
+  }, [inviteCodeRequired])
 
   useEffect(() => {
     if (registerOtpCooldown <= 0) {
@@ -397,6 +406,11 @@ export default function AdminEntryPage({
       return
     }
 
+    if (inviteCodeRequired && !registerInviteCode.trim()) {
+      toast({ title: ta("registerInviteCodeRequired"), color: "warning", variant: "flat" })
+      return
+    }
+
     if (typeof window === "undefined") {
       return
     }
@@ -406,12 +420,23 @@ export default function AdminEntryPage({
     try {
       const state = generateLinuxDoState()
       sessionStorage.setItem(LINUX_DO_STATE_STORAGE_KEY, state)
+      if (inviteCodeRequired) {
+        sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, registerInviteCode.trim())
+      } else {
+        sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
+      }
       const redirectUri = new URL(`${consolePath}/auth/linux-do`, window.location.origin).toString()
-      const response = await getLinuxDoAuthorizationUrl(redirectUri, state, DEFAULT_PROVIDER_ID)
+      const response = await getLinuxDoAuthorizationUrl(
+        redirectUri,
+        state,
+        inviteCodeRequired ? registerInviteCode.trim() : undefined,
+        DEFAULT_PROVIDER_ID,
+      )
       window.location.assign(response.authorizationUrl)
     } catch (error) {
       try {
         sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+        sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
       } catch {}
 
       toast({
@@ -451,6 +476,11 @@ export default function AdminEntryPage({
       return
     }
 
+    if (inviteCodeRequired && !registerInviteCode.trim()) {
+      toast({ title: ta("registerInviteCodeRequired"), color: "warning", variant: "flat" })
+      return
+    }
+
     if (emailOtpEnabled && !registerOtpCode.trim()) {
       toast({ title: ta("registerOtpRequired"), color: "warning", variant: "flat" })
       return
@@ -469,6 +499,7 @@ export default function AdminEntryPage({
           email: normalizedEmail,
           password: registerPassword,
           otpCode: emailOtpEnabled ? registerOtpCode.trim() : undefined,
+          inviteCode: inviteCodeRequired ? registerInviteCode.trim() : undefined,
         },
         DEFAULT_PROVIDER_ID,
       )
@@ -478,6 +509,7 @@ export default function AdminEntryPage({
       storePendingAdminSession(response.session)
       setRegisterPassword("")
       setRegisterOtpCode("")
+      setRegisterInviteCode("")
       setEntryMode("login")
       toast({
         title: ta("registerSuccess"),
@@ -520,10 +552,21 @@ export default function AdminEntryPage({
       return
     }
 
+    if (inviteCodeRequired && !registerInviteCode.trim()) {
+      toast({ title: ta("registerInviteCodeRequired"), color: "warning", variant: "flat" })
+      return
+    }
+
     setIsSendingRegisterOtp(true)
 
     try {
-      const response = await sendConsoleRegisterOtp({ email: normalizedEmail }, DEFAULT_PROVIDER_ID)
+      const response = await sendConsoleRegisterOtp(
+        {
+          email: normalizedEmail,
+          inviteCode: inviteCodeRequired ? registerInviteCode.trim() : undefined,
+        },
+        DEFAULT_PROVIDER_ID,
+      )
       setRegisterOtpCooldown(response.cooldownSeconds)
       toast({
         title: ta("registerOtpSent"),
@@ -615,6 +658,7 @@ export default function AdminEntryPage({
               openRegistrationEnabled: false,
               linuxDoEnabled: false,
               emailOtpEnabled: false,
+              consoleInviteCodeRequired: false,
             },
       )
       toast({
@@ -903,6 +947,16 @@ export default function AdminEntryPage({
                           autoComplete="email"
                           classNames={TM_INPUT_CLASSNAMES}
                         />
+                        {inviteCodeRequired && (
+                          <Input
+                            label={ta("registerInviteCodeLabel")}
+                            value={registerInviteCode}
+                            onValueChange={setRegisterInviteCode}
+                            variant="bordered"
+                            autoComplete="one-time-code"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
+                        )}
                         {emailOtpEnabled && (
                           <div className="space-y-3">
                             <div className="flex flex-col gap-3 sm:flex-row">
@@ -984,16 +1038,23 @@ export default function AdminEntryPage({
 
                   <div className="flex flex-wrap items-center gap-2">
                     {canUseLinuxDo && (
-                      <Button
-                        variant="flat"
-                        className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
-                        onPress={handleLinuxDoAuth}
-                        isLoading={isSubmittingLinuxDo}
-                        isDisabled={!canUseSensitiveAdminActions}
-                        endContent={!isSubmittingLinuxDo ? <ChevronRight size={16} /> : undefined}
-                      >
-                        {ta("linuxDoSubmit")}
-                      </Button>
+                      <div className="space-y-1">
+                        <Button
+                          variant="flat"
+                          className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
+                          onPress={handleLinuxDoAuth}
+                          isLoading={isSubmittingLinuxDo}
+                          isDisabled={!canUseSensitiveAdminActions}
+                          endContent={!isSubmittingLinuxDo ? <ChevronRight size={16} /> : undefined}
+                        >
+                          {ta("linuxDoSubmit")}
+                        </Button>
+                        {inviteCodeRequired && (
+                          <p className="text-xs text-slate-500 dark:text-slate-400">
+                            {ta("linuxDoInviteCodeHint")}
+                          </p>
+                        )}
+                      </div>
                     )}
 
                     {status?.isRecoveryEnabled && (

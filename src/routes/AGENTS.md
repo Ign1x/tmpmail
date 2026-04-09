@@ -17,7 +17,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 |---|---|---|
 | Health/readiness | `health.rs` | Public liveness and backend-aware readiness |
 | Ops/public notice | `ops.rs` | Public `/metrics`, public update notice, admin metrics/audit/cleanup |
-| Admin console | `admin.rs` | Bootstrap, login, session, recovery, Linux Do auth, users, settings, access keys |
+| Admin console | `admin.rs` | Bootstrap, login, session, recovery, Linux Do auth, users, settings, access keys, invite codes |
 | Managed domains | `domains.rs` | Public listing plus console-scoped create/verify/delete |
 | Accounts | `accounts.rs` | Console-owned mailbox listing/create/token issuance plus legacy mailbox token login/self delete |
 | Messages | `messages.rs` | List/get/patch/delete plus raw/attachment download |
@@ -28,6 +28,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - `admin/linux-do/authorize` and `admin/linux-do/complete` are public-facing registration helpers, but still require secure admin transport and the Linux Do registration feature to be enabled.
 - Linux Do redirect URIs must either match the configured callback allowlist exactly or stay same-origin with the current admin request; keep `state` validation strict.
 - `admin/setup`, `admin/login`, and `admin/recover` require secure admin transport.
+- `admin/register`, `admin/register/otp`, `admin/linux-do/authorize`, and first-time `admin/linux-do/complete` must honor invite-code requirements when public member signup is configured as invite-only.
 - `admin/login`, `admin/recover`, and public `POST /token` also enforce fixed-window brute-force throttling.
 - `admin/register/otp` and `accounts/otp` enforce IP-scoped OTP send throttling; OTP verification also expires codes after too many wrong attempts.
 - Session-only console endpoints must reject stale JWTs after password or recovery changes; do not treat console session TTL as the only revocation mechanism.
@@ -44,6 +45,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - Admin mutations usually append audit logs.
 - Managed-domain deletion now also attempts Cloudflare DNS cleanup when the owning console user still has Cloudflare enabled with a saved token; keep that behavior in the route edge so non-frontend clients get the same cleanup.
 - `GET /admin/access-key` is read-only metadata now; only explicit create/regenerate endpoints may mint a new plaintext API key.
+- Invite-code plaintext must only be returned from the explicit create endpoint; list/update/delete flows stay metadata-only.
 - Message patch/delete must preserve realtime publish behavior.
 - Sensitive auth surfaces should keep abuse controls close to the route edge; current fixed-window throttling covers `/admin/login`, `/admin/recover`, and `/token`.
 - OTP abuse controls are split intentionally: send throttling stays at the route edge, while wrong-code attempt caps live in `otp.rs` so both registration flows share the same rules.

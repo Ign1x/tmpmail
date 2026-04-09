@@ -17,10 +17,11 @@ use crate::{
     config::Config,
     error::{ApiError, AppResult},
     models::{
-        AdminAccessKey, AdminEmailOtpSettings, AdminRegistrationSettings, AdminSmtpSettings,
-        AdminSystemSettings, AdminUserLimitsSettings, ConsoleCloudflareSettings, ConsoleUser,
-        ConsoleUserRole, LinuxDoAuthSettings, LocalizedUpdateNoticeContent, PublicNoticeTone,
-        PublicUpdateNotice, PublicUpdateNoticeSection, SmtpSecurity,
+        AdminAccessKey, AdminEmailOtpSettings, AdminInviteCode, AdminRegistrationSettings,
+        AdminSmtpSettings, AdminSystemSettings, AdminUserLimitsSettings,
+        ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole, LinuxDoAuthSettings,
+        LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
+        PublicUpdateNoticeSection, SmtpSecurity,
         default_smtp_port_for_security,
     },
     state::AppState,
@@ -30,6 +31,7 @@ const MIN_USERNAME_LENGTH: usize = 3;
 const MAX_USERNAME_LENGTH: usize = 32;
 const MAX_EMAIL_IDENTITY_LENGTH: usize = 128;
 const ADMIN_API_KEY_PREFIX: &str = "tmpmail_admin_";
+const INVITE_CODE_PREFIX: &str = "tmpmail_inv_";
 const LINUX_DO_DEFAULT_AUTHORIZE_URL: &str = "https://connect.linux.do/oauth2/authorize";
 const LINUX_DO_DEFAULT_TOKEN_URL: &str = "https://connect.linux.do/oauth2/token";
 const LINUX_DO_DEFAULT_USERINFO_URL: &str = "https://connect.linux.do/api/user";
@@ -117,6 +119,25 @@ struct PersistedConsoleAccessKey {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PersistedInviteCode {
+    id: Uuid,
+    name: String,
+    code_hash: String,
+    code_hint: String,
+    #[serde(default)]
+    max_uses: Option<u32>,
+    #[serde(default)]
+    uses_count: u32,
+    #[serde(default)]
+    is_disabled: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    #[serde(default)]
+    last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct PersistedCloudflareSettings {
     #[serde(default)]
     enabled: bool,
@@ -175,6 +196,8 @@ struct PersistedConsoleUser {
 struct PersistedAdminState {
     #[serde(default)]
     users: Vec<PersistedConsoleUser>,
+    #[serde(default)]
+    invite_codes: Vec<PersistedInviteCode>,
     #[serde(default)]
     system_settings: PersistedSystemSettings,
     #[serde(default)]
@@ -363,6 +386,13 @@ impl AdminStateStore {
             .system_settings
             .registration_settings
             .open_registration_enabled
+    }
+
+    pub fn is_console_invite_code_required(&self) -> bool {
+        self.persisted
+            .system_settings
+            .registration_settings
+            .console_invite_code_required
     }
 
     pub fn default_public_domain_limit(&self) -> u32 {
@@ -623,6 +653,88 @@ impl AdminStateStore {
         users
     }
 
+    pub fn list_invite_codes(&self) -> Vec<AdminInviteCode> {
+        let mut codes = self
+            .persisted
+            .invite_codes
+            .iter()
+            .map(PersistedInviteCode::to_public)
+            .collect::<Vec<_>>();
+        codes.sort_by(|left, right| right.created_at.cmp(&left.created_at));
+        codes
+    }
+
+    pub fn create_invite_code(
+        &mut self,
+        name: Option<&str>,
+        max_uses: Option<u32>,
+    ) -> AppResult<(AdminInviteCode, String)> {
+        let now = Utc::now();
+        let invite_code = generate_invite_code();
+        let persisted = PersistedInviteCode {
+            id: Uuid::new_v4(),
+            name: normalize_invite_code_name(name, self.persisted.invite_codes.len() + 1),
+            code_hash: auth::hash_password(&invite_code)?,
+            code_hint: mask_invite_code(&invite_code),
+            max_uses: normalize_invite_code_max_uses(max_uses)?,
+            uses_count: 0,
+            is_disabled: false,
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+        };
+        let public = persisted.to_public();
+        self.persisted.invite_codes.push(persisted);
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok((public, invite_code))
+    }
+
+    pub fn update_invite_code(
+        &mut self,
+        invite_code_id: Uuid,
+        is_disabled: Option<bool>,
+    ) -> AppResult<AdminInviteCode> {
+        let now = Utc::now();
+        let invite_code = self
+            .persisted
+            .invite_codes
+            .iter_mut()
+            .find(|candidate| candidate.id == invite_code_id)
+            .ok_or_else(|| ApiError::not_found("invite code not found"))?;
+
+        if let Some(value) = is_disabled {
+            invite_code.is_disabled = value;
+        }
+        invite_code.updated_at = now;
+        let public = invite_code.to_public();
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok(public)
+    }
+
+    pub fn delete_invite_code(&mut self, invite_code_id: Uuid) -> AppResult<AdminInviteCode> {
+        let now = Utc::now();
+        let index = self
+            .persisted
+            .invite_codes
+            .iter()
+            .position(|candidate| candidate.id == invite_code_id)
+            .ok_or_else(|| ApiError::not_found("invite code not found"))?;
+        let removed = self.persisted.invite_codes.remove(index);
+        self.persisted.updated_at = Some(now);
+        self.save()?;
+
+        Ok(removed.to_public())
+    }
+
+    pub fn validate_invite_code(&self, invite_code: &str) -> AppResult<()> {
+        let index = self.find_invite_code_index(invite_code)?;
+        ensure_invite_code_available(&self.persisted.invite_codes[index])
+    }
+
     pub fn create_user(
         &mut self,
         username: &str,
@@ -639,15 +751,30 @@ impl AdminStateStore {
         username: &str,
         password: &str,
         domain_limit: u32,
+        invite_code: Option<&str>,
     ) -> AppResult<ConsoleUser> {
         let normalized_username = normalize_username(username)?;
         self.ensure_public_registration_identifier_allowed(&normalized_username)?;
-        self.create_user_with_normalized(
+        validate_password(password)?;
+        self.ensure_username_available(&normalized_username, None)?;
+
+        let now = Utc::now();
+        if self.is_console_invite_code_required() {
+            self.consume_invite_code_without_saving(
+                invite_code
+                    .ok_or_else(|| ApiError::validation("invite code is required"))?,
+                now,
+            )?;
+        }
+
+        let user = self.build_console_user(
             normalized_username,
-            password,
             ConsoleUserRole::User,
+            auth::hash_password(password)?,
             domain_limit,
-        )
+            now,
+        );
+        self.persist_new_user(user)
     }
 
     fn create_user_with_normalized(
@@ -661,11 +788,29 @@ impl AdminStateStore {
         self.ensure_username_available(&normalized_username, None)?;
 
         let now = Utc::now();
-        let user = PersistedConsoleUser {
-            id: Uuid::new_v4(),
-            username: normalized_username,
+        let user = self.build_console_user(
+            normalized_username,
             role,
-            password_hash: auth::hash_password(password)?,
+            auth::hash_password(password)?,
+            domain_limit,
+            now,
+        );
+        self.persist_new_user(user)
+    }
+
+    fn build_console_user(
+        &self,
+        username: String,
+        role: ConsoleUserRole,
+        password_hash: String,
+        domain_limit: u32,
+        now: DateTime<Utc>,
+    ) -> PersistedConsoleUser {
+        PersistedConsoleUser {
+            id: Uuid::new_v4(),
+            username,
+            role,
+            password_hash,
             domain_limit,
             is_disabled: false,
             api_keys: Vec::new(),
@@ -680,13 +825,45 @@ impl AdminStateStore {
             linux_do_username: None,
             linux_do_trust_level: None,
             cloudflare: PersistedCloudflareSettings::default(),
-        };
+        }
+    }
+
+    fn persist_new_user(&mut self, user: PersistedConsoleUser) -> AppResult<ConsoleUser> {
         let public = user.to_public();
         self.persisted.users.push(user);
-        self.persisted.updated_at = Some(now);
+        self.persisted.updated_at = Some(Utc::now());
         self.save()?;
 
         Ok(public)
+    }
+
+    fn find_invite_code_index(&self, invite_code: &str) -> AppResult<usize> {
+        let normalized_invite_code = normalize_invite_code(invite_code)?;
+        self.persisted
+            .invite_codes
+            .iter()
+            .position(|candidate| {
+                auth::verify_password(&normalized_invite_code, &candidate.code_hash).unwrap_or(false)
+            })
+            .ok_or_else(|| ApiError::validation("invite code is invalid"))
+    }
+
+    fn consume_invite_code_without_saving(
+        &mut self,
+        invite_code: &str,
+        now: DateTime<Utc>,
+    ) -> AppResult<()> {
+        let index = self.find_invite_code_index(invite_code)?;
+        let persisted = self
+            .persisted
+            .invite_codes
+            .get_mut(index)
+            .ok_or_else(|| ApiError::validation("invite code is invalid"))?;
+        ensure_invite_code_available(persisted)?;
+        persisted.uses_count = persisted.uses_count.saturating_add(1);
+        persisted.last_used_at = Some(now);
+        persisted.updated_at = now;
+        Ok(())
     }
 
     pub fn update_user(
@@ -743,6 +920,7 @@ impl AdminStateStore {
         linux_do_user_id: &str,
         linux_do_username: &str,
         trust_level: u8,
+        invite_code: Option<&str>,
     ) -> AppResult<AuthenticatedConsoleUser> {
         let normalized_user_id = normalize_linux_do_user_id(linux_do_user_id)?;
         let trimmed_linux_do_username = linux_do_username.trim();
@@ -768,27 +946,25 @@ impl AdminStateStore {
 
         let username =
             self.allocate_linux_do_username(trimmed_linux_do_username, &normalized_user_id)?;
+        if self.is_console_invite_code_required() {
+            self.consume_invite_code_without_saving(
+                invite_code
+                    .ok_or_else(|| ApiError::validation("invite code is required"))?,
+                now,
+            )?;
+        }
         let password_hash = auth::hash_password(&generate_linux_do_placeholder_password())?;
-        let user = PersistedConsoleUser {
-            id: Uuid::new_v4(),
+        let mut user = self.build_console_user(
             username,
-            role: ConsoleUserRole::User,
+            ConsoleUserRole::User,
             password_hash,
-            domain_limit: self.default_public_domain_limit(),
-            is_disabled: false,
-            api_keys: Vec::new(),
-            api_key_hash: None,
-            api_key_hint: None,
-            created_at: now,
-            updated_at: now,
-            password_updated_at: now,
-            api_key_updated_at: None,
-            last_login_at: Some(now),
-            linux_do_user_id: Some(normalized_user_id),
-            linux_do_username: normalize_optional_copy(Some(trimmed_linux_do_username.to_owned())),
-            linux_do_trust_level: Some(trust_level),
-            cloudflare: PersistedCloudflareSettings::default(),
-        };
+            self.default_public_domain_limit(),
+            now,
+        );
+        user.last_login_at = Some(now);
+        user.linux_do_user_id = Some(normalized_user_id);
+        user.linux_do_username = normalize_optional_copy(Some(trimmed_linux_do_username.to_owned()));
+        user.linux_do_trust_level = Some(trust_level);
         let authenticated = user.to_authenticated();
         self.persisted.users.push(user);
         self.persisted.updated_at = Some(now);
@@ -1451,6 +1627,7 @@ fn default_cloudflare_auto_sync_enabled() -> bool {
 fn default_registration_settings() -> AdminRegistrationSettings {
     AdminRegistrationSettings {
         open_registration_enabled: true,
+        console_invite_code_required: false,
         public_domains: Vec::new(),
         allowed_email_suffixes: Vec::new(),
         email_otp: default_email_otp_settings(),
@@ -1778,6 +1955,7 @@ fn normalize_registration_settings(
 
     Ok(AdminRegistrationSettings {
         open_registration_enabled: value.open_registration_enabled,
+        console_invite_code_required: value.console_invite_code_required,
         public_domains,
         allowed_email_suffixes,
         email_otp,
@@ -2098,6 +2276,25 @@ fn normalize_api_key_name(value: Option<&str>, fallback_index: usize) -> String 
     normalized.unwrap_or_else(|| format!("Key {fallback_index}"))
 }
 
+fn normalize_invite_code_name(value: Option<&str>, fallback_index: usize) -> String {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(64).collect::<String>());
+
+    normalized.unwrap_or_else(|| format!("Invite {fallback_index}"))
+}
+
+fn normalize_invite_code_max_uses(value: Option<u32>) -> AppResult<Option<u32>> {
+    match value {
+        Some(0) => Err(ApiError::validation(
+            "invite code max uses must be greater than zero",
+        )),
+        Some(value) => Ok(Some(value)),
+        None => Ok(None),
+    }
+}
+
 fn build_legacy_access_key(
     legacy_hash: Option<String>,
     legacy_plaintext: Option<String>,
@@ -2136,6 +2333,12 @@ fn generate_admin_api_key() -> String {
     format!("{ADMIN_API_KEY_PREFIX}{}", hex_encode(&bytes))
 }
 
+fn generate_invite_code() -> String {
+    let mut bytes = [0_u8; 12];
+    OsRng.fill_bytes(&mut bytes);
+    format!("{INVITE_CODE_PREFIX}{}", hex_encode(&bytes))
+}
+
 fn generate_linux_do_placeholder_password() -> String {
     let mut bytes = [0_u8; 24];
     OsRng.fill_bytes(&mut bytes);
@@ -2166,6 +2369,41 @@ fn mask_api_key(value: &str) -> String {
     )
 }
 
+fn normalize_invite_code(value: &str) -> AppResult<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(ApiError::validation("invite code is required"));
+    }
+
+    Ok(normalized)
+}
+
+fn mask_invite_code(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.len() <= 8 {
+        return "hidden".to_owned();
+    }
+
+    format!(
+        "{}...{}",
+        &trimmed[..8],
+        &trimmed[trimmed.len().saturating_sub(4)..]
+    )
+}
+
+fn ensure_invite_code_available(invite_code: &PersistedInviteCode) -> AppResult<()> {
+    if invite_code.is_disabled {
+        return Err(ApiError::validation("invite code is disabled"));
+    }
+    if let Some(max_uses) = invite_code.max_uses
+        && invite_code.uses_count >= max_uses
+    {
+        return Err(ApiError::validation("invite code has been exhausted"));
+    }
+
+    Ok(())
+}
+
 impl PersistedConsoleAccessKey {
     fn to_public(&self) -> AdminAccessKey {
         AdminAccessKey {
@@ -2173,6 +2411,23 @@ impl PersistedConsoleAccessKey {
             name: self.name.clone(),
             masked_key: self.key_hint.clone(),
             created_at: self.created_at,
+        }
+    }
+}
+
+impl PersistedInviteCode {
+    fn to_public(&self) -> AdminInviteCode {
+        AdminInviteCode {
+            id: self.id.to_string(),
+            name: self.name.clone(),
+            masked_code: self.code_hint.clone(),
+            max_uses: self.max_uses,
+            uses_count: self.uses_count,
+            remaining_uses: self.max_uses.map(|max_uses| max_uses.saturating_sub(self.uses_count)),
+            is_disabled: self.is_disabled,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            last_used_at: self.last_used_at,
         }
     }
 }
@@ -2253,12 +2508,16 @@ impl PersistedConsoleUser {
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use serde_json::Value;
     use sqlx::{Connection, PgConnection, Row};
     use tokio::runtime::Builder;
+    use uuid::Uuid;
 
     use super::{
-        AdminStateStore, default_registration_settings, domain_matches_public_registration_rules,
+        AdminStateStore, PersistedInviteCode, default_registration_settings,
+        domain_matches_public_registration_rules, ensure_invite_code_available,
+        normalize_invite_code_max_uses,
     };
     use crate::{
         config::Config,
@@ -2457,5 +2716,65 @@ mod tests {
             &settings,
             "mail.other.example",
         ));
+    }
+
+    #[test]
+    fn invite_code_availability_rejects_disabled_and_exhausted_codes() {
+        let now = Utc::now();
+        let disabled = PersistedInviteCode {
+            id: Uuid::new_v4(),
+            name: "disabled".to_owned(),
+            code_hash: "hidden".to_owned(),
+            code_hint: "tmpmail_...0000".to_owned(),
+            max_uses: Some(2),
+            uses_count: 0,
+            is_disabled: true,
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+        };
+        let exhausted = PersistedInviteCode {
+            id: Uuid::new_v4(),
+            name: "exhausted".to_owned(),
+            code_hash: "hidden".to_owned(),
+            code_hint: "tmpmail_...1111".to_owned(),
+            max_uses: Some(1),
+            uses_count: 1,
+            is_disabled: false,
+            created_at: now,
+            updated_at: now,
+            last_used_at: Some(now),
+        };
+
+        assert!(ensure_invite_code_available(&disabled).is_err());
+        assert!(ensure_invite_code_available(&exhausted).is_err());
+    }
+
+    #[test]
+    fn invite_code_public_view_calculates_remaining_uses() {
+        let now = Utc::now();
+        let code = PersistedInviteCode {
+            id: Uuid::new_v4(),
+            name: "limited".to_owned(),
+            code_hash: "hidden".to_owned(),
+            code_hint: "tmpmail_...2222".to_owned(),
+            max_uses: Some(5),
+            uses_count: 2,
+            is_disabled: false,
+            created_at: now,
+            updated_at: now,
+            last_used_at: Some(now),
+        };
+
+        let public = code.to_public();
+        assert_eq!(public.remaining_uses, Some(3));
+        assert_eq!(public.uses_count, 2);
+    }
+
+    #[test]
+    fn invite_code_max_uses_zero_is_invalid() {
+        assert!(normalize_invite_code_max_uses(Some(0)).is_err());
+        assert_eq!(normalize_invite_code_max_uses(Some(3)).unwrap(), Some(3));
+        assert_eq!(normalize_invite_code_max_uses(None).unwrap(), None);
     }
 }

@@ -11,6 +11,7 @@ import { completeLinuxDoLogin } from "@/lib/api"
 import { BRAND_NAME, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
+const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
 
 interface LinuxDoCallbackPageProps {
   callbackPath: string
@@ -52,6 +53,8 @@ export default function LinuxDoCallbackPage({
       }
 
       const storedState = sessionStorage.getItem(LINUX_DO_STATE_STORAGE_KEY)?.trim() || ""
+      const storedInviteCode =
+        sessionStorage.getItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)?.trim() || ""
       sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
 
       if (error) {
@@ -71,11 +74,13 @@ export default function LinuxDoCallbackPage({
         {
           code,
           redirectUri,
+          inviteCode: storedInviteCode || undefined,
         },
         DEFAULT_PROVIDER_ID,
       )
 
       setStoredAdminSession()
+      sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
       window.location.replace(homePath)
     }
 

@@ -49,6 +49,7 @@ export interface AdminStatus {
   isRecoveryEnabled: boolean;
   systemEnabled: boolean;
   openRegistrationEnabled: boolean;
+  consoleInviteCodeRequired: boolean;
   linuxDoEnabled: boolean;
   emailOtpEnabled: boolean;
 }
@@ -115,6 +116,7 @@ export interface LinuxDoAuthSettings {
 
 export interface AdminRegistrationSettings {
   openRegistrationEnabled: boolean
+  consoleInviteCodeRequired: boolean
   publicDomains: string[]
   allowedEmailSuffixes: string[]
   emailOtp: AdminEmailOtpSettings
@@ -150,10 +152,12 @@ export interface ConsoleRegisterRequest {
   email?: string
   password: string
   otpCode?: string
+  inviteCode?: string
 }
 
 export interface SendEmailOtpRequest {
   email: string
+  inviteCode?: string
 }
 
 export interface SendEmailOtpResponse {
@@ -216,6 +220,37 @@ export interface AdminAccessKeyResponse {
   apiKey: string;
 }
 
+export interface AdminInviteCode {
+  id: string
+  name: string
+  maskedCode: string
+  maxUses?: number
+  usesCount: number
+  remainingUses?: number
+  isDisabled: boolean
+  createdAt: string
+  updatedAt: string
+  lastUsedAt?: string
+}
+
+export interface AdminInviteCodeListResponse {
+  codes: AdminInviteCode[]
+}
+
+export interface AdminInviteCodeResponse {
+  code: AdminInviteCode
+  inviteCode: string
+}
+
+export interface AdminCreateInviteCodeRequest {
+  name?: string
+  maxUses?: number
+}
+
+export interface AdminUpdateInviteCodeRequest {
+  isDisabled?: boolean
+}
+
 export interface ConsoleCloudflareSettings {
   enabled: boolean
   apiTokenConfigured: boolean
@@ -252,6 +287,7 @@ export interface LinuxDoAuthorizeResponse {
 export interface LinuxDoCompleteRequest {
   code: string
   redirectUri: string
+  inviteCode?: string
 }
 
 export interface AdminAuditLogsResponse {
@@ -1156,10 +1192,18 @@ export async function getAdminStatus(
 export async function getLinuxDoAuthorizationUrl(
   redirectUri: string,
   state: string,
+  inviteCode?: string,
   providerId = DEFAULT_PROVIDER_ID,
 ): Promise<LinuxDoAuthorizeResponse> {
   const headers = createBaseHeaders(providerId)
-  const endpoint = `/admin/linux-do/authorize?redirectUri=${encodeURIComponent(redirectUri)}&state=${encodeURIComponent(state)}`
+  const query = new URLSearchParams({
+    redirectUri,
+    state,
+  })
+  if (inviteCode?.trim()) {
+    query.set("inviteCode", inviteCode.trim())
+  }
+  const endpoint = `/admin/linux-do/authorize?${query.toString()}`
   const res = await fetch(buildProxyUrl(endpoint), {
     headers,
     cache: "no-store",
@@ -1404,6 +1448,72 @@ export async function deleteAdminAccessKey(
 ): Promise<void> {
   const headers = createHeadersWithAdminSession({}, providerId)
   const res = await fetch(buildProxyUrl(`/admin/access-keys/${keyId}`), {
+    method: "DELETE",
+    headers,
+  })
+
+  await ensureAdminSessionResponse(res)
+}
+
+export async function fetchAdminInviteCodes(
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminInviteCodeListResponse> {
+  const headers = createHeadersWithAdminSession({}, providerId)
+  const res = await fetch(buildProxyUrl("/admin/invite-codes"), {
+    headers,
+    cache: "no-store",
+  })
+
+  await ensureAdminSessionResponse(res)
+
+  return readJsonWithTimeout<AdminInviteCodeListResponse>(res)
+}
+
+export async function createAdminInviteCode(
+  payload: AdminCreateInviteCodeRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminInviteCodeResponse> {
+  const headers = createHeadersWithAdminSession(
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl("/admin/invite-codes"), {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  await ensureAdminSessionResponse(res)
+
+  return readJsonWithTimeout<AdminInviteCodeResponse>(res)
+}
+
+export async function updateAdminInviteCode(
+  inviteCodeId: string,
+  payload: AdminUpdateInviteCodeRequest,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<AdminInviteCode> {
+  const headers = createHeadersWithAdminSession(
+    { "Content-Type": "application/json" },
+    providerId,
+  )
+  const res = await fetch(buildProxyUrl(`/admin/invite-codes/${inviteCodeId}`), {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify(payload),
+  })
+
+  await ensureAdminSessionResponse(res)
+
+  return readJsonWithTimeout<AdminInviteCode>(res)
+}
+
+export async function deleteAdminInviteCode(
+  inviteCodeId: string,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<void> {
+  const headers = createHeadersWithAdminSession({}, providerId)
+  const res = await fetch(buildProxyUrl(`/admin/invite-codes/${inviteCodeId}`), {
     method: "DELETE",
     headers,
   })

@@ -38,6 +38,14 @@ pub fn api_router() -> Router<AppState> {
             get(admin::list_access_keys).post(admin::create_access_key),
         )
         .route("/admin/access-keys/{id}", delete(admin::delete_access_key))
+        .route(
+            "/admin/invite-codes",
+            get(admin::list_invite_codes).post(admin::create_invite_code),
+        )
+        .route(
+            "/admin/invite-codes/{id}",
+            patch(admin::update_invite_code).delete(admin::delete_invite_code),
+        )
         .route("/admin/password", post(admin::change_password))
         .route(
             "/admin/users",

@@ -133,6 +133,7 @@ pub struct AdminStatusResponse {
     pub is_recovery_enabled: bool,
     pub system_enabled: bool,
     pub open_registration_enabled: bool,
+    pub console_invite_code_required: bool,
     pub linux_do_enabled: bool,
     pub email_otp_enabled: bool,
 }
@@ -242,6 +243,8 @@ pub struct LinuxDoAuthSettings {
 #[serde(rename_all = "camelCase")]
 pub struct AdminRegistrationSettings {
     pub open_registration_enabled: bool,
+    #[serde(default)]
+    pub console_invite_code_required: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub public_domains: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -368,6 +371,50 @@ pub struct AdminAccessKeyResponse {
     pub api_key: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminInviteCode {
+    pub id: String,
+    pub name: String,
+    pub masked_code: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_uses: Option<u32>,
+    pub uses_count: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remaining_uses: Option<u32>,
+    pub is_disabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminInviteCodeListResponse {
+    pub codes: Vec<AdminInviteCode>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminInviteCodeResponse {
+    pub code: AdminInviteCode,
+    pub invite_code: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminCreateInviteCodeRequest {
+    pub name: Option<String>,
+    pub max_uses: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdminUpdateInviteCodeRequest {
+    pub is_disabled: Option<bool>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AdminCreateAccessKeyRequest {
@@ -379,6 +426,8 @@ pub struct AdminCreateAccessKeyRequest {
 pub struct LinuxDoAuthorizeRequest {
     pub redirect_uri: String,
     pub state: String,
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -392,6 +441,8 @@ pub struct LinuxDoAuthorizeResponse {
 pub struct LinuxDoCompleteRequest {
     pub code: String,
     pub redirect_uri: String,
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -515,6 +566,8 @@ pub struct CreateAccountRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SendEmailOtpRequest {
     pub email: String,
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -564,6 +617,8 @@ pub struct ConsoleRegisterRequest {
     pub password: String,
     #[serde(default)]
     pub otp_code: Option<String>,
+    #[serde(default)]
+    pub invite_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

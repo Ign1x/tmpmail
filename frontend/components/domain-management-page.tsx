@@ -45,7 +45,9 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { usePathname, useRouter } from "@/i18n/navigation"
 import {
   type AdminAccessKey,
+  type AdminInviteCode,
   createAdminAccessKey,
+  createAdminInviteCode,
   createAdminUser,
   deleteAdminSession,
   type AdminMetricsResponse,
@@ -58,10 +60,12 @@ import {
   clearAdminAuditLogs,
   createManagedDomain,
   deleteAdminAccessKey,
+  deleteAdminInviteCode,
   deleteAdminUser,
   deleteOwnedAccount,
   deleteManagedDomain,
   fetchAdminAccessKeys,
+  fetchAdminInviteCodes,
   fetchConsoleCloudflareSettings,
   fetchOwnedAccounts,
   fetchAdminUsers,
@@ -78,6 +82,7 @@ import {
   syncManagedDomainCloudflare,
   testConsoleCloudflareToken,
   updateConsoleCloudflareSettings,
+  updateAdminInviteCode,
   updateAdminPassword,
   updateAdminSystemSettings,
   updateAdminUser,
@@ -153,6 +158,7 @@ const DEFAULT_SETTINGS: AdminSystemSettings = {
   smtp: DEFAULT_SMTP_SETTINGS,
   registrationSettings: {
     openRegistrationEnabled: true,
+    consoleInviteCodeRequired: false,
     publicDomains: [],
     allowedEmailSuffixes: [],
     emailOtp: {
@@ -582,7 +588,6 @@ export default function DomainManagementPage({
   const [usersLoading, setUsersLoading] = useState(false)
   const [newUsername, setNewUsername] = useState("")
   const [newUserPassword, setNewUserPassword] = useState("")
-  const [newUserRole, setNewUserRole] = useState<ConsoleUser["role"]>("user")
   const [newUserDomainLimit, setNewUserDomainLimit] = useState("3")
   const [isCreatingUser, setIsCreatingUser] = useState(false)
   const [adminMetrics, setAdminMetrics] = useState<AdminMetricsResponse | null>(null)
@@ -595,11 +600,23 @@ export default function DomainManagementPage({
   const [newAccessKeyName, setNewAccessKeyName] = useState("")
   const [isCreatingAccessKey, setIsCreatingAccessKey] = useState(false)
   const [deletingAccessKeyId, setDeletingAccessKeyId] = useState<string | null>(null)
+  const [adminInviteCodes, setAdminInviteCodes] = useState<AdminInviteCode[]>([])
+  const [inviteCodesLoading, setInviteCodesLoading] = useState(false)
+  const [newInviteCodeName, setNewInviteCodeName] = useState("")
+  const [newInviteCodeMaxUses, setNewInviteCodeMaxUses] = useState("")
+  const [isCreatingInviteCode, setIsCreatingInviteCode] = useState(false)
+  const [updatingInviteCodeId, setUpdatingInviteCodeId] = useState<string | null>(null)
+  const [deletingInviteCodeId, setDeletingInviteCodeId] = useState<string | null>(null)
+  const [pendingInviteCode, setPendingInviteCode] = useState<{
+    code: AdminInviteCode
+    inviteCode: string
+  } | null>(null)
   const [revealedAdminKeys, setRevealedAdminKeys] = useState<StoredAdminKeyMap>({})
   const [pendingRevealedAdminKey, setPendingRevealedAdminKey] = useState<StoredAdminKey | null>(
     null,
   )
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null)
+  const [copiedInviteCodeId, setCopiedInviteCodeId] = useState<string | null>(null)
   const [copiedDnsTarget, setCopiedDnsTarget] = useState("")
   const [currentPassword, setCurrentPassword] = useState("")
   const [nextPassword, setNextPassword] = useState("")
@@ -629,6 +646,7 @@ export default function DomainManagementPage({
   const hasLoadedUsersRef = useRef(false)
   const hasLoadedOpsRef = useRef(false)
   const hasLoadedAccessKeysRef = useRef(false)
+  const hasLoadedInviteCodesRef = useRef(false)
   const hasLoadedCloudflareSettingsRef = useRef(false)
   const batchCloudflareZoneRequestIdRef = useRef(0)
   const isMountedRef = useRef(true)
@@ -906,6 +924,8 @@ export default function DomainManagementPage({
       registrationSettings: {
         ...DEFAULT_SETTINGS.registrationSettings,
         ...settings.registrationSettings,
+        consoleInviteCodeRequired:
+          settings.registrationSettings?.consoleInviteCodeRequired ?? false,
         publicDomains: settings.registrationSettings?.publicDomains ?? [],
         allowedEmailSuffixes: settings.registrationSettings?.allowedEmailSuffixes ?? [],
         emailOtp: {
@@ -1029,15 +1049,19 @@ export default function DomainManagementPage({
     hasLoadedUsersRef.current = false
     hasLoadedOpsRef.current = false
     hasLoadedAccessKeysRef.current = false
+    hasLoadedInviteCodesRef.current = false
     hasLoadedCloudflareSettingsRef.current = false
     clearStoredAdminSession()
     clearStoredRevealedAdminKey()
     clearAccounts()
     setSessionInfo(null)
     setAdminAccessKeys([])
+    setAdminInviteCodes([])
     setRevealedAdminKeys({})
     setPendingRevealedAdminKey(null)
+    setPendingInviteCode(null)
     setCopiedKeyId(null)
+    setCopiedInviteCodeId(null)
     setCloudflareSettings(DEFAULT_CLOUDFLARE_SETTINGS)
     setSavedCloudflareSettings(DEFAULT_CLOUDFLARE_SETTINGS)
     setCloudflareApiTokenInput("")
@@ -1189,6 +1213,40 @@ export default function DomainManagementPage({
       }
     },
     [hasAdminSession, ta, toast],
+  )
+
+  const loadInviteCodes = useCallback(
+    async (silent = false) => {
+      if (!hasAdminSession || !isAdmin) {
+        return
+      }
+
+      setInviteCodesLoading(true)
+      try {
+        const response = await fetchAdminInviteCodes(DEFAULT_PROVIDER_ID)
+        setAdminInviteCodes(
+          [...response.codes].sort(
+            (left, right) =>
+              new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+          ),
+        )
+        setCopiedInviteCodeId((current) =>
+          current && response.codes.some((code) => code.id === current) ? current : null,
+        )
+      } catch (error) {
+        if (!silent) {
+          toast({
+            title: ta("inviteCodeLoadFailed"),
+            description: getErrorDescription(error, ta("inviteCodeLoadFailedDescription")),
+            color: "danger",
+            variant: "flat",
+          })
+        }
+      } finally {
+        setInviteCodesLoading(false)
+      }
+    },
+    [hasAdminSession, isAdmin, ta, toast],
   )
 
   const loadCloudflareSettings = useCallback(
@@ -1484,8 +1542,10 @@ export default function DomainManagementPage({
         })()
 
         setAdminUsers([])
+        setAdminInviteCodes([])
         setAdminMetrics(null)
         setAdminAuditLogs([])
+        setPendingInviteCode(null)
       } catch (error) {
         toast({
           title: ta("sessionRestoreFailed"),
@@ -1554,6 +1614,19 @@ export default function DomainManagementPage({
     hasLoadedAccessKeysRef.current = true
     void loadAccessKeys(true)
   }, [hasAdminSession, loadAccessKeys, view])
+
+  useEffect(() => {
+    if (!hasAdminSession || !isAdmin || view !== "settings") {
+      return
+    }
+
+    if (hasLoadedInviteCodesRef.current) {
+      return
+    }
+
+    hasLoadedInviteCodesRef.current = true
+    void loadInviteCodes(true)
+  }, [hasAdminSession, isAdmin, loadInviteCodes, view])
 
   useEffect(() => {
     if (!hasAdminSession || view !== "settings") {
@@ -1715,6 +1788,163 @@ export default function DomainManagementPage({
       })
     } finally {
       setDeletingAccessKeyId(null)
+    }
+  }
+
+  const handleCopyInviteCode = async (code: { id: string; inviteCode: string }) => {
+    try {
+      await copyTextToClipboard(code.inviteCode)
+      setCopiedInviteCodeId(code.id)
+      window.setTimeout(() => {
+        setCopiedInviteCodeId((current) => (current === code.id ? null : current))
+      }, 1_500)
+      toast({
+        title: ta("inviteCodeCopied"),
+        color: "success",
+        variant: "flat",
+      })
+    } catch {
+      toast({
+        title: tc("copyFailed"),
+        description: tc("clipboardError"),
+        color: "danger",
+        variant: "flat",
+      })
+    }
+  }
+
+  const handleCreateInviteCode = async () => {
+    if (!hasAdminSession || !isAdmin || isCreatingInviteCode || inviteCodesLoading) {
+      return
+    }
+
+    const trimmedMaxUses = newInviteCodeMaxUses.trim()
+    let parsedMaxUses: number | undefined
+    if (trimmedMaxUses) {
+      const candidateMaxUses = Number(trimmedMaxUses)
+      if (
+        !Number.isFinite(candidateMaxUses) ||
+        candidateMaxUses < 1 ||
+        !Number.isInteger(candidateMaxUses)
+      ) {
+        toast({
+          title: ta("inviteCodeCreateInvalid"),
+          description: ta("inviteCodeMaxUsesInvalid"),
+          color: "warning",
+          variant: "flat",
+        })
+        return
+      }
+      parsedMaxUses = candidateMaxUses
+    }
+
+    setIsCreatingInviteCode(true)
+    try {
+      const response = await createAdminInviteCode(
+        {
+          name: newInviteCodeName.trim() || undefined,
+          maxUses: parsedMaxUses,
+        },
+        DEFAULT_PROVIDER_ID,
+      )
+      setPendingInviteCode(response)
+      setAdminInviteCodes((current) =>
+        [response.code, ...current.filter((item) => item.id !== response.code.id)].sort(
+          (left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime(),
+        ),
+      )
+      setNewInviteCodeName("")
+      setNewInviteCodeMaxUses("")
+      toast({
+        title: ta("inviteCodeCreated"),
+        description: ta("inviteCodeCreatedDescription", { name: response.code.name }),
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("inviteCodeCreateFailed"),
+        description: getErrorDescription(error, ta("inviteCodeCreateFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setIsCreatingInviteCode(false)
+    }
+  }
+
+  const handleToggleInviteCodeDisabled = async (code: AdminInviteCode) => {
+    if (!hasAdminSession || !isAdmin) {
+      return
+    }
+
+    setUpdatingInviteCodeId(code.id)
+    try {
+      const updated = await updateAdminInviteCode(
+        code.id,
+        { isDisabled: !code.isDisabled },
+        DEFAULT_PROVIDER_ID,
+      )
+      setAdminInviteCodes((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      )
+      setPendingInviteCode((current) =>
+        current && current.code.id === updated.id
+          ? { ...current, code: updated }
+          : current,
+      )
+      toast({
+        title: updated.isDisabled ? ta("inviteCodeDisabled") : ta("inviteCodeEnabled"),
+        description: updated.name,
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("inviteCodeUpdateFailed"),
+        description: getErrorDescription(error, ta("inviteCodeUpdateFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setUpdatingInviteCodeId(null)
+    }
+  }
+
+  const handleDeleteInviteCode = async (code: AdminInviteCode) => {
+    const confirmed = await requestConfirmation({
+      title: code.name,
+      description: ta("inviteCodeDeleteConfirm", { name: code.name }),
+      confirmLabel: tc("delete"),
+      tone: "danger",
+    })
+    if (!confirmed) {
+      return
+    }
+
+    setDeletingInviteCodeId(code.id)
+    try {
+      await deleteAdminInviteCode(code.id, DEFAULT_PROVIDER_ID)
+      setAdminInviteCodes((current) => current.filter((item) => item.id !== code.id))
+      setPendingInviteCode((current) =>
+        current?.code.id === code.id ? null : current,
+      )
+      setCopiedInviteCodeId((current) => (current === code.id ? null : current))
+      toast({
+        title: ta("inviteCodeDeleted"),
+        description: code.name,
+        color: "success",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ta("inviteCodeDeleteFailed"),
+        description: getErrorDescription(error, ta("inviteCodeDeleteFailedDescription")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setDeletingInviteCodeId(null)
     }
   }
 
@@ -2472,7 +2702,7 @@ export default function DomainManagementPage({
         {
           username: newUsername.trim(),
           password: newUserPassword,
-          role: newUserRole,
+          role: "user",
           domainLimit: Math.round(parsedDomainLimit),
         },
         DEFAULT_PROVIDER_ID,
@@ -2482,7 +2712,6 @@ export default function DomainManagementPage({
       )
       setNewUsername("")
       setNewUserPassword("")
-      setNewUserRole("user")
       setNewUserDomainLimit("3")
       toast({
         title: ta("userCreated"),
@@ -3879,6 +4108,189 @@ export default function DomainManagementPage({
                             </label>
                           </div>
 
+                          <div className="flex flex-col gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 sm:flex-row sm:items-center sm:justify-between">
+                            <div className="min-w-0">
+                              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                                {settingsDraft.registrationSettings.consoleInviteCodeRequired
+                                  ? ta("inviteCodeRequiredOn")
+                                  : ta("inviteCodeRequiredOff")}
+                              </div>
+                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                                {ta("inviteCodeRequiredDescription")}
+                              </p>
+                            </div>
+
+                            <label className="inline-flex cursor-pointer items-center">
+                              <input
+                                type="checkbox"
+                                checked={settingsDraft.registrationSettings.consoleInviteCodeRequired}
+                                onChange={(event) =>
+                                  setSettingsDraft((current) => ({
+                                    ...current,
+                                    registrationSettings: {
+                                      ...current.registrationSettings,
+                                      consoleInviteCodeRequired: event.target.checked,
+                                    },
+                                  }))
+                                }
+                                className="peer sr-only"
+                              />
+                              <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
+                            </label>
+                          </div>
+
+                          <div className="space-y-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                              <div className="min-w-0">
+                                <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
+                                  {ta("inviteCodePanelTitle")}
+                                </div>
+                                <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                                  {ta("inviteCodePanelDescription")}
+                                </p>
+                              </div>
+                              <Button
+                                size="sm"
+                                variant="flat"
+                                startContent={inviteCodesLoading ? <Spinner size="sm" /> : <RefreshCw size={14} />}
+                                className="h-10 rounded-2xl bg-slate-100/90 px-4 text-slate-700 hover:bg-slate-200/90 dark:bg-slate-800/70 dark:text-slate-100 dark:hover:bg-slate-700/80"
+                                onPress={() => void loadInviteCodes()}
+                                isDisabled={inviteCodesLoading}
+                              >
+                                {ta("refreshInviteCodes")}
+                              </Button>
+                            </div>
+
+                            <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_11rem_auto]">
+                              <Input
+                                label={ta("inviteCodeNameLabel")}
+                                placeholder={ta("inviteCodeNamePlaceholder")}
+                                value={newInviteCodeName}
+                                onValueChange={setNewInviteCodeName}
+                                variant="bordered"
+                                size="sm"
+                                classNames={TM_INPUT_CLASSNAMES}
+                              />
+                              <Input
+                                label={ta("inviteCodeMaxUsesLabel")}
+                                placeholder={ta("inviteCodeMaxUsesPlaceholder")}
+                                value={newInviteCodeMaxUses}
+                                onValueChange={setNewInviteCodeMaxUses}
+                                variant="bordered"
+                                size="sm"
+                                classNames={TM_INPUT_CLASSNAMES}
+                              />
+                              <div className="flex items-end">
+                                <Button
+                                  size="sm"
+                                  className="h-10 rounded-2xl bg-sky-600 px-4 text-white hover:bg-sky-700 dark:bg-sky-600 dark:hover:bg-sky-500"
+                                  onPress={() => void handleCreateInviteCode()}
+                                  isLoading={isCreatingInviteCode}
+                                  isDisabled={inviteCodesLoading}
+                                >
+                                  {ta("inviteCodeGenerate")}
+                                </Button>
+                              </div>
+                            </div>
+
+                            {pendingInviteCode && (
+                              <div className="rounded-2xl border border-emerald-200/80 bg-emerald-50/90 p-4 dark:border-emerald-900/60 dark:bg-emerald-950/25">
+                                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                  <div className="min-w-0">
+                                    <div className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
+                                      {ta("inviteCodeLatestTitle", { name: pendingInviteCode.code.name })}
+                                    </div>
+                                    <p className="mt-1 text-xs leading-6 text-emerald-700 dark:text-emerald-200">
+                                      {ta("inviteCodeLatestDescription")}
+                                    </p>
+                                    <div className="mt-3 break-all rounded-2xl bg-white/80 px-3 py-2 font-mono text-sm text-emerald-900 shadow-sm dark:bg-slate-950/60 dark:text-emerald-100">
+                                      {pendingInviteCode.inviteCode}
+                                    </div>
+                                  </div>
+                                  <Button
+                                    size="sm"
+                                    variant="flat"
+                                    startContent={<Copy size={13} />}
+                                    className="h-10 rounded-2xl bg-white/80 px-4 text-emerald-800 hover:bg-white dark:bg-slate-950/60 dark:text-emerald-100 dark:hover:bg-slate-950/80"
+                                    onPress={() => void handleCopyInviteCode({ id: pendingInviteCode.code.id, inviteCode: pendingInviteCode.inviteCode })}
+                                  >
+                                    {copiedInviteCodeId === pendingInviteCode.code.id
+                                      ? tc("copied")
+                                      : ta("inviteCodeCopy")}
+                                  </Button>
+                                </div>
+                              </div>
+                            )}
+
+                            {adminInviteCodes.length === 0 ? (
+                              <EmptyState
+                                compact
+                                title={ta("inviteCodeEmptyTitle")}
+                                description={ta("inviteCodeEmptyDescription")}
+                              />
+                            ) : (
+                              <div className="space-y-3">
+                                {adminInviteCodes.map((code) => (
+                                  <div
+                                    key={code.id}
+                                    className="flex flex-col gap-3 rounded-2xl border border-slate-200/70 bg-white/75 p-4 dark:border-slate-800/70 dark:bg-slate-950/50 sm:flex-row sm:items-center sm:justify-between"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="flex flex-wrap items-center gap-2">
+                                        <span className="text-sm font-medium text-slate-900 dark:text-white">
+                                          {code.name}
+                                        </span>
+                                        {code.isDisabled ? (
+                                          <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700 dark:bg-rose-950/40 dark:text-rose-200">
+                                            {ta("inviteCodeStatusDisabled")}
+                                          </span>
+                                        ) : (
+                                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200">
+                                            {ta("inviteCodeStatusActive")}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="mt-1 break-all font-mono text-xs text-slate-500 dark:text-slate-400">
+                                        {code.maskedCode}
+                                      </div>
+                                      <div className="mt-1 text-[11px] text-slate-400">
+                                        {code.maxUses !== undefined
+                                          ? ta("inviteCodeUsageSummaryLimited", {
+                                              used: code.usesCount,
+                                              max: code.maxUses,
+                                              remaining: code.remainingUses ?? 0,
+                                            })
+                                          : ta("inviteCodeUsageSummaryUnlimited", {
+                                              used: code.usesCount,
+                                            })}
+                                      </div>
+                                      <div className="mt-1 text-[11px] text-slate-400">
+                                        {ta("keyCreatedAt", {
+                                          date: new Date(code.createdAt).toLocaleString(),
+                                        })}
+                                      </div>
+                                    </div>
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <IconActionButton
+                                        icon={<ShieldAlert size={13} />}
+                                        label={code.isDisabled ? ta("inviteCodeEnable") : ta("inviteCodeDisable")}
+                                        onPress={() => void handleToggleInviteCodeDisabled(code)}
+                                        isLoading={updatingInviteCodeId === code.id}
+                                      />
+                                      <IconActionButton
+                                        danger
+                                        icon={<Trash2 size={13} />}
+                                        label={ta("inviteCodeDelete")}
+                                        onPress={() => void handleDeleteInviteCode(code)}
+                                        isLoading={deletingInviteCodeId === code.id}
+                                      />
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
                           <div className="space-y-3 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
                             <div>
                               <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
@@ -4712,7 +5124,7 @@ export default function DomainManagementPage({
 
                 <Panel>
                   <PanelHeader title={ta("createUser")} icon={<Users2 size={16} />} />
-                  <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-4">
+                  <div className="grid gap-4 p-5 md:grid-cols-2 xl:grid-cols-3">
                     <Input
                       label={ta("consoleUsernameLabel")}
                       value={newUsername}
@@ -4730,19 +5142,6 @@ export default function DomainManagementPage({
                       size="sm"
                       classNames={TM_INPUT_CLASSNAMES}
                     />
-                    <label className="space-y-2 text-sm text-slate-600 dark:text-slate-300">
-                      <span className="block text-sm font-medium text-slate-700 dark:text-slate-200">
-                        {ta("userRoleLabel")}
-                      </span>
-                      <select
-                        className="h-10 w-full rounded-xl border border-slate-200 bg-white/80 px-3 text-sm text-slate-700 outline-none transition-colors focus:border-sky-400 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-200"
-                        value={newUserRole}
-                        onChange={(event) => setNewUserRole(event.target.value as ConsoleUser["role"])}
-                      >
-                        <option value="user">{ta("roleUser")}</option>
-                        <option value="admin">{ta("roleAdmin")}</option>
-                      </select>
-                    </label>
                     <Input
                       label={ta("domainLimitLabel")}
                       type="number"

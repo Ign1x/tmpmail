@@ -19,14 +19,16 @@ use crate::{
     mailer::MailSender,
     models::{
         AdminAccessKeyInfoResponse, AdminAccessKeyListResponse, AdminAccessKeyResponse,
-        AdminBootstrapRequest, AdminCreateAccessKeyRequest, AdminCreateUserRequest,
+        AdminBootstrapRequest, AdminCreateAccessKeyRequest, AdminCreateInviteCodeRequest,
+        AdminCreateUserRequest, AdminInviteCodeListResponse, AdminInviteCodeResponse,
         AdminPasswordChangeRequest, AdminRecoveryRequest, AdminResetUserPasswordRequest,
         AdminSessionInfo, AdminSessionResponse, AdminSetupResponse, AdminStatusResponse,
-        AdminSystemSettings, AdminUpdateSystemSettingsRequest, AdminUpdateUserRequest,
-        CloudflareTokenValidationResponse, ConsoleCloudflareSettings, ConsoleRegisterRequest,
-        ConsoleUser, ConsoleUserRole, LinuxDoAuthorizeRequest, LinuxDoAuthorizeResponse,
-        LinuxDoCompleteRequest, SendEmailOtpRequest, SendEmailOtpResponse,
-        TestConsoleCloudflareTokenRequest, UpdateConsoleCloudflareSettingsRequest,
+        AdminSystemSettings, AdminUpdateInviteCodeRequest, AdminUpdateSystemSettingsRequest,
+        AdminUpdateUserRequest, CloudflareTokenValidationResponse, ConsoleCloudflareSettings,
+        ConsoleRegisterRequest, ConsoleUser, ConsoleUserRole, LinuxDoAuthorizeRequest,
+        LinuxDoAuthorizeResponse, LinuxDoCompleteRequest, SendEmailOtpRequest,
+        SendEmailOtpResponse, TestConsoleCloudflareTokenRequest,
+        UpdateConsoleCloudflareSettingsRequest,
     },
     otp::normalize_email_key,
     state::AppState,
@@ -98,6 +100,7 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatus
             .unwrap_or(false),
         system_enabled: admin_state.is_system_enabled(),
         open_registration_enabled: registration_settings.open_registration_enabled,
+        console_invite_code_required: registration_settings.console_invite_code_required,
         linux_do_enabled,
         email_otp_enabled: registration_settings.email_otp.enabled,
     }))
@@ -126,6 +129,14 @@ pub async fn linux_do_authorize(
         return Err(ApiError::forbidden(
             "linux.do registration is unavailable while email otp is enabled",
         ));
+    }
+    if registration_settings.console_invite_code_required {
+        let invite_code = payload
+            .invite_code
+            .as_deref()
+            .ok_or_else(|| ApiError::validation("invite code is required"))?;
+        let admin_state = state.admin_state.read().await;
+        admin_state.validate_invite_code(invite_code)?;
     }
 
     let linux_do = registration_settings.linux_do;
@@ -259,11 +270,22 @@ pub async fn register(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::validation("registration email is required"))?;
     let registration_email = normalize_email_key(registration_identity)?;
-    let require_email_otp = {
+    let (require_email_otp, invite_code_required) = {
         let admin_state = state.admin_state.read().await;
         let registration_settings = admin_state.registration_settings();
-        registration_settings.email_otp.enabled
+        (
+            registration_settings.email_otp.enabled,
+            registration_settings.console_invite_code_required,
+        )
     };
+    if invite_code_required {
+        let invite_code = payload
+            .invite_code
+            .as_deref()
+            .ok_or_else(|| ApiError::validation("invite code is required"))?;
+        let admin_state = state.admin_state.read().await;
+        admin_state.validate_invite_code(invite_code)?;
+    }
     if require_email_otp {
         verify_email_otp(&state, &registration_email, payload.otp_code.as_deref()).await?;
     }
@@ -279,7 +301,12 @@ pub async fn register(
         }
 
         let domain_limit = admin_state.default_public_domain_limit();
-        admin_state.create_public_user(registration_identity, &payload.password, domain_limit)?
+        admin_state.create_public_user(
+            registration_identity,
+            &payload.password,
+            domain_limit,
+            payload.invite_code.as_deref(),
+        )?
     };
     let session = load_session_info(&state, &user.id).await?;
     let session_token = issue_session_token(&state, &session.user).await?;
@@ -311,7 +338,7 @@ pub async fn send_register_otp(
     Json(payload): Json<SendEmailOtpRequest>,
 ) -> AppResult<(StatusCode, Json<SendEmailOtpResponse>)> {
     auth::require_secure_admin_transport(&headers, &state.config)?;
-    let (registration_enabled, otp_enabled, settings) = {
+    let (registration_enabled, otp_enabled, invite_code_required, settings) = {
         let admin_state = state.admin_state.read().await;
         if admin_state.is_bootstrap_required() {
             return Err(ApiError::forbidden("console bootstrap required"));
@@ -320,6 +347,7 @@ pub async fn send_register_otp(
         (
             registration_settings.open_registration_enabled,
             registration_settings.email_otp.enabled,
+            registration_settings.console_invite_code_required,
             registration_settings.email_otp,
         )
     };
@@ -331,6 +359,14 @@ pub async fn send_register_otp(
     }
     if !otp_enabled {
         return Err(ApiError::forbidden("email otp is disabled"));
+    }
+    if invite_code_required {
+        let invite_code = payload
+            .invite_code
+            .as_deref()
+            .ok_or_else(|| ApiError::validation("invite code is required"))?;
+        let admin_state = state.admin_state.read().await;
+        admin_state.validate_invite_code(invite_code)?;
     }
 
     let email = normalize_email_key(&payload.email)?;
@@ -483,7 +519,12 @@ pub async fn linux_do_complete(
 
     let authenticated = {
         let mut admin_state = state.admin_state.write().await;
-        admin_state.authenticate_linux_do(&subject, &preferred_username, trust_level)?
+        admin_state.authenticate_linux_do(
+            &subject,
+            &preferred_username,
+            trust_level,
+            payload.invite_code.as_deref(),
+        )?
     };
     let session = load_session_info(&state, &authenticated.id.to_string()).await?;
     let session_token = issue_session_token(&state, &session.user).await?;
@@ -692,6 +733,105 @@ pub async fn delete_access_key(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub async fn list_invite_codes(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<Json<AdminInviteCodeListResponse>> {
+    admin_state::require_admin_access(&headers, &state).await?;
+    let admin_state = state.admin_state.read().await;
+
+    Ok(Json(AdminInviteCodeListResponse {
+        codes: admin_state.list_invite_codes(),
+    }))
+}
+
+pub async fn create_invite_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(payload): Json<AdminCreateInviteCodeRequest>,
+) -> AppResult<impl IntoResponse> {
+    let actor = admin_state::require_admin_access(&headers, &state).await?;
+    let (code, invite_code) = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state.create_invite_code(payload.name.as_deref(), payload.max_uses)?
+    };
+    state
+        .store
+        .append_audit_log(
+            "console.invite_code.create",
+            "invite-code",
+            code.id.clone(),
+            Some(actor.id.to_string()),
+            format!(
+                "name={} masked_code={} max_uses={:?}",
+                code.name, code.masked_code, code.max_uses
+            ),
+        )
+        .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        sensitive_headers(),
+        Json(AdminInviteCodeResponse { code, invite_code }),
+    ))
+}
+
+pub async fn update_invite_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<AdminUpdateInviteCodeRequest>,
+) -> AppResult<Json<crate::models::AdminInviteCode>> {
+    let actor = admin_state::require_admin_access(&headers, &state).await?;
+    let invite_code_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid invite code id"))?;
+    let updated = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state.update_invite_code(invite_code_id, payload.is_disabled)?
+    };
+    state
+        .store
+        .append_audit_log(
+            "console.invite_code.update",
+            "invite-code",
+            updated.id.clone(),
+            Some(actor.id.to_string()),
+            format!(
+                "name={} masked_code={} disabled={} uses={}",
+                updated.name, updated.masked_code, updated.is_disabled, updated.uses_count
+            ),
+        )
+        .await?;
+
+    Ok(Json(updated))
+}
+
+pub async fn delete_invite_code(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
+    let actor = admin_state::require_admin_access(&headers, &state).await?;
+    let invite_code_id =
+        Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid invite code id"))?;
+    let deleted = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state.delete_invite_code(invite_code_id)?
+    };
+    state
+        .store
+        .append_audit_log(
+            "console.invite_code.delete",
+            "invite-code",
+            deleted.id.clone(),
+            Some(actor.id.to_string()),
+            format!("name={} masked_code={}", deleted.name, deleted.masked_code),
+        )
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub async fn change_password(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -892,7 +1032,7 @@ pub async fn update_settings(
             "default".to_owned(),
             Some(actor.id.to_string()),
             format!(
-                "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} public_domains={:?} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
+            "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} console_invite_code_required={} public_domains={:?} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
                 settings.system_enabled,
                 settings.mail_exchange_host,
                 settings.mail_route_target,
@@ -906,6 +1046,9 @@ pub async fn update_settings(
                 settings
                     .registration_settings
                     .open_registration_enabled,
+                settings
+                    .registration_settings
+                    .console_invite_code_required,
                 settings.registration_settings.public_domains,
                 settings.registration_settings.allowed_email_suffixes,
                 settings.registration_settings.email_otp.enabled,
