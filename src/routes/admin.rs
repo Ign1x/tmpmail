@@ -1127,15 +1127,15 @@ fn request_origin_from_headers(
     headers: &HeaderMap,
     trust_proxy_headers: bool,
 ) -> AppResult<String> {
+    let authority = request_authority_from_headers(headers, trust_proxy_headers)
+        .ok_or_else(|| ApiError::validation("linux.do redirect uri is invalid"))?;
     let scheme = forwarded_proto_from_headers(headers, trust_proxy_headers).unwrap_or_else(|| {
-        if is_local_linux_do_host(host_from_headers(headers).as_deref()) {
+        if is_local_linux_do_host(Some(&authority)) {
             "http".to_owned()
         } else {
             "https".to_owned()
         }
     });
-    let authority = host_from_headers(headers)
-        .ok_or_else(|| ApiError::validation("linux.do redirect uri is invalid"))?;
 
     let parsed = Url::parse(&format!("{scheme}://{authority}"))
         .map_err(|_| ApiError::validation("linux.do redirect uri is invalid"))?;
@@ -1143,11 +1143,36 @@ fn request_origin_from_headers(
     Ok(parsed.origin().ascii_serialization())
 }
 
+fn request_authority_from_headers(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
+    if trust_proxy_headers {
+        forwarded_host_from_headers(headers).or_else(|| host_from_headers(headers))
+    } else {
+        host_from_headers(headers)
+    }
+}
+
 fn host_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("host")
         .and_then(|value| value.to_str().ok())
-        .and_then(first_header_value)
+        .and_then(parse_authority_header_value)
+}
+
+fn forwarded_host_from_headers(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("x-forwarded-host")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_authority_header_value)
+        .or_else(|| {
+            headers
+                .get("forwarded")
+                .and_then(|value| value.to_str().ok())
+                .and_then(forwarded_host)
+        })
+}
+
+fn parse_authority_header_value(value: &str) -> Option<String> {
+    first_header_value(value)
         .map(str::trim)
         .filter(|value| {
             !value.is_empty() && !value.chars().any(char::is_whitespace) && !value.contains('/')
@@ -1194,6 +1219,20 @@ fn forwarded_proto(value: &str) -> Option<String> {
             if !proto.is_empty() {
                 return Some(proto.to_ascii_lowercase());
             }
+        }
+    }
+
+    None
+}
+
+fn forwarded_host(value: &str) -> Option<String> {
+    let first = first_header_value(value)?;
+    for parameter in first.split(';') {
+        let Some((name, raw_value)) = parameter.split_once('=') else {
+            continue;
+        };
+        if name.trim().eq_ignore_ascii_case("host") {
+            return parse_authority_header_value(raw_value.trim().trim_matches('"'));
         }
     }
 
@@ -1552,6 +1591,25 @@ mod tests {
             error.to_string(),
             "linux.do redirect uri must match the current admin origin"
         );
+    }
+
+    #[test]
+    fn linux_do_redirect_uri_accepts_trusted_forwarded_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", HeaderValue::from_static("api:8080"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("console.example.com"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        normalize_linux_do_redirect_uri(
+            "https://console.example.com/zh/auth/linux-do",
+            &headers,
+            None,
+            true,
+        )
+        .expect("trusted forwarded host should pass");
     }
 
     #[test]
