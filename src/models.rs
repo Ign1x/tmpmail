@@ -640,6 +640,8 @@ pub struct CloudflareDnsSyncResponse {
     pub created_records: usize,
     pub updated_records: usize,
     pub unchanged_records: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain: Option<Domain>,
 }
 
 #[derive(Clone, Debug, Serialize)]

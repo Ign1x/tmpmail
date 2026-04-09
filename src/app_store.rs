@@ -78,6 +78,10 @@ impl AppStore {
         self.0.domain_owner_user_id(domain_id).await
     }
 
+    pub async fn get_domain(&self, domain_id: Uuid) -> AppResult<Domain> {
+        self.0.get_domain(domain_id).await
+    }
+
     pub async fn create_domain(
         &self,
         domain: &str,

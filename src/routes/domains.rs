@@ -205,9 +205,10 @@ pub async fn sync_domain_cloudflare(
             .cloudflare_api_token(user.id)?
             .ok_or_else(|| ApiError::validation("cloudflare api token is not configured"))?
     };
-    let domain = state.store.domain_verification_context(domain_id).await?;
+    let current_domain = state.store.get_domain(domain_id).await?;
+    let (domain_name, verification_token) =
+        state.store.domain_verification_context(domain_id).await?;
     let records = state.store.domain_dns_records(domain_id, &config).await?;
-    let domain_name = domain.0;
 
     let response = cloudflare::sync_domain_records(
         &api_token,
@@ -234,7 +235,25 @@ pub async fn sync_domain_cloudflare(
         )
         .await?;
 
-    Ok(Json(response))
+    let domain = if current_domain.is_verified {
+        current_domain
+    } else {
+        let verification_result =
+            verify_domain_dns(&domain_name, &verification_token, &config).await;
+        state
+            .store
+            .update_domain_verification_status(
+                domain_id,
+                verification_result.is_ok(),
+                verification_result.err(),
+            )
+            .await?
+    };
+
+    Ok(Json(CloudflareDnsSyncResponse {
+        domain: Some(domain),
+        ..response
+    }))
 }
 
 async fn ensure_domain_access(

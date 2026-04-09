@@ -95,6 +95,7 @@ pub async fn sync_domain_records(
         created_records,
         updated_records,
         unchanged_records,
+        domain: None,
     })
 }
 

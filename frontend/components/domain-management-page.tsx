@@ -39,6 +39,7 @@ import {
 import { useLocale, useTranslations } from "next-intl"
 import { useAuth } from "@/contexts/auth-context"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
+import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { usePathname, useRouter } from "@/i18n/navigation"
 import {
@@ -116,6 +117,10 @@ const MAX_BATCH_MANAGED_DOMAINS = 50
 const MAX_BATCH_DOMAIN_PREFIX_LENGTH = 40
 const MIN_BATCH_DOMAIN_RANDOM_LENGTH = 4
 const MAX_BATCH_DOMAIN_RANDOM_LENGTH = 20
+const LINUX_DO_CONNECT_PORTAL_URL = "https://connect.linux.do/"
+const LINUX_DO_DEFAULT_AUTHORIZE_URL = "https://connect.linux.do/oauth2/authorize"
+const LINUX_DO_DEFAULT_TOKEN_URL = "https://connect.linux.do/oauth2/token"
+const LINUX_DO_DEFAULT_USERINFO_URL = "https://connect.linux.do/api/user"
 
 const normalizeCloudflareSettings = (
   settings: ConsoleCloudflareSettings,
@@ -173,6 +178,7 @@ interface DomainManagementPageProps {
 type ConsoleView = "mailboxes" | "overview" | "settings" | "domains" | "users" | "security" | "logs"
 type SettingsSection = "core" | "registration" | "limits" | "integrations" | "cloudflare"
 type ActionDialogTone = "primary" | "danger"
+type MetricCardTone = "success" | "warning" | "danger" | "neutral"
 
 type ConfirmActionDialogState = {
   kind: "confirm"
@@ -199,6 +205,15 @@ type InputActionDialogState = {
 }
 
 type ActionDialogState = ConfirmActionDialogState | InputActionDialogState
+
+type BatchDomainProgressState = {
+  total: number
+  completed: number
+  created: number
+  synced: number
+  failed: number
+  currentDomain: string
+}
 
 function parseSuffixList(value: string): string[] {
   return value
@@ -240,6 +255,51 @@ function formatBytes(value: number | undefined): string {
 
   const precision = current >= 10 || unitIndex === 0 ? 0 : 1
   return `${current.toFixed(precision).replace(/\.0$/, "")} ${units[unitIndex]}`
+}
+
+function formatDateTime(value: string | undefined, locale: string, fallback: string): string {
+  if (!value) {
+    return fallback
+  }
+
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return fallback
+  }
+
+  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date)
+}
+
+function formatUptime(value: number | undefined, locale: string): string {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return locale === "zh" ? "0 秒" : "0s"
+  }
+
+  const totalSeconds = Math.floor(value)
+  const days = Math.floor(totalSeconds / 86_400)
+  const hours = Math.floor((totalSeconds % 86_400) / 3_600)
+  const minutes = Math.floor((totalSeconds % 3_600) / 60)
+  const seconds = totalSeconds % 60
+
+  const parts =
+    locale === "zh"
+      ? [
+          days > 0 ? `${days} 天` : null,
+          hours > 0 ? `${hours} 小时` : null,
+          minutes > 0 ? `${minutes} 分钟` : null,
+          seconds > 0 ? `${seconds} 秒` : null,
+        ]
+      : [
+          days > 0 ? `${days}d` : null,
+          hours > 0 ? `${hours}h` : null,
+          minutes > 0 ? `${minutes}m` : null,
+          seconds > 0 ? `${seconds}s` : null,
+        ]
+
+  return parts.filter(Boolean).slice(0, 3).join(" ") || (locale === "zh" ? "0 秒" : "0s")
 }
 
 function formatRatioPercent(part: number | undefined, total: number | undefined): number | undefined {
@@ -483,6 +543,9 @@ export default function DomainManagementPage({
   const [batchDomainRandomLengthInput, setBatchDomainRandomLengthInput] = useState("6")
   const [batchDomainCountInput, setBatchDomainCountInput] = useState("10")
   const [isCreatingDomainBatch, setIsCreatingDomainBatch] = useState(false)
+  const [batchDomainProgress, setBatchDomainProgress] = useState<BatchDomainProgressState | null>(
+    null,
+  )
   const [recordsByDomainId, setRecordsByDomainId] = useState<Record<string, DomainDnsRecord[]>>({})
   const [recordsLoadingById, setRecordsLoadingById] = useState<Record<string, boolean>>({})
   const [expandedDomainIds, setExpandedDomainIds] = useState<Record<string, boolean>>({})
@@ -532,6 +595,7 @@ export default function DomainManagementPage({
   const [isSidebarOpen, setIsSidebarOpen] = useState(false)
   const [actionDialog, setActionDialog] = useState<ActionDialogState | null>(null)
   const [actionDialogError, setActionDialogError] = useState<string | null>(null)
+  const [browserOrigin, setBrowserOrigin] = useState("")
   const currentMailboxAccountRef = useRef(currentAccount)
   const mailboxTokenRef = useRef(mailboxToken)
   const hasBootstrappedRef = useRef(false)
@@ -677,6 +741,78 @@ export default function DomainManagementPage({
   const totalMessagesMetric = adminMetrics?.totalMessages ?? 0
   const activeMessagesMetric = adminMetrics?.activeMessages ?? 0
   const deletedMessagesMetric = adminMetrics?.deletedMessages ?? 0
+  const overviewDetailCards = useMemo<
+    Array<{
+      label: string
+      value: string
+      detail?: string
+      tone: MetricCardTone
+    }>
+  >(() => {
+    if (!isAdmin) {
+      return []
+    }
+
+    const syncFailures = adminMetrics?.inbucketSyncFailuresTotal ?? 0
+    const syncRuns = adminMetrics?.inbucketSyncRunsTotal ?? 0
+    const verificationFailures = adminMetrics?.domainVerificationFailuresTotal ?? 0
+    const verificationRuns = adminMetrics?.domainVerificationRunsTotal ?? 0
+    const cleanupRuns = adminMetrics?.cleanupRunsTotal ?? 0
+
+    return [
+      {
+        label: ta("overviewStoreBackend"),
+        value: serviceStatus?.storeBackend?.toUpperCase() ?? tc("none"),
+        detail: serviceStatusLabel,
+        tone: serviceTone,
+      },
+      {
+        label: ta("overviewUptime"),
+        value: formatUptime(adminMetrics?.runtime.uptimeSeconds, locale),
+        detail: `${ta("runtimeCpuLabel")} ${formatPercent(adminMetrics?.runtime.cpuUsagePercent)} · ${ta("runtimeMemoryLabel")} ${formatPercent(adminMetrics?.runtime.memoryUsagePercent)}`,
+        tone: "neutral",
+      },
+      {
+        label: ta("overviewLiveConnections"),
+        value: String(adminMetrics?.sseConnectionsActive ?? 0),
+        detail: `${ta("overviewRealtimeEvents")} ${adminMetrics?.realtimeEventsTotal ?? 0}`,
+        tone: "neutral",
+      },
+      {
+        label: ta("overviewLastSync"),
+        value: formatDateTime(
+          adminMetrics?.lastInbucketSyncAt,
+          locale,
+          ta("overviewNoRecentRun"),
+        ),
+        detail: `${ta("overviewSyncRuns")} ${syncRuns} · ${ta("opsSyncFailures")} ${syncFailures}`,
+        tone: syncRuns === 0 ? "neutral" : syncFailures > 0 ? "warning" : "success",
+      },
+      {
+        label: ta("overviewImportedMessages"),
+        value: String(adminMetrics?.importedMessagesTotal ?? 0),
+        detail: `${ta("overviewDeletedUpstreamMessages")} ${adminMetrics?.deletedUpstreamMessagesTotal ?? 0}`,
+        tone: "neutral",
+      },
+      {
+        label: ta("overviewLastVerification"),
+        value: formatDateTime(
+          adminMetrics?.lastDomainVerificationAt,
+          locale,
+          ta("overviewNoRecentRun"),
+        ),
+        detail: `${ta("overviewVerificationRuns")} ${verificationRuns} · ${ta("overviewVerificationFailures")} ${verificationFailures}`,
+        tone:
+          verificationRuns === 0 ? "neutral" : verificationFailures > 0 ? "warning" : "success",
+      },
+      {
+        label: ta("overviewLastCleanup"),
+        value: formatDateTime(adminMetrics?.lastCleanupAt, locale, ta("overviewNoRecentRun")),
+        detail: `${ta("opsCleanupRuns")} ${cleanupRuns} · ${ta("overviewDeletedAccounts")} ${adminMetrics?.cleanupDeletedAccountsTotal ?? 0} · ${ta("overviewDeletedDomains")} ${adminMetrics?.cleanupDeletedDomainsTotal ?? 0}`,
+        tone: cleanupRuns === 0 ? "neutral" : "success",
+      },
+    ]
+  }, [adminMetrics, isAdmin, locale, serviceStatus?.storeBackend, serviceStatusLabel, serviceTone, ta, tc])
 
   const syncRevealedAdminKeysFromStorage = useCallback(() => {
     setRevealedAdminKeys(getStoredRevealedAdminKeys())
@@ -797,6 +933,14 @@ export default function DomainManagementPage({
   useEffect(() => {
     setIsSecureAdminContext(!requireSecureTransport || isTrustedAdminContext())
   }, [requireSecureTransport])
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    setBrowserOrigin(window.location.origin)
+  }, [])
 
   useEffect(() => {
     const expirationTimes = [
@@ -1820,6 +1964,7 @@ export default function DomainManagementPage({
     setCloudflareZoneOptions([])
     setCloudflareZonesRequireApiUpdate(false)
     setCloudflareZonesLoading(true)
+    setBatchDomainProgress(null)
     setIsBatchDomainModalOpen(true)
   }, [])
 
@@ -1830,6 +1975,7 @@ export default function DomainManagementPage({
 
     batchCloudflareZoneRequestIdRef.current += 1
     setCloudflareZonesLoading(false)
+    setBatchDomainProgress(null)
     setIsBatchDomainModalOpen(false)
   }, [isCreatingDomainBatch])
 
@@ -2025,28 +2171,80 @@ export default function DomainManagementPage({
     }
 
     setIsCreatingDomainBatch(true)
+    setBatchDomainProgress({
+      total: requestedCount,
+      completed: 0,
+      created: 0,
+      synced: 0,
+      failed: 0,
+      currentDomain: generatedDomains[0] ?? "",
+    })
     try {
       const createdDomains: Domain[] = []
       const failedDomains: Array<{ domain: string; reason: string }> = []
       let cloudflareSyncedCount = 0
 
-      for (const domain of generatedDomains) {
+      for (const [index, domain] of generatedDomains.entries()) {
+        setBatchDomainProgress((current) =>
+          current
+            ? {
+                ...current,
+                currentDomain: domain,
+              }
+            : current,
+        )
+
         try {
           const createdDomain = await createManagedDomain(domain, DEFAULT_PROVIDER_ID)
-          createdDomains.push(createdDomain)
+          setBatchDomainProgress((current) =>
+            current
+              ? {
+                  ...current,
+                  created: current.created + 1,
+                }
+              : current,
+          )
 
           const syncResult = await runCloudflareDomainSync(createdDomain, {
             silentSuccess: true,
             silentError: true,
           })
+          createdDomains.push(syncResult?.domain ?? createdDomain)
           if (syncResult) {
             cloudflareSyncedCount += 1
+            setBatchDomainProgress((current) =>
+              current
+                ? {
+                    ...current,
+                    synced: current.synced + 1,
+                  }
+                : current,
+            )
           }
         } catch (error) {
           failedDomains.push({
             domain,
             reason: getErrorDescription(error, ts("domainAddFailed")),
           })
+          setBatchDomainProgress((current) =>
+            current
+              ? {
+                  ...current,
+                  failed: current.failed + 1,
+                }
+              : current,
+          )
+        } finally {
+          const nextDomain = generatedDomains[index + 1] ?? ""
+          setBatchDomainProgress((current) =>
+            current
+              ? {
+                  ...current,
+                  completed: current.completed + 1,
+                  currentDomain: nextDomain,
+                }
+              : current,
+          )
         }
       }
 
@@ -2088,6 +2286,7 @@ export default function DomainManagementPage({
       setIsBatchDomainModalOpen(false)
     } finally {
       setIsCreatingDomainBatch(false)
+      setBatchDomainProgress(null)
     }
   }
 
@@ -2478,6 +2677,13 @@ export default function DomainManagementPage({
       setCloudflareSyncingDomainId(domain.id)
       try {
         const response = await syncManagedDomainCloudflare(domain.id, DEFAULT_PROVIDER_ID)
+        if (response.domain) {
+          setManagedDomains((current) =>
+            sortManagedDomains(
+              current.map((item) => (item.id === response.domain?.id ? response.domain : item)),
+            ),
+          )
+        }
         if (!options?.silentSuccess) {
           toast({
             title: ta("cloudflareSyncSuccess"),
@@ -2658,11 +2864,11 @@ export default function DomainManagementPage({
   const menuItems = [
     { id: "mailboxes" as const, label: ta("menuMailboxes"), icon: Inbox },
     ...(isAdmin ? [{ id: "overview" as const, label: ta("menuOverview"), icon: Server }] : []),
-    { id: "settings" as const, label: ta("menuSettings"), icon: SlidersHorizontal },
     { id: "domains" as const, label: ta("menuDomains"), icon: Globe2 },
     ...(isAdmin ? [{ id: "users" as const, label: ta("menuUsers"), icon: Users2 }] : []),
     { id: "security" as const, label: ta("menuSecurity"), icon: KeyRound },
     ...(isAdmin ? [{ id: "logs" as const, label: ta("menuLogs"), icon: ReceiptText }] : []),
+    { id: "settings" as const, label: ta("menuSettings"), icon: SlidersHorizontal },
   ]
   const settingsSections = useMemo(
     () =>
@@ -2694,6 +2900,43 @@ export default function DomainManagementPage({
     () => normalizeCloudflareSettings(cloudflareSettings),
     [cloudflareSettings],
   )
+  const linuxDoCallbackPath = `${entryPath}/auth/linux-do`
+  const linuxDoCallbackUrl = browserOrigin
+    ? new URL(linuxDoCallbackPath, browserOrigin).toString()
+    : linuxDoCallbackPath
+  const linuxDoReferenceItems = useMemo(
+    () => [
+      {
+        label: ta("linuxDoAuthorizeUrlLabel"),
+        value:
+          settingsDraft.registrationSettings.linuxDo.authorizeUrl || LINUX_DO_DEFAULT_AUTHORIZE_URL,
+      },
+      {
+        label: ta("linuxDoTokenUrlLabel"),
+        value: settingsDraft.registrationSettings.linuxDo.tokenUrl || LINUX_DO_DEFAULT_TOKEN_URL,
+      },
+      {
+        label: ta("linuxDoUserinfoUrlLabel"),
+        value:
+          settingsDraft.registrationSettings.linuxDo.userinfoUrl || LINUX_DO_DEFAULT_USERINFO_URL,
+      },
+      {
+        label: ta("linuxDoCallbackUrlLabel"),
+        value: linuxDoCallbackUrl,
+      },
+    ],
+    [linuxDoCallbackUrl, settingsDraft.registrationSettings.linuxDo.authorizeUrl, settingsDraft.registrationSettings.linuxDo.tokenUrl, settingsDraft.registrationSettings.linuxDo.userinfoUrl, ta],
+  )
+  const batchDomainProgressPercent =
+    batchDomainProgress && batchDomainProgress.total > 0
+      ? Math.round((batchDomainProgress.completed / batchDomainProgress.total) * 100)
+      : 0
+  const batchDomainCurrentIndex = batchDomainProgress
+    ? Math.min(
+        batchDomainProgress.completed + (batchDomainProgress.currentDomain ? 1 : 0),
+        batchDomainProgress.total,
+      )
+    : 0
   const hasUnsavedCoreSettings = useMemo(
     () => !areSettingsEqual(normalizedSettingsDraft, savedSettings),
     [normalizedSettingsDraft, savedSettings],
@@ -3284,6 +3527,19 @@ export default function DomainManagementPage({
                           tone="neutral"
                         />
                       </motion.div>
+                      {overviewDetailCards.map((card) => (
+                        <motion.div
+                          key={card.label}
+                          variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}
+                        >
+                          <MetricCard
+                            label={card.label}
+                            value={card.value}
+                            detail={card.detail}
+                            tone={card.tone}
+                          />
+                        </motion.div>
+                      ))}
                     </>
                   ) : (
                     <motion.div variants={{ hidden: { opacity: 0, y: 10 }, visible: { opacity: 1, y: 0 } }}>
@@ -3978,6 +4234,54 @@ export default function DomainManagementPage({
                           />
                           <span className="relative h-7 w-12 rounded-full bg-slate-300 transition-colors duration-200 after:absolute after:left-1 after:top-1 after:h-5 after:w-5 after:rounded-full after:bg-white after:shadow-sm after:transition-transform after:duration-200 peer-checked:bg-sky-600 peer-checked:after:translate-x-5 dark:bg-slate-700 dark:peer-checked:bg-sky-500" />
                         </label>
+                      </div>
+
+                      <div className="rounded-2xl border border-sky-200/70 bg-sky-50/75 p-4 backdrop-blur-sm dark:border-sky-900/50 dark:bg-sky-950/25">
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-slate-900 dark:text-white">
+                              {ta("linuxDoQuickstartTitle")}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
+                              {ta("linuxDoQuickstartDescription")}
+                            </p>
+                          </div>
+                          <a
+                            href={LINUX_DO_CONNECT_PORTAL_URL}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="shrink-0 text-sm font-medium text-sky-600 underline-offset-4 hover:text-sky-700 hover:underline dark:text-sky-300 dark:hover:text-sky-200"
+                          >
+                            {ta("linuxDoQuickstartLink")}
+                          </a>
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
+                        <div className="text-sm font-medium text-slate-900 dark:text-white">
+                          {ta("linuxDoReferenceTitle")}
+                        </div>
+                        <p className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">
+                          {ta("linuxDoReferenceDescription")}
+                        </p>
+                        <div className="mt-3 grid gap-3 md:grid-cols-2">
+                          {linuxDoReferenceItems.map((item) => (
+                            <div
+                              key={item.label}
+                              className="rounded-xl border border-slate-200/70 bg-slate-50/80 p-3 dark:border-slate-800/70 dark:bg-slate-950/35"
+                            >
+                              <div className="text-[11px] font-medium uppercase tracking-[0.12em] text-slate-500 dark:text-slate-400">
+                                {item.label}
+                              </div>
+                              <div className="mt-1 break-all font-mono text-xs leading-6 text-slate-700 dark:text-slate-200">
+                                {item.value}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                        <p className="mt-3 text-xs leading-6 text-slate-500 dark:text-slate-400">
+                          {ta("linuxDoCallbackUrlHint")}
+                        </p>
                       </div>
 
                       <div className="grid gap-4 md:grid-cols-2">
@@ -4679,7 +4983,7 @@ export default function DomainManagementPage({
                   setBatchDomainRootInput(value ?? "")
                 }}
                 disallowEmptySelection
-                isDisabled={cloudflareZonesLoading}
+                isDisabled={cloudflareZonesLoading || isCreatingDomainBatch}
               >
                 {cloudflareZoneOptions.map((zone) => (
                   <SelectItem key={zone} textValue={zone}>
@@ -4721,6 +5025,7 @@ export default function DomainManagementPage({
                 variant="bordered"
                 size="sm"
                 classNames={TM_INPUT_CLASSNAMES}
+                isDisabled={isCreatingDomainBatch}
               />
               <Input
                 label={ts("domainBatchRandomLengthLabel")}
@@ -4736,6 +5041,7 @@ export default function DomainManagementPage({
                 variant="bordered"
                 size="sm"
                 classNames={TM_INPUT_CLASSNAMES}
+                isDisabled={isCreatingDomainBatch}
               />
             </div>
 
@@ -4752,6 +5058,7 @@ export default function DomainManagementPage({
               variant="bordered"
               size="sm"
               classNames={TM_INPUT_CLASSNAMES}
+              isDisabled={isCreatingDomainBatch}
             />
 
             {!canBatchCreateManagedDomains ? (
@@ -4759,10 +5066,57 @@ export default function DomainManagementPage({
                 {ts("domainBatchRequiresCloudflareDesc")}
               </p>
             ) : null}
+
+            {batchDomainProgress ? (
+              <div className="rounded-[1.5rem] border border-emerald-200/80 bg-emerald-50/80 p-4 dark:border-emerald-900/40 dark:bg-emerald-950/20">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="space-y-1">
+                    <p className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
+                      {ts("domainBatchProgressLabel")}
+                    </p>
+                    <p className="text-xs text-emerald-700/80 dark:text-emerald-200/80">
+                      {ts("domainBatchProgressRunning", {
+                        current: batchDomainCurrentIndex,
+                        total: batchDomainProgress.total,
+                      })}
+                    </p>
+                  </div>
+                  <div className="rounded-full bg-white/80 px-3 py-1 text-xs font-medium text-emerald-700 shadow-sm dark:bg-slate-900/70 dark:text-emerald-200">
+                    {batchDomainProgress.completed}/{batchDomainProgress.total}
+                  </div>
+                </div>
+
+                <Progress
+                  value={batchDomainProgressPercent}
+                  className="mt-3 h-2 bg-emerald-100 dark:bg-emerald-950/60"
+                />
+
+                {batchDomainProgress.currentDomain ? (
+                  <p className="mt-3 break-all font-mono text-xs text-emerald-900 dark:text-emerald-100">
+                    {ts("domainBatchProgressCurrent", {
+                      domain: batchDomainProgress.currentDomain,
+                    })}
+                  </p>
+                ) : null}
+
+                <p className="mt-2 text-xs leading-6 text-emerald-700/90 dark:text-emerald-200/90">
+                  {ts("domainBatchProgressStats", {
+                    created: batchDomainProgress.created,
+                    synced: batchDomainProgress.synced,
+                    failed: batchDomainProgress.failed,
+                  })}
+                </p>
+              </div>
+            ) : null}
           </ModalBody>
 
           <ModalFooter className="border-t border-slate-200/80 px-6 py-5 dark:border-slate-800">
-            <Button variant="flat" className="rounded-full" onPress={handleCloseBatchDomainModal}>
+            <Button
+              variant="flat"
+              className="rounded-full"
+              onPress={handleCloseBatchDomainModal}
+              isDisabled={isCreatingDomainBatch}
+            >
               {tc("cancel")}
             </Button>
             <Button
@@ -4770,7 +5124,11 @@ export default function DomainManagementPage({
               onPress={() => void handleCreateRandomDomainBatch()}
               isLoading={isCreatingDomainBatch}
               startContent={<Sparkles size={14} />}
-              isDisabled={cloudflareZonesLoading || cloudflareZoneOptions.length === 0}
+              isDisabled={
+                isCreatingDomainBatch ||
+                cloudflareZonesLoading ||
+                cloudflareZoneOptions.length === 0
+              }
             >
               {ts("domainBatchCreateAction")}
             </Button>
@@ -4880,6 +5238,96 @@ function AdminConsoleSidebar({
       value: pendingDomainsCount,
     },
   ]
+  const primaryMenuItems = menuItems.filter((item) => item.id !== "settings")
+  const pinnedMenuItem = menuItems.find((item) => item.id === "settings") ?? null
+
+  const renderSidebarMenuButton = (item: (typeof menuItems)[number], compact = false) => {
+    const Icon = item.icon
+    const active = activeView === item.id
+
+    if (!mobile) {
+      return (
+        <TooltipProvider key={item.id}>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant={active ? "flat" : "light"}
+                color={active ? "primary" : "default"}
+                aria-label={item.label}
+                title={item.label}
+                className={`w-full rounded-2xl px-3 py-2 transition-all duration-150 ${
+                  compact ? "h-12" : "h-[4.9rem]"
+                } ${
+                  active
+                    ? "bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
+                    : "bg-white/65 text-slate-700 hover:bg-white/85 dark:bg-slate-950/45 dark:text-slate-300 dark:hover:bg-slate-900/80"
+                }`}
+                onPress={() => void onSelectView(item.id)}
+              >
+                {compact ? (
+                  <div className="flex w-full items-center justify-center gap-3">
+                    <div
+                      className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
+                        active
+                          ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
+                          : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+                      }`}
+                    >
+                      <Icon size={18} />
+                    </div>
+                    <span className="text-sm font-medium">{item.label}</span>
+                  </div>
+                ) : (
+                  <div className="flex w-full flex-col items-center justify-center gap-1.5">
+                    <div
+                      className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
+                        active
+                          ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
+                          : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+                      }`}
+                    >
+                      <Icon size={18} />
+                    </div>
+                    <span className="line-clamp-1 text-center text-[11px] font-medium leading-4">
+                      {item.label}
+                    </span>
+                  </div>
+                )}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent side="right">{item.label}</TooltipContent>
+          </Tooltip>
+        </TooltipProvider>
+      )
+    }
+
+    return (
+      <Button
+        key={item.id}
+        variant={active ? "flat" : "light"}
+        color={active ? "primary" : "default"}
+        className={`w-full justify-start rounded-2xl transition-all duration-150 ${
+          active
+            ? "h-12 bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
+            : "h-11 text-slate-700 hover:bg-white/85 dark:text-slate-300 dark:hover:bg-slate-900/80"
+        }`}
+        startContent={
+          <div
+            className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
+              active
+                ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
+                : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
+            }`}
+          >
+            <Icon size={18} />
+          </div>
+        }
+        onPress={() => void onSelectView(item.id)}
+      >
+        {item.label}
+      </Button>
+    )
+  }
 
   return (
     <div
@@ -4958,82 +5406,24 @@ function AdminConsoleSidebar({
         </div>
       </div>
 
-      <div className="border-t border-slate-200/80 px-4 pb-4 pt-4 dark:border-slate-800">
-        <div className="mb-3 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
-          {ta("inventoryTitle")}
+      <div className="flex flex-1 flex-col border-t border-slate-200/80 px-4 pb-4 pt-4 dark:border-slate-800">
+        <div>
+          <div className="mb-3 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+            {ta("inventoryTitle")}
+          </div>
+          <div className={mobile ? "space-y-2" : "grid grid-cols-2 gap-2"}>
+            {primaryMenuItems.map((item) => renderSidebarMenuButton(item))}
+          </div>
         </div>
-        <div className={mobile ? "space-y-2" : "grid grid-cols-2 gap-2"}>
-          {menuItems.map((item) => {
-            const Icon = item.icon
-            const active = activeView === item.id
 
-            if (!mobile) {
-              return (
-                <TooltipProvider key={item.id}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={active ? "flat" : "light"}
-                        color={active ? "primary" : "default"}
-                        aria-label={item.label}
-                        title={item.label}
-                        className={`h-[4.9rem] w-full rounded-2xl px-3 py-2 transition-all duration-150 ${
-                          active
-                            ? "bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
-                            : "bg-white/65 text-slate-700 hover:bg-white/85 dark:bg-slate-950/45 dark:text-slate-300 dark:hover:bg-slate-900/80"
-                        }`}
-                        onPress={() => void onSelectView(item.id)}
-                      >
-                        <div className="flex w-full flex-col items-center justify-center gap-1.5">
-                          <div
-                            className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
-                              active
-                                ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
-                                : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
-                            }`}
-                          >
-                            <Icon size={18} />
-                          </div>
-                          <span className="line-clamp-1 text-center text-[11px] font-medium leading-4">
-                            {item.label}
-                          </span>
-                        </div>
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="right">{item.label}</TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )
-            }
-
-            return (
-              <Button
-                key={item.id}
-                variant={active ? "flat" : "light"}
-                color={active ? "primary" : "default"}
-                className={`w-full justify-start rounded-2xl transition-all duration-150 ${
-                  active
-                    ? "h-12 bg-sky-100 text-sky-900 shadow-sm dark:bg-sky-950/40 dark:text-sky-100"
-                    : "h-11 text-slate-700 hover:bg-white/85 dark:text-slate-300 dark:hover:bg-slate-900/80"
-                }`}
-                startContent={
-                  <div
-                    className={`flex h-9 w-9 items-center justify-center rounded-2xl ${
-                      active
-                        ? "bg-white/90 text-sky-700 dark:bg-sky-900/60 dark:text-sky-100"
-                        : "bg-slate-100 text-slate-500 dark:bg-slate-900 dark:text-slate-400"
-                    }`}
-                  >
-                    <Icon size={18} />
-                  </div>
-                }
-                onPress={() => void onSelectView(item.id)}
-              >
-                {item.label}
-              </Button>
-            )
-          })}
-        </div>
+        {pinnedMenuItem ? (
+          <div className="mt-auto border-t border-slate-200/80 pt-4 dark:border-slate-800">
+            <div className="mb-3 px-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-400 dark:text-slate-500">
+              {pinnedMenuItem.label}
+            </div>
+            {renderSidebarMenuButton(pinnedMenuItem, true)}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -5100,7 +5490,7 @@ function MetricCard({
   label: string
   value: string
   detail?: string
-  tone: "success" | "warning" | "danger" | "neutral"
+  tone: MetricCardTone
   progressPercent?: number
 }) {
   const valueColor =

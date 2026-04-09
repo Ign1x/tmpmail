@@ -245,6 +245,10 @@ impl PgStore {
         Ok(self.fetch_domain(domain_id).await?.owner_user_id)
     }
 
+    pub async fn get_domain(&self, domain_id: Uuid) -> AppResult<Domain> {
+        Ok(self.fetch_domain(domain_id).await?.to_public())
+    }
+
     pub async fn create_domain(
         &self,
         domain: &str,

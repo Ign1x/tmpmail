@@ -107,6 +107,10 @@ export interface LinuxDoAuthSettings {
   clientSecret?: string
   clientSecretConfigured: boolean
   minimumTrustLevel: number
+  authorizeUrl?: string
+  tokenUrl?: string
+  userinfoUrl?: string
+  callbackUrl?: string
 }
 
 export interface AdminRegistrationSettings {
@@ -228,6 +232,7 @@ export interface CloudflareDnsSyncResponse {
   createdRecords: number
   updatedRecords: number
   unchangedRecords: number
+  domain?: Domain
 }
 
 export interface CloudflareTokenValidationResponse {
@@ -1862,7 +1867,13 @@ export async function syncManagedDomainCloudflare(
 
   await ensureAdminSessionResponse(res)
 
-  return res.json()
+  const response = await res.json()
+  return {
+    ...response,
+    domain: response.domain
+      ? normalizeManagedDomainResponse(response.domain, providerId)
+      : undefined,
+  }
 }
 
 export async function deleteOwnedAccount(
