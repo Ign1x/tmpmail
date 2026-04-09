@@ -6,9 +6,11 @@ import { Spinner } from "@heroui/spinner"
 import { AlertCircle, ChevronRight } from "lucide-react"
 import { useTranslations } from "next-intl"
 
+import { useBranding } from "@/contexts/branding-context"
 import { setStoredAdminSession } from "@/lib/admin-session"
 import { completeLinuxDoLogin } from "@/lib/api"
-import { BRAND_NAME, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { replaceBrandNameText } from "@/lib/site-branding"
 
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
 const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
@@ -38,6 +40,7 @@ export default function LinuxDoCallbackPage({
   state,
 }: LinuxDoCallbackPageProps) {
   const t = useTranslations("admin")
+  const { brandName } = useBranding()
   const [failure, setFailure] = useState<string | null>(null)
   const hasStartedRef = useRef(false)
 
@@ -90,9 +93,9 @@ export default function LinuxDoCallbackPage({
         return
       }
 
-      setFailure(t("linuxDoCallbackFailedDescription"))
+      setFailure(replaceBrandNameText(t("linuxDoCallbackFailedDescription"), brandName))
     })
-  }, [callbackPath, code, error, homePath, state, t])
+  }, [brandName, callbackPath, code, error, homePath, state, t])
 
   return (
     <div className="tm-page-backdrop relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-8 text-slate-900 dark:text-slate-100">
@@ -100,7 +103,7 @@ export default function LinuxDoCallbackPage({
 
       <div className="tm-glass-panel-strong relative w-full max-w-md rounded-[1.8rem] p-6 sm:p-7">
         <div className="tm-section-label">{t("linuxDoSubmit")}</div>
-        <h1 className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">{BRAND_NAME}</h1>
+        <h1 className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">{brandName}</h1>
 
         {failure ? (
           <div className="mt-5 space-y-4">
@@ -124,7 +127,7 @@ export default function LinuxDoCallbackPage({
               onPress={() => window.location.replace(homePath)}
               endContent={<ChevronRight size={16} />}
             >
-              {t("backToTmpMail")}
+              {replaceBrandNameText(t("backToTmpMail"), brandName)}
             </Button>
           </div>
         ) : (

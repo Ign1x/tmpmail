@@ -14,7 +14,6 @@ import {
   Users2,
   UserPlus,
 } from "lucide-react"
-import Image from "next/image"
 import { useTranslations } from "next-intl"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import {
@@ -38,8 +37,11 @@ import {
   storePendingRevealedAdminKey,
 } from "@/lib/admin-session"
 import { validateEmailAddress } from "@/lib/account-validation"
-import { BRAND_NAME, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { useBranding } from "@/contexts/branding-context"
+import BrandMark from "@/components/brand-mark"
+import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import { replaceBrowserPath } from "@/lib/admin-entry"
+import { replaceBrandNameText } from "@/lib/site-branding"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
@@ -97,6 +99,7 @@ export default function AdminEntryPage({
   requireSecureTransport,
 }: AdminEntryPageProps) {
   const { toast } = useHeroUIToast()
+  const { brandName } = useBranding()
   const ta = useTranslations("admin")
 
   const [status, setStatus] = useState<AdminStatus | null>(null)
@@ -513,7 +516,7 @@ export default function AdminEntryPage({
       setEntryMode("login")
       toast({
         title: ta("registerSuccess"),
-        description: ta("registerSuccessDescription"),
+        description: replaceBrandNameText(ta("registerSuccessDescription"), brandName),
         color: "success",
         variant: "flat",
       })
@@ -754,25 +757,19 @@ export default function AdminEntryPage({
                 <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
                   <div className="max-w-2xl">
                     <div className="text-xs font-semibold uppercase tracking-[0.28em] text-sky-700/80 dark:text-sky-200/80">
-                      {ta("accessTitle")}
+                      {replaceBrandNameText(ta("accessTitle"), brandName)}
                     </div>
                     <h1 className="mt-3 text-5xl font-semibold tracking-[-0.06em] text-slate-950 dark:text-white sm:text-6xl lg:text-7xl">
-                      {BRAND_NAME}
+                      {brandName}
                     </h1>
                     <p className="mt-4 max-w-xl text-sm leading-7 text-slate-600 dark:text-slate-300 sm:text-[15px]">
-                      {ta("entryHeroDescription")}
+                      {replaceBrandNameText(ta("entryHeroDescription"), brandName)}
                     </p>
                   </div>
 
                   <div className="hidden shrink-0 lg:block">
                     <div className="flex h-24 w-24 items-center justify-center rounded-[2rem] border border-white/80 bg-white/78 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur dark:border-slate-700/70 dark:bg-slate-950/65">
-                      <Image
-                        src="/brand-mark.svg"
-                        alt={`${BRAND_NAME} brand mark`}
-                        width={64}
-                        height={64}
-                        className="h-16 w-16 object-contain"
-                      />
+                      <BrandMark alt={`${brandName} brand mark`} className="h-16 w-16" />
                     </div>
                   </div>
                 </div>
@@ -1030,7 +1027,7 @@ export default function AdminEntryPage({
                           isDisabled={!canUseSensitiveAdminActions}
                           endContent={!isSubmittingLogin ? <ChevronRight size={16} /> : undefined}
                         >
-                          {ta("loginSubmit")}
+                          {replaceBrandNameText(ta("loginSubmit"), brandName)}
                         </Button>
                       </div>
                     )}

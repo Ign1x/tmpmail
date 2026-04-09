@@ -6,13 +6,15 @@ import { Button } from "@heroui/button"
 import { ArrowLeft, HelpCircle, Languages } from "lucide-react"
 import { useTranslations, useLocale } from "next-intl"
 import { useRouter, usePathname } from "@/i18n/navigation"
-import { BRAND_NAME } from "@/lib/provider-config"
+import { useBranding } from "@/contexts/branding-context"
+import { replaceBrandNameText } from "@/lib/site-branding"
 
 export default function FaqPage() {
   const router = useRouter()
   const pathname = usePathname()
   const t = useTranslations("faqSection")
   const tc = useTranslations("common")
+  const { brandName } = useBranding()
   const locale = useLocale()
   const [isPending, startTransition] = useTransition()
 
@@ -33,13 +35,13 @@ export default function FaqPage() {
   ] as const
 
   const faqs: Array<{ q: string; a: string }> = [
-    { q: t("q1"), a: t("a1") },
-    { q: t("q2"), a: t("a2") },
-    { q: t("q3"), a: t("a3") },
-    { q: t("q4"), a: t("a4") },
-    { q: t("q5"), a: t("a5") },
-    { q: t("q6"), a: t("a6") },
-    { q: t("q7"), a: t("a7") },
+    { q: replaceBrandNameText(t("q1"), brandName), a: replaceBrandNameText(t("a1"), brandName) },
+    { q: replaceBrandNameText(t("q2"), brandName), a: replaceBrandNameText(t("a2"), brandName) },
+    { q: replaceBrandNameText(t("q3"), brandName), a: replaceBrandNameText(t("a3"), brandName) },
+    { q: replaceBrandNameText(t("q4"), brandName), a: replaceBrandNameText(t("a4"), brandName) },
+    { q: replaceBrandNameText(t("q5"), brandName), a: replaceBrandNameText(t("a5"), brandName) },
+    { q: replaceBrandNameText(t("q6"), brandName), a: replaceBrandNameText(t("a6"), brandName) },
+    { q: replaceBrandNameText(t("q7"), brandName), a: replaceBrandNameText(t("a7"), brandName) },
   ]
 
   return (
@@ -73,7 +75,7 @@ export default function FaqPage() {
               </div>
               <div>
                 <h1 className="text-3xl font-bold text-gray-900 dark:text-white">{t("faqTitle")}</h1>
-                <p className="text-gray-600 dark:text-gray-300 mt-1">{BRAND_NAME}</p>
+                <p className="text-gray-600 dark:text-gray-300 mt-1">{brandName}</p>
               </div>
             </div>
           </CardHeader>
@@ -104,7 +106,9 @@ export default function FaqPage() {
                   <div key={step.num} className={`p-4 rounded-lg border-l-4 ${step.color} ${step.bg}`}>
                     <div className="text-2xl font-bold text-gray-400 dark:text-gray-500 mb-2">0{step.num}</div>
                     <h3 className="font-semibold text-gray-800 dark:text-gray-100 mb-2 text-sm">{t(step.titleKey)}</h3>
-                    <p className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">{t(step.descKey)}</p>
+                    <p className="text-xs text-gray-600 dark:text-gray-400 leading-relaxed">
+                      {replaceBrandNameText(t(step.descKey), brandName)}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -127,7 +131,7 @@ export default function FaqPage() {
 
             <div className="pt-4 border-t border-gray-200 dark:border-gray-700">
               <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
-                © 2024 {BRAND_NAME}. All rights reserved.
+                © 2024 {brandName}. All rights reserved.
               </p>
             </div>
           </CardBody>

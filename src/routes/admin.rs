@@ -510,13 +510,6 @@ pub async fn linux_do_complete(
         .ok_or_else(|| ApiError::forbidden("linux.do username is missing"))?;
     let trust_level = userinfo.trust_level.unwrap_or(0);
 
-    if trust_level < linux_do.minimum_trust_level {
-        return Err(ApiError::forbidden(format!(
-            "linux.do trust level {trust_level} is lower than required {}",
-            linux_do.minimum_trust_level
-        )));
-    }
-
     let authenticated = {
         let mut admin_state = state.admin_state.write().await;
         admin_state.authenticate_linux_do(
@@ -1018,6 +1011,7 @@ pub async fn update_settings(
             payload.mail_exchange_host.as_deref(),
             payload.mail_route_target.as_deref(),
             payload.domain_txt_prefix.as_deref(),
+            payload.branding,
             payload.smtp,
             payload.registration_settings,
             payload.user_limits,
@@ -1032,11 +1026,13 @@ pub async fn update_settings(
             "default".to_owned(),
             Some(actor.id.to_string()),
             format!(
-            "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} console_invite_code_required={} public_domains={:?} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
+            "system_enabled={} mail_exchange_host={:?} mail_route_target={:?} domain_txt_prefix={:?} branding_name={:?} branding_logo_url={:?} smtp_host={:?} smtp_port={} smtp_security={:?} smtp_username={:?} smtp_from_address={:?} smtp_password_configured={} open_registration_enabled={} console_invite_code_required={} public_domains={:?} allowed_email_suffixes={:?} email_otp_enabled={} linux_do_enabled={} default_domain_limit={} mailbox_limit={} api_key_limit={} update_notice_version={:?}",
                 settings.system_enabled,
                 settings.mail_exchange_host,
                 settings.mail_route_target,
                 settings.domain_txt_prefix,
+                settings.branding.name,
+                settings.branding.logo_url,
                 settings.smtp.host,
                 settings.smtp.port,
                 settings.smtp.security,
@@ -1790,6 +1786,7 @@ mod tests {
         registration_settings.email_otp.enabled = true;
         admin_state
             .update_system_settings(
+                None,
                 None,
                 None,
                 None,

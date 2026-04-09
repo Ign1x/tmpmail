@@ -16,7 +16,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 | Surface | File | Notes |
 |---|---|---|
 | Health/readiness | `health.rs` | Public liveness and backend-aware readiness |
-| Ops/public notice | `ops.rs` | Public `/metrics`, public update notice, admin metrics/audit/cleanup |
+| Ops/public notice | `ops.rs` | Public `/metrics`, `/site/branding`, public update notice, admin metrics/audit/cleanup |
 | Admin console | `admin.rs` | Bootstrap, login, session, recovery, Linux Do auth, users, settings, access keys, invite codes |
 | Managed domains | `domains.rs` | Public listing plus console-scoped create/verify/delete |
 | Accounts | `accounts.rs` | Console-owned mailbox listing/create/token issuance plus legacy mailbox token login/self delete |
@@ -50,7 +50,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - Sensitive auth surfaces should keep abuse controls close to the route edge; current fixed-window throttling covers `/admin/login`, `/admin/recover`, and `/token`.
 - OTP abuse controls are split intentionally: send throttling stays at the route edge, while wrong-code attempt caps live in `otp.rs` so both registration flows share the same rules.
 - Keep streaming endpoints in `stream_router()`; SSE intentionally sits outside the protected API middleware path, so abuse protection belongs in the route or shared metrics layer.
-- Public `/metrics` and `/site/update-notice` live beside admin-only ops endpoints in `ops.rs`; `/metrics` may be config-disabled, but do not merge its auth behavior with admin ops.
+- Public `/metrics`, `/site/branding`, and `/site/update-notice` live beside admin-only ops endpoints in `ops.rs`; `/metrics` may be config-disabled, but do not merge its auth behavior with admin ops.
 
 ## Verification
 - `cargo test` for route-adjacent modules; `messages.rs` already carries route-focused tests.

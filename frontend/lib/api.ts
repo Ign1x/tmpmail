@@ -72,9 +72,15 @@ export interface AdminSystemSettings {
   mailExchangeHost?: string
   mailRouteTarget?: string
   domainTxtPrefix?: string
+  branding: SiteBrandingSettings
   smtp: AdminSmtpSettings
   registrationSettings: AdminRegistrationSettings
   userLimits: AdminUserLimitsSettings
+}
+
+export interface SiteBrandingSettings {
+  name?: string
+  logoUrl?: string
 }
 
 export interface AdminUserLimitsSettings {
@@ -194,6 +200,7 @@ export interface AdminUpdateSystemSettingsRequest {
   mailExchangeHost?: string
   mailRouteTarget?: string
   domainTxtPrefix?: string
+  branding?: SiteBrandingSettings
   smtp?: AdminSmtpSettings
   registrationSettings?: AdminRegistrationSettings
   userLimits?: AdminUserLimitsSettings

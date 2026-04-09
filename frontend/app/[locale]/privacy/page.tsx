@@ -6,13 +6,15 @@ import { Button } from "@heroui/button"
 import { ArrowLeft, Shield, Languages } from "lucide-react"
 import { useTranslations, useLocale } from "next-intl"
 import { useRouter, usePathname } from "@/i18n/navigation"
-import { BRAND_NAME } from "@/lib/provider-config"
+import { useBranding } from "@/contexts/branding-context"
+import { replaceBrandNameText } from "@/lib/site-branding"
 
 export default function PrivacyPage() {
   const router = useRouter()
   const pathname = usePathname()
   const t = useTranslations("privacy")
   const tc = useTranslations("common")
+  const { brandName } = useBranding()
   const locale = useLocale()
   const [isPending, startTransition] = useTransition()
 
@@ -63,24 +65,30 @@ export default function PrivacyPage() {
               </div>
               <div>
                 <h1 className="text-3xl font-bold text-gray-900 dark:text-white">{t("title")}</h1>
-                <p className="text-gray-600 dark:text-gray-300 mt-1">{t("subtitle")}</p>
+                <p className="text-gray-600 dark:text-gray-300 mt-1">
+                  {replaceBrandNameText(t("subtitle"), brandName)}
+                </p>
               </div>
             </div>
           </CardHeader>
 
           <CardBody className="space-y-6">
-            <p className="text-gray-700 dark:text-gray-300 leading-relaxed">{t("description")}</p>
+            <p className="text-gray-700 dark:text-gray-300 leading-relaxed">
+              {replaceBrandNameText(t("description"), brandName)}
+            </p>
 
             {sections.map((section, index) => (
               <div key={index} className="border-l-4 border-primary-500 pl-4">
                 <h2 className="text-xl font-semibold text-gray-900 dark:text-white mb-3">{t(section.titleKey)}</h2>
-                <p className="text-gray-700 dark:text-gray-300 leading-relaxed">{t(section.contentKey)}</p>
+                <p className="text-gray-700 dark:text-gray-300 leading-relaxed">
+                  {replaceBrandNameText(t(section.contentKey), brandName)}
+                </p>
               </div>
             ))}
 
             <div className="mt-8 pt-6 border-t border-gray-200 dark:border-gray-700">
               <p className="text-sm text-gray-500 dark:text-gray-400 text-center">
-                © 2024 {BRAND_NAME}. {t("allRightsReserved")}
+                © 2024 {brandName}. {t("allRightsReserved")}
               </p>
             </div>
           </CardBody>

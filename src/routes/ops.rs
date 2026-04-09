@@ -12,7 +12,7 @@ use crate::{
     cleanup_worker,
     error::AppResult,
     metrics::MetricsSnapshot,
-    models::{AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice},
+    models::{AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice, SiteBrandingSettings},
     state::AppState,
 };
 
@@ -70,6 +70,13 @@ pub async fn public_update_notice(
 ) -> AppResult<Json<Option<PublicUpdateNotice>>> {
     let admin_state = state.admin_state.read().await;
     Ok(Json(admin_state.system_settings().update_notice))
+}
+
+pub async fn public_site_branding(
+    State(state): State<AppState>,
+) -> AppResult<Json<SiteBrandingSettings>> {
+    let admin_state = state.admin_state.read().await;
+    Ok(Json(admin_state.system_settings().branding))
 }
 
 pub async fn trigger_cleanup(

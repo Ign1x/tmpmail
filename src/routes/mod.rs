@@ -18,6 +18,7 @@ pub fn api_router() -> Router<AppState> {
         .route("/healthz", get(health::health))
         .route("/readyz", get(health::ready))
         .route("/metrics", get(ops::metrics))
+        .route("/site/branding", get(ops::public_site_branding))
         .route("/site/update-notice", get(ops::public_update_notice))
         .route("/admin/status", get(admin::status))
         .route("/admin/linux-do/authorize", get(admin::linux_do_authorize))

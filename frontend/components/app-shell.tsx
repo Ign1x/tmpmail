@@ -3,12 +3,13 @@
 import { useEffect, useState, useTransition, type ReactNode } from "react"
 import { Button } from "@heroui/button"
 import { Bell, Languages, Mail, Menu, RefreshCw, Wifi, X } from "lucide-react"
-import Image from "next/image"
 import { useTranslations, useLocale } from "next-intl"
 import { usePathname, useRouter } from "@/i18n/navigation"
+import BrandMark from "@/components/brand-mark"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useAuth } from "@/contexts/auth-context"
+import { useBranding } from "@/contexts/branding-context"
 import { useMailStatus } from "@/contexts/mail-status-context"
 import Header from "@/components/header"
 import Sidebar from "@/components/sidebar"
@@ -16,7 +17,7 @@ import AccountModal from "@/components/account-modal"
 import LoginModal from "@/components/login-modal"
 import UpdateNoticeModal from "@/components/update-notice-modal"
 import { fetchPublicUpdateNotice, type PublicUpdateNotice } from "@/lib/api"
-import { BRAND_LABEL, BRAND_NAME, BRAND_REPO_URL } from "@/lib/provider-config"
+import { BRAND_REPO_URL } from "@/lib/provider-config"
 
 interface AppShellProps {
   activeItem: "inbox"
@@ -45,6 +46,7 @@ export default function AppShell({
   const [isNoticeModalOpen, setIsNoticeModalOpen] = useState(false)
   const [notice, setNotice] = useState<PublicUpdateNotice | null>(null)
   const { toast } = useHeroUIToast()
+  const { brandName } = useBranding()
   const isMobile = useIsMobile()
   const { isAuthenticated, currentAccount } = useAuth()
   const { isEnabled, connectionState } = useMailStatus()
@@ -175,7 +177,7 @@ export default function AppShell({
 
   const mobileStatusLabel =
     !isAuthenticated || !currentAccount
-      ? BRAND_NAME
+      ? brandName
       : !isEnabled
         ? tm("streamPaused")
         : connectionState === "connected"
@@ -235,10 +237,10 @@ export default function AppShell({
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center justify-center gap-2">
                       <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-2xl bg-sky-100 dark:bg-sky-950/40">
-                        <Image src="/brand-mark.svg" alt={`${BRAND_NAME} Logo`} width={24} height={24} className="h-6 w-6 object-contain" />
+                        <BrandMark alt={`${brandName} logo`} className="h-6 w-6" />
                       </div>
                       <span className="truncate text-base font-semibold text-slate-800 dark:text-white">
-                        {BRAND_LABEL}
+                        {brandName}
                       </span>
                     </div>
                     <div className="mt-1 flex items-center justify-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
@@ -315,16 +317,10 @@ export default function AppShell({
                   <div className="flex items-center justify-between">
                     <div className="flex items-center space-x-2">
                       <div className="flex h-7 w-7 items-center justify-center overflow-hidden rounded-xl bg-sky-100 dark:bg-sky-950/40">
-                        <Image
-                          src="/brand-mark.svg"
-                          alt={`${BRAND_NAME} Logo`}
-                          width={20}
-                          height={20}
-                          className="h-5 w-5 object-contain"
-                        />
+                        <BrandMark alt={`${brandName} logo`} className="h-5 w-5" />
                       </div>
                       <span className="text-lg font-semibold text-gray-800 dark:text-white">
-                        {BRAND_LABEL}
+                        {brandName}
                       </span>
                     </div>
                     <Button

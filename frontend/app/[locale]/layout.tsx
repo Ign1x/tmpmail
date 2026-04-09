@@ -7,9 +7,9 @@ import { routing } from "@/i18n/routing"
 import { notFound } from "next/navigation"
 import "../globals.css"
 import { Providers } from "./providers"
-import { BRAND_NAME } from "@/lib/provider-config"
 import { MailStatusProvider } from "@/contexts/mail-status-context"
 import { AuthProvider } from "@/contexts/auth-context"
+import { getServerSiteBranding } from "@/lib/site-branding-server"
 
 type AppLocale = (typeof routing.locales)[number]
 
@@ -46,20 +46,21 @@ export async function generateMetadata({
   params: Promise<{ locale: string }>
 }): Promise<Metadata> {
   const { locale } = await params
+  const branding = await getServerSiteBranding()
 
   const isZh = locale === "zh"
 
   return {
     title: isZh
-      ? `Temp Mail-临时邮件-安全、即时、快速- ${BRAND_NAME}`
-      : `Temp Mail - Secure, Instant, Fast - ${BRAND_NAME}`,
+      ? `Temp Mail-临时邮件-安全、即时、快速- ${branding.brandName}`
+      : `Temp Mail - Secure, Instant, Fast - ${branding.brandName}`,
     description: isZh
-      ? `使用 ${BRAND_NAME} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
-      : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${BRAND_NAME}.`,
+      ? `使用 ${branding.brandName} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
+      : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${branding.brandName}.`,
     icons: {
-      icon: "/brand-mark.svg",
-      shortcut: "/brand-mark.svg",
-      apple: "/brand-mark.svg",
+      icon: branding.brandLogoUrl,
+      shortcut: branding.brandLogoUrl,
+      apple: branding.brandLogoUrl,
     },
     alternates: {
       languages: {
@@ -78,6 +79,7 @@ export default async function LocaleLayout({
   params: Promise<{ locale: string }>
 }) {
   const { locale } = await params
+  const branding = await getServerSiteBranding()
 
   // 验证 locale 有效性
   if (!isAppLocale(locale)) {
@@ -96,7 +98,7 @@ export default async function LocaleLayout({
         className={`${inter.variable} ${notoSansSc.variable} ${jetbrainsMono.variable}`}
       >
         <NextIntlClientProvider messages={messages}>
-          <Providers>
+          <Providers initialBranding={branding}>
             <AuthProvider>
               <MailStatusProvider>
                 {children}

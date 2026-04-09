@@ -6,6 +6,8 @@ import { useEffect } from "react"
 import { HeroUIProvider } from "@heroui/system"
 import { ThemeProvider as NextThemesProvider } from "next-themes"
 import { ToastProvider } from "@heroui/toast"
+import { BrandingProvider } from "@/contexts/branding-context"
+import type { ResolvedSiteBranding } from "@/lib/site-branding"
 import { removeStoredValue } from "@/lib/storage"
 
 function LegacyProviderStorageCleanup() {
@@ -17,7 +19,13 @@ function LegacyProviderStorageCleanup() {
   return null
 }
 
-export function Providers({ children }: { children: React.ReactNode }) {
+export function Providers({
+  children,
+  initialBranding,
+}: {
+  children: React.ReactNode
+  initialBranding: ResolvedSiteBranding
+}) {
   return (
     <HeroUIProvider>
       <NextThemesProvider
@@ -26,18 +34,20 @@ export function Providers({ children }: { children: React.ReactNode }) {
         enableSystem
         disableTransitionOnChange
       >
-        <LegacyProviderStorageCleanup />
-        {children}
-        <ToastProvider
-          placement="bottom-center"
-          maxVisibleToasts={3}
-          toastProps={{
-            color: "primary",
-            variant: "flat",
-            radius: "md",
-            timeout: 4000,
-          }}
-        />
+        <BrandingProvider initialBranding={initialBranding}>
+          <LegacyProviderStorageCleanup />
+          {children}
+          <ToastProvider
+            placement="bottom-center"
+            maxVisibleToasts={3}
+            toastProps={{
+              color: "primary",
+              variant: "flat",
+              radius: "md",
+              timeout: 4000,
+            }}
+          />
+        </BrandingProvider>
       </NextThemesProvider>
     </HeroUIProvider>
   )

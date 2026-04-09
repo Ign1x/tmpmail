@@ -22,6 +22,7 @@ use crate::{
         ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole, LinuxDoAuthSettings,
         LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
         PublicUpdateNoticeSection, SmtpSecurity,
+        SiteBrandingSettings,
         default_smtp_port_for_security,
     },
     state::AppState,
@@ -62,6 +63,8 @@ struct PersistedSystemSettings {
     #[serde(default)]
     domain_txt_prefix: Option<String>,
     #[serde(default)]
+    branding: SiteBrandingSettings,
+    #[serde(default)]
     smtp: PersistedSmtpSettings,
     #[serde(default = "default_registration_settings")]
     registration_settings: AdminRegistrationSettings,
@@ -78,6 +81,7 @@ impl Default for PersistedSystemSettings {
             mail_exchange_host: None,
             mail_route_target: None,
             domain_txt_prefix: None,
+            branding: SiteBrandingSettings::default(),
             smtp: PersistedSmtpSettings::default(),
             registration_settings: default_registration_settings(),
             user_limits: default_user_limits_settings(),
@@ -349,6 +353,7 @@ impl AdminStateStore {
             mail_exchange_host: self.persisted.system_settings.mail_exchange_host.clone(),
             mail_route_target: self.persisted.system_settings.mail_route_target.clone(),
             domain_txt_prefix: self.persisted.system_settings.domain_txt_prefix.clone(),
+            branding: self.persisted.system_settings.branding.clone(),
             smtp: self.persisted.system_settings.smtp.to_public(),
             registration_settings,
             user_limits: self.persisted.system_settings.user_limits.clone(),
@@ -1232,6 +1237,7 @@ impl AdminStateStore {
         mail_exchange_host: Option<&str>,
         mail_route_target: Option<&str>,
         domain_txt_prefix: Option<&str>,
+        branding: Option<SiteBrandingSettings>,
         smtp: Option<AdminSmtpSettings>,
         registration_settings: Option<AdminRegistrationSettings>,
         user_limits: Option<AdminUserLimitsSettings>,
@@ -1252,6 +1258,9 @@ impl AdminStateStore {
         if let Some(value) = domain_txt_prefix {
             self.persisted.system_settings.domain_txt_prefix =
                 normalize_txt_prefix_setting(Some(value));
+        }
+        if let Some(value) = branding {
+            self.persisted.system_settings.branding = normalize_branding_settings(value)?;
         }
         if let Some(value) = smtp {
             self.persisted.system_settings.smtp =
@@ -1963,6 +1972,41 @@ fn normalize_registration_settings(
     })
 }
 
+fn normalize_branding_settings(value: SiteBrandingSettings) -> AppResult<SiteBrandingSettings> {
+    let name = normalize_optional_copy(value.name).map(|value| value.chars().take(80).collect());
+    let logo_url = normalize_optional_logo_url(value.logo_url.as_deref())?;
+
+    Ok(SiteBrandingSettings { name, logo_url })
+}
+
+fn normalize_optional_logo_url(value: Option<&str>) -> AppResult<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    if value.starts_with('/') {
+        return Ok(Some(value.to_owned()));
+    }
+
+    if value.starts_with("data:image/") {
+        if value.len() > 64 * 1024 {
+            return Err(ApiError::validation("branding logo url is too large"));
+        }
+
+        return Ok(Some(value.to_owned()));
+    }
+
+    let url =
+        Url::parse(value).map_err(|_| ApiError::validation("branding logo url must be a valid URL"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(ApiError::validation(
+            "branding logo url must use http, https, /path, or data:image",
+        ));
+    }
+
+    Ok(Some(url.to_string()))
+}
+
 fn normalize_smtp_settings(
     value: AdminSmtpSettings,
     existing: Option<&PersistedSmtpSettings>,
@@ -2521,7 +2565,7 @@ mod tests {
     };
     use crate::{
         config::Config,
-        models::{AdminRegistrationSettings, AdminSmtpSettings, SmtpSecurity},
+        models::{AdminRegistrationSettings, AdminSmtpSettings, SiteBrandingSettings, SmtpSecurity},
         test_support::{TestDatabase, attach_test_database},
     };
 
@@ -2617,12 +2661,41 @@ mod tests {
     }
 
     #[test]
+    fn branding_settings_are_trimmed_and_persisted() {
+        let (mut store, _database) = load_store("branding-settings");
+
+        let settings = store
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                Some(SiteBrandingSettings {
+                    name: Some("  Demo Mail  ".to_owned()),
+                    logo_url: Some(" https://cdn.example.com/logo.svg ".to_owned()),
+                }),
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("save branding settings");
+
+        assert_eq!(settings.branding.name.as_deref(), Some("Demo Mail"));
+        assert_eq!(
+            settings.branding.logo_url.as_deref(),
+            Some("https://cdn.example.com/logo.svg")
+        );
+    }
+
+    #[test]
     fn smtp_password_is_redacted_from_state_json_and_restored_separately() {
         let (mut store, database) = load_store("smtp-settings");
         let smtp_password = "smtp-secret-123";
 
         store
             .update_system_settings(
+                None,
                 None,
                 None,
                 None,

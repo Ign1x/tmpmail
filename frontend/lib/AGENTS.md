@@ -10,6 +10,7 @@ This directory owns cross-cutting runtime helpers: transport, session, config, s
 ## High-signal files
 - `api.ts` — central client transport surface, request helpers, error shaping, retry/timeout behavior, and admin/API wrappers
 - `provider-config.ts` — default provider, branding, and API-base env helpers
+- `site-branding.ts`, `site-branding-server.ts` — runtime site-name/logo resolution plus public-branding server fetch
 - `admin-entry.ts` — configurable admin path helpers; source of truth for public/admin route generation
 - `admin-session.ts` — client-side admin session presence and ephemeral revealed-key helpers
 - `admin-session-server.ts` — Next route-handler cookie helpers for the HttpOnly admin session

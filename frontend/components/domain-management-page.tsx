@@ -39,6 +39,8 @@ import {
 } from "lucide-react"
 import { useLocale, useTranslations } from "next-intl"
 import { useAuth } from "@/contexts/auth-context"
+import { useBranding } from "@/contexts/branding-context"
+import BrandMark from "@/components/brand-mark"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { Progress } from "@/components/ui/progress"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
@@ -107,11 +109,12 @@ import MessageDetail from "@/components/message-detail"
 import MessageList from "@/components/message-list"
 import ConsoleActionModal from "@/components/console-action-modal"
 import type { Account, Domain, DomainDnsRecord, Message } from "@/types"
-import { BRAND_LABEL, DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
+import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import { generateRandomUsername } from "@/lib/account-credentials"
 import ThemeModeToggle from "@/components/theme-mode-toggle"
 import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
 import { Input, Select, SelectItem, Textarea } from "@/components/tm-form-fields"
+import { replaceBrandNameText, resolveSiteBranding } from "@/lib/site-branding"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
 const DEFAULT_CLOUDFLARE_SETTINGS: ConsoleCloudflareSettings = {
@@ -155,6 +158,7 @@ const DEFAULT_SMTP_SETTINGS: AdminSystemSettings["smtp"] = {
 }
 const DEFAULT_SETTINGS: AdminSystemSettings = {
   systemEnabled: true,
+  branding: {},
   smtp: DEFAULT_SMTP_SETTINGS,
   registrationSettings: {
     openRegistrationEnabled: true,
@@ -264,22 +268,6 @@ function formatBytes(value: number | undefined): string {
 
   const precision = current >= 10 || unitIndex === 0 ? 0 : 1
   return `${current.toFixed(precision).replace(/\.0$/, "")} ${units[unitIndex]}`
-}
-
-function formatDateTime(value: string | undefined, locale: string, fallback: string): string {
-  if (!value) {
-    return fallback
-  }
-
-  const date = new Date(value)
-  if (Number.isNaN(date.getTime())) {
-    return fallback
-  }
-
-  return new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date)
 }
 
 function formatUptime(value: number | undefined, locale: string): string {
@@ -424,6 +412,12 @@ function buildSettingsSavePayload(
   if (draft.domainTxtPrefix !== saved.domainTxtPrefix) {
     payload.domainTxtPrefix = draft.domainTxtPrefix ?? ""
   }
+  if (!areSettingsEqual(draft.branding, saved.branding)) {
+    payload.branding = {
+      name: draft.branding.name ?? "",
+      logoUrl: draft.branding.logoUrl ?? "",
+    }
+  }
   if (!areSettingsEqual(draft.smtp, saved.smtp)) {
     payload.smtp = {
       ...draft.smtp,
@@ -537,6 +531,7 @@ export default function DomainManagementPage({
     clearAccounts,
     syncAccounts,
   } = useAuth()
+  const { brandName, setBranding } = useBranding()
   const locale = useLocale()
   const router = useRouter()
   const pathname = usePathname()
@@ -648,6 +643,7 @@ export default function DomainManagementPage({
   const hasLoadedAccessKeysRef = useRef(false)
   const hasLoadedInviteCodesRef = useRef(false)
   const hasLoadedCloudflareSettingsRef = useRef(false)
+  const cloudflareSettingsRef = useRef(DEFAULT_CLOUDFLARE_SETTINGS)
   const batchCloudflareZoneRequestIdRef = useRef(0)
   const isMountedRef = useRef(true)
   const hasClientSession = useSyncExternalStore(
@@ -828,66 +824,19 @@ export default function DomainManagementPage({
       return []
     }
 
-    const syncFailures = adminMetrics?.inbucketSyncFailuresTotal ?? 0
-    const syncRuns = adminMetrics?.inbucketSyncRunsTotal ?? 0
-    const verificationFailures = adminMetrics?.domainVerificationFailuresTotal ?? 0
-    const verificationRuns = adminMetrics?.domainVerificationRunsTotal ?? 0
-    const cleanupRuns = adminMetrics?.cleanupRunsTotal ?? 0
-
     return [
-      {
-        label: ta("overviewStoreBackend"),
-        value: serviceStatus?.storeBackend?.toUpperCase() ?? tc("none"),
-        detail: serviceStatusLabel,
-        tone: serviceTone,
-      },
       {
         label: ta("overviewUptime"),
         value: formatUptime(adminMetrics?.runtime.uptimeSeconds, locale),
-        detail: `${ta("runtimeCpuLabel")} ${formatPercent(adminMetrics?.runtime.cpuUsagePercent)} · ${ta("runtimeMemoryLabel")} ${formatPercent(adminMetrics?.runtime.memoryUsagePercent)}`,
         tone: "neutral",
       },
       {
         label: ta("overviewLiveConnections"),
         value: String(adminMetrics?.sseConnectionsActive ?? 0),
-        detail: `${ta("overviewRealtimeEvents")} ${adminMetrics?.realtimeEventsTotal ?? 0}`,
         tone: "neutral",
-      },
-      {
-        label: ta("overviewLastSync"),
-        value: formatDateTime(
-          adminMetrics?.lastInbucketSyncAt,
-          locale,
-          ta("overviewNoRecentRun"),
-        ),
-        detail: `${ta("overviewSyncRuns")} ${syncRuns} · ${ta("opsSyncFailures")} ${syncFailures}`,
-        tone: syncRuns === 0 ? "neutral" : syncFailures > 0 ? "warning" : "success",
-      },
-      {
-        label: ta("overviewImportedMessages"),
-        value: String(adminMetrics?.importedMessagesTotal ?? 0),
-        detail: `${ta("overviewDeletedUpstreamMessages")} ${adminMetrics?.deletedUpstreamMessagesTotal ?? 0}`,
-        tone: "neutral",
-      },
-      {
-        label: ta("overviewLastVerification"),
-        value: formatDateTime(
-          adminMetrics?.lastDomainVerificationAt,
-          locale,
-          ta("overviewNoRecentRun"),
-        ),
-        detail: `${ta("overviewVerificationRuns")} ${verificationRuns} · ${ta("overviewVerificationFailures")} ${verificationFailures}`,
-        tone:
-          verificationRuns === 0 ? "neutral" : verificationFailures > 0 ? "warning" : "success",
-      },
-      {
-        label: ta("overviewLastCleanup"),
-        value: formatDateTime(adminMetrics?.lastCleanupAt, locale, ta("overviewNoRecentRun")),
-        detail: `${ta("opsCleanupRuns")} ${cleanupRuns} · ${ta("overviewDeletedAccounts")} ${adminMetrics?.cleanupDeletedAccountsTotal ?? 0} · ${ta("overviewDeletedDomains")} ${adminMetrics?.cleanupDeletedDomainsTotal ?? 0}`,
-        tone: cleanupRuns === 0 ? "neutral" : "success",
       },
     ]
-  }, [adminMetrics, isAdmin, locale, serviceStatus?.storeBackend, serviceStatusLabel, serviceTone, ta, tc])
+  }, [adminMetrics, isAdmin, locale, ta])
 
   const syncRevealedAdminKeysFromStorage = useCallback(() => {
     setRevealedAdminKeys(getStoredRevealedAdminKeys())
@@ -917,6 +866,10 @@ export default function DomainManagementPage({
     return {
       ...DEFAULT_SETTINGS,
       ...settings,
+      branding: {
+        ...DEFAULT_SETTINGS.branding,
+        ...settings.branding,
+      },
       smtp: {
         ...DEFAULT_SMTP_SETTINGS,
         ...settings.smtp,
@@ -946,24 +899,31 @@ export default function DomainManagementPage({
 
   const applySavedSettings = useCallback((settings: AdminSystemSettings) => {
     const normalizedSettings = normalizeSettings(settings)
+    setBranding(normalizedSettings.branding)
     setSettingsDraft(normalizedSettings)
     setSessionInfo((current) => (current ? { ...current, systemSettings: normalizedSettings } : current))
-  }, [normalizeSettings])
+  }, [normalizeSettings, setBranding])
 
   const applyAdminSession = useCallback((session: AdminSessionInfo) => {
     const normalizedSettings = normalizeSettings(session.systemSettings)
+    setBranding(normalizedSettings.branding)
     setStoredAdminSession()
     setSessionInfo({ ...session, systemSettings: normalizedSettings })
     setSettingsDraft(normalizedSettings)
     setNewUserDomainLimit(String(normalizedSettings.userLimits.defaultDomainLimit))
-  }, [normalizeSettings])
+  }, [normalizeSettings, setBranding])
 
   const applyCloudflareSettings = useCallback((settings: ConsoleCloudflareSettings) => {
     const normalized = normalizeCloudflareSettings(settings)
+    cloudflareSettingsRef.current = normalized
     setCloudflareSettings(normalized)
     setSavedCloudflareSettings(normalized)
     setCloudflareApiTokenInput("")
   }, [])
+
+  useEffect(() => {
+    cloudflareSettingsRef.current = normalizeCloudflareSettings(cloudflareSettings)
+  }, [cloudflareSettings])
 
   useEffect(() => {
     if (availableMailboxDomains.length === 0) {
@@ -2191,7 +2151,9 @@ export default function DomainManagementPage({
       setCloudflareZoneLoadError(null)
       setCloudflareZonesLoading(true)
 
-      let effectiveSettings = normalizeCloudflareSettings(settingsOverride ?? cloudflareSettings)
+      let effectiveSettings = normalizeCloudflareSettings(
+        settingsOverride ?? cloudflareSettingsRef.current,
+      )
 
       try {
         if (!settingsOverride) {
@@ -2259,7 +2221,7 @@ export default function DomainManagementPage({
         }
       }
     },
-    [applyCloudflareSettings, cloudflareSettings, toast, ts],
+    [applyCloudflareSettings, toast, ts],
   )
 
   const handleOpenBatchDomainModal = useCallback(() => {
@@ -3219,6 +3181,25 @@ export default function DomainManagementPage({
     () => normalizeSettings(settingsDraft),
     [normalizeSettings, settingsDraft],
   )
+  const draftBranding = useMemo(
+    () => resolveSiteBranding(normalizedSettingsDraft.branding),
+    [normalizedSettingsDraft.branding],
+  )
+  const emailOtpDefaultSubject = useMemo(
+    () => replaceBrandNameText(ta("emailOtpDefaultSubject"), draftBranding.brandName),
+    [draftBranding.brandName, ta],
+  )
+  const emailOtpDefaultBody = useMemo(
+    () =>
+      replaceBrandNameText(
+        ta("emailOtpDefaultBody", {
+          code: "{{code}}",
+          ttlSeconds: "{{ttlSeconds}}",
+        }),
+        draftBranding.brandName,
+      ),
+    [draftBranding.brandName, ta],
+  )
   const normalizedCloudflareSettings = useMemo(
     () => normalizeCloudflareSettings(cloudflareSettings),
     [cloudflareSettings],
@@ -3387,7 +3368,7 @@ export default function DomainManagementPage({
         <div className="relative m-auto rounded-[2rem] border border-white/70 bg-white/80 px-8 py-7 text-center shadow-[0_24px_80px_rgba(15,23,42,0.08)] backdrop-blur-xl dark:border-slate-800 dark:bg-slate-950/75 dark:shadow-none">
           <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
             <Sparkles size={13} />
-            {BRAND_LABEL}
+            {brandName}
           </div>
           <div className="mt-4 text-sm text-slate-500 dark:text-slate-400">{ta("loadingStatus")}</div>
         </div>
@@ -3443,7 +3424,7 @@ export default function DomainManagementPage({
               <div className="min-w-0 flex-1 text-center">
                 <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
                   <Sparkles size={12} />
-                  {BRAND_LABEL}
+                  {brandName}
                 </div>
                 <div className="mt-2 truncate text-sm font-semibold text-slate-900 dark:text-white">
                   {currentMenuItem.label}
@@ -3478,7 +3459,7 @@ export default function DomainManagementPage({
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="tm-chip-strong">
                     <Sparkles size={13} />
-                    {BRAND_LABEL}
+                    {brandName}
                   </span>
                   <span className="tm-chip">
                     <Activity size={13} />
@@ -3655,9 +3636,6 @@ export default function DomainManagementPage({
                       <Mail size={12} />
                       {mailboxPreviewAddress || ta("mailboxCreatePreviewPlaceholder")}
                     </div>
-                    <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
-                      {ta("mailboxCreateSecretHint")}
-                    </p>
                     {availableMailboxDomains.length === 0 && (
                       <p className="mt-3 text-sm text-amber-600 dark:text-amber-300">
                         {ta("mailboxCreateNoDomainAvailable")}
@@ -4033,8 +4011,74 @@ export default function DomainManagementPage({
                     </Panel>
 
                     <Panel>
-                      <PanelHeader title={ta("overviewSettingsTitle")} />
-                      <div className="grid gap-4 p-5 md:grid-cols-3">
+                    <PanelHeader title={ta("brandingSettingsTitle")} />
+                    <div className="grid gap-5 p-5 lg:grid-cols-[minmax(0,1fr)_18rem]">
+                      <div className="space-y-4">
+                        <Input
+                          label={ta("brandingNameLabel")}
+                          placeholder="TmpMail"
+                          value={settingsDraft.branding.name || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              branding: {
+                                ...current.branding,
+                                name: value || undefined,
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("brandingLogoUrlLabel")}
+                          placeholder="/brand-mark.svg"
+                          value={settingsDraft.branding.logoUrl || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              branding: {
+                                ...current.branding,
+                                logoUrl: value || undefined,
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <p className="text-sm leading-6 text-slate-500 dark:text-slate-400">
+                          {ta("brandingLogoUrlDescription")}
+                        </p>
+                      </div>
+
+                      <div className="rounded-[1.6rem] border border-slate-200/80 bg-slate-50/85 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
+                        <div className="tm-section-label">{ta("brandingPreviewLabel")}</div>
+                        <div className="mt-4 flex items-center gap-3">
+                          <div className="flex h-14 w-14 items-center justify-center overflow-hidden rounded-2xl bg-white shadow-sm dark:bg-slate-900">
+                            <BrandMark
+                              srcOverride={draftBranding.brandLogoUrl}
+                              alt={`${draftBranding.brandName} logo`}
+                              className="h-10 w-10"
+                            />
+                          </div>
+                          <div className="min-w-0">
+                            <div className="truncate text-base font-semibold text-slate-950 dark:text-white">
+                              {draftBranding.brandName}
+                            </div>
+                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
+                              {ta("brandingPreviewDescription")}
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </Panel>
+
+                  <Panel>
+                    <PanelHeader title={ta("overviewSettingsTitle")} />
+                    <div className="grid gap-4 p-5 md:grid-cols-3">
                         <Input
                           label={ta("mailExchangeHostLabel")}
                           placeholder="mail.example.com"
@@ -4378,15 +4422,12 @@ export default function DomainManagementPage({
                                         subject:
                                           event.target.checked &&
                                           !(current.registrationSettings.emailOtp.subject || "").trim()
-                                            ? ta("emailOtpDefaultSubject")
+                                            ? emailOtpDefaultSubject
                                             : current.registrationSettings.emailOtp.subject,
                                         body:
                                           event.target.checked &&
                                           !(current.registrationSettings.emailOtp.body || "").trim()
-                                            ? ta("emailOtpDefaultBody", {
-                                                code: "{{code}}",
-                                                ttlSeconds: "{{ttlSeconds}}",
-                                              })
+                                            ? emailOtpDefaultBody
                                             : current.registrationSettings.emailOtp.body,
                                       },
                                     },
@@ -4662,7 +4703,7 @@ export default function DomainManagementPage({
                           />
                           <Input
                             label={ta("smtpFromNameLabel")}
-                            placeholder="TmpMail"
+                            placeholder={draftBranding.brandName}
                             value={settingsDraft.smtp.fromName || ""}
                             onValueChange={(value) =>
                               setSettingsDraft((current) => ({
@@ -4889,36 +4930,6 @@ export default function DomainManagementPage({
                             {settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
                               ? ta("linuxDoClientSecretConfiguredHint")
                               : ta("linuxDoClientSecretHint")}
-                          </p>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Input
-                            label={ta("linuxDoMinimumTrustLevelLabel")}
-                            type="number"
-                            value={String(settingsDraft.registrationSettings.linuxDo.minimumTrustLevel)}
-                            onValueChange={(value) =>
-                              setSettingsDraft((current) => ({
-                                ...current,
-                                registrationSettings: {
-                                  ...current.registrationSettings,
-                                  linuxDo: {
-                                    ...current.registrationSettings.linuxDo,
-                                    minimumTrustLevel: parseIntegerInput(
-                                      value,
-                                      current.registrationSettings.linuxDo.minimumTrustLevel,
-                                      0,
-                                      4,
-                                    ),
-                                  },
-                                },
-                              }))
-                            }
-                            variant="bordered"
-                            size="sm"
-                            classNames={TM_INPUT_CLASSNAMES}
-                          />
-                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                            {ta("linuxDoMinimumTrustLevelHint")}
                           </p>
                         </div>
                       </div>
@@ -5779,6 +5790,11 @@ function AdminConsoleSidebar({
   ta: ReturnType<typeof useTranslations>
   trailingAction?: ReactNode
 }) {
+  const { brandName } = useBranding()
+  const consolePanelTitle = useMemo(
+    () => replaceBrandNameText(ta("consolePanelTitle"), brandName),
+    [brandName, ta],
+  )
   const serviceStatusLabel =
     serviceStatus?.status === "ready"
       ? ta("serviceStatusGood")
@@ -5910,7 +5926,7 @@ function AdminConsoleSidebar({
         <div className="flex items-center justify-between gap-3">
           <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
             <Sparkles size={13} />
-            {BRAND_LABEL}
+            {brandName}
           </div>
           {trailingAction}
         </div>
@@ -5923,7 +5939,7 @@ function AdminConsoleSidebar({
                 {currentUser.username}
               </div>
               <div className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                {ta("consolePanelTitle")}
+                {consolePanelTitle}
               </div>
             </div>
             <div className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold ${getConsoleRoleBadgeClassName(currentUser.role)}`}>

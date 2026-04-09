@@ -261,6 +261,15 @@ pub struct AdminUserLimitsSettings {
     pub api_key_limit: u32,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteBrandingSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_url: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpSecurity {
@@ -313,6 +322,8 @@ pub struct AdminSystemSettings {
     pub mail_route_target: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_txt_prefix: Option<String>,
+    #[serde(default)]
+    pub branding: SiteBrandingSettings,
     pub smtp: AdminSmtpSettings,
     pub registration_settings: AdminRegistrationSettings,
     pub user_limits: AdminUserLimitsSettings,
@@ -667,6 +678,7 @@ pub struct AdminUpdateSystemSettingsRequest {
     pub mail_exchange_host: Option<String>,
     pub mail_route_target: Option<String>,
     pub domain_txt_prefix: Option<String>,
+    pub branding: Option<SiteBrandingSettings>,
     pub smtp: Option<AdminSmtpSettings>,
     pub registration_settings: Option<AdminRegistrationSettings>,
     pub user_limits: Option<AdminUserLimitsSettings>,

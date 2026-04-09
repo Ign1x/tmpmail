@@ -5,7 +5,9 @@ import { Button } from "@heroui/button"
 import { ArrowLeft, Check, ExternalLink, Languages, Link2 } from "lucide-react"
 import { useLocale, useTranslations } from "next-intl"
 import { usePathname, useRouter } from "@/i18n/navigation"
+import { useBranding } from "@/contexts/branding-context"
 import { DEFAULT_PROVIDER_BASE_URL } from "@/lib/provider-config"
+import { replaceBrandNameText } from "@/lib/site-branding"
 import { cn } from "@/lib/utils"
 
 type ApiAuthType =
@@ -120,6 +122,7 @@ export default function ApiDocsPage() {
   const pathname = usePathname()
   const locale = useLocale()
   const t = useTranslations("apiDocs")
+  const { brandName } = useBranding()
   const [copySuccess, setCopySuccess] = useState(false)
   const [isPending, startTransition] = useTransition()
 
@@ -267,10 +270,10 @@ export default function ApiDocsPage() {
               {t("title")}
             </p>
             <h1 className="mt-2 text-3xl font-semibold text-slate-950 dark:text-white">
-              {t("subtitle")}
+              {replaceBrandNameText(t("subtitle"), brandName)}
             </h1>
             <p className="mt-4 max-w-3xl text-sm leading-7 text-slate-600 dark:text-slate-300">
-              {t("description")}
+              {replaceBrandNameText(t("description"), brandName)}
             </p>
           </header>
 

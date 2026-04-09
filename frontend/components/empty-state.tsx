@@ -14,7 +14,7 @@ import {
   ShieldCheck,
   Sparkles,
 } from "lucide-react"
-import { BRAND_NAME } from "@/lib/provider-config"
+import { useBranding } from "@/contexts/branding-context"
 import { useHeroUIToast } from "@/hooks/use-heroui-toast"
 import { copyTextToClipboard } from "@/lib/clipboard"
 import FeatureCards from "@/components/feature-cards"
@@ -42,6 +42,7 @@ export default function EmptyState({
 }: EmptyStateProps) {
   const t = useTranslations("emptyState")
   const { toast } = useHeroUIToast()
+  const { brandName } = useBranding()
   const hasAvailableDomain = Boolean(primaryDomain)
   const [previewSeed] = useState(() => `start-${Math.random().toString(36).slice(2, 8)}`)
   const [previewCopied, setPreviewCopied] = useState(false)
@@ -108,7 +109,7 @@ export default function EmptyState({
             <div className="min-w-0">
               <div className="inline-flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1 text-xs font-semibold tracking-[0.16em] text-sky-700 dark:border-sky-900/60 dark:bg-sky-950/40 dark:text-sky-200">
                 <Sparkles size={14} />
-                {BRAND_NAME}
+                {brandName}
               </div>
 
               <div className="mt-6 max-w-2xl">

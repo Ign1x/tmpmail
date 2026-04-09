@@ -3,13 +3,12 @@
 import { Button } from "@heroui/button"
 import { Card } from "@heroui/card"
 import { Bell, Code, ExternalLink, HelpCircle, Mail, MessageSquare, RefreshCw, Wifi } from "lucide-react"
-import Image from "next/image"
 import { useTranslations } from "next-intl"
 import { useAuth } from "@/contexts/auth-context"
+import { useBranding } from "@/contexts/branding-context"
 import { useMailStatus } from "@/contexts/mail-status-context"
+import BrandMark from "@/components/brand-mark"
 import {
-  BRAND_LABEL,
-  BRAND_NAME,
   BRAND_REPO_URL,
   DEFAULT_PROVIDER_ID,
   getProviderAccentClass,
@@ -31,6 +30,7 @@ function SidebarContent({
   const t = useTranslations("sidebar")
   const tm = useTranslations("messageList")
   const { isAuthenticated, currentAccount, accounts } = useAuth()
+  const { brandName } = useBranding()
   const { isEnabled, connectionState } = useMailStatus()
 
   const menuItems = [
@@ -77,10 +77,10 @@ function SidebarContent({
       <div className="border-b border-slate-200/80 px-5 py-5 dark:border-slate-800">
         <div className="flex items-center gap-3">
           <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-2xl bg-sky-100 text-sky-700 dark:bg-sky-950/40 dark:text-sky-200">
-            <Image src="/brand-mark.svg" alt={`${BRAND_NAME} Logo`} width={32} height={32} className="h-8 w-8 object-contain" />
+            <BrandMark alt={`${brandName} logo`} className="h-8 w-8" />
           </div>
           <div className="min-w-0">
-            <div className="truncate text-base font-semibold text-slate-900 dark:text-white">{BRAND_LABEL}</div>
+            <div className="truncate text-base font-semibold text-slate-900 dark:text-white">{brandName}</div>
             <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{t("workspaceSubtitle")}</div>
           </div>
         </div>
@@ -194,7 +194,7 @@ function SidebarContent({
         })}
 
         <div className="mt-4 rounded-[1.2rem] border border-dashed border-slate-200/80 px-3 py-3 text-xs leading-6 text-slate-500 dark:border-slate-800 dark:text-slate-400">
-          © {new Date().getFullYear()} {BRAND_LABEL}
+          © {new Date().getFullYear()} {brandName}
         </div>
       </div>
     </>

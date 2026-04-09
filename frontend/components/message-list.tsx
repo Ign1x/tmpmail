@@ -266,13 +266,7 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
       <div className="tm-glass-panel-strong rounded-[1.75rem] p-3.5 sm:p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
-            {currentAccount && (
-              <div className="tm-chip-strong max-w-full">
-                <Mail size={12} />
-                <span className="truncate">{currentAccount.address}</span>
-              </div>
-            )}
-            <div className="mt-3 flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <h2 className={`${isMobile ? "text-lg" : "text-xl"} font-bold text-slate-900 dark:text-slate-100`}>
                 {t("inbox")}
               </h2>
