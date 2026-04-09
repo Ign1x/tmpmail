@@ -287,3 +287,96 @@ async fn ensure_domain_access(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::{
+        app::build_router,
+        auth,
+        config::Config,
+        models::{ConsoleUser, ConsoleUserRole},
+        state::AppState,
+    };
+
+    #[tokio::test]
+    async fn admin_created_domains_are_not_shared_by_default() {
+        let state = test_state(Config::default()).await;
+        let admin = bootstrap_admin(&state, "correct12345").await;
+        let session_token = issue_session_token(&state, &admin).await;
+
+        let response = build_router(state)
+            .oneshot(json_request(
+                "/domains",
+                json!({
+                    "domain": "not-shared-by-default.example.com"
+                }),
+                &session_token,
+            ))
+            .await
+            .expect("create domain response");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_body_json(response).await;
+        assert_eq!(body.get("isShared").and_then(Value::as_bool), Some(false));
+    }
+
+    async fn test_state(config: Config) -> AppState {
+        let config = Config {
+            cleanup_interval_seconds: 0,
+            domain_verification_poll_interval_seconds: 0,
+            ..config
+        };
+
+        crate::test_support::build_test_state(config, "routes-domains").await
+    }
+
+    async fn bootstrap_admin(state: &AppState, password: &str) -> ConsoleUser {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state
+            .bootstrap_first_admin("admin", password)
+            .expect("bootstrap admin")
+            .0
+    }
+
+    async fn issue_session_token(state: &AppState, user: &ConsoleUser) -> String {
+        let user_id = Uuid::parse_str(&user.id).expect("parse admin user id");
+        let admin_state = state.admin_state.read().await;
+        let session_version = admin_state
+            .current_session_version(user_id)
+            .expect("load session version");
+        auth::issue_console_session_token(
+            user_id,
+            &user.username,
+            &ConsoleUserRole::Admin,
+            session_version,
+            &state.config,
+        )
+        .expect("issue console session token")
+    }
+
+    fn json_request(path: &str, payload: serde_json::Value, session_token: &str) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {session_token}"))
+            .body(Body::from(payload.to_string()))
+            .expect("build json request")
+    }
+
+    async fn response_body_json(response: axum::response::Response) -> Value {
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read response body");
+        serde_json::from_slice(&body).expect("parse response body as json")
+    }
+}

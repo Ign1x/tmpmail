@@ -280,7 +280,7 @@ impl PgStore {
         )
         .bind(Uuid::new_v4())
         .bind(&normalized_domain)
-        .bind(owner_user_id.is_none())
+        .bind(false)
         .bind(owner_user_id)
         .bind(format!("tmpmail-verify-{}", Uuid::new_v4().simple()))
         .bind(now)
