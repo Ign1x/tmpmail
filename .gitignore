@@ -12,3 +12,6 @@ deploy/inbucket/
 inbucket.env
 inbucket.compose.yml
 inbucket-data/
+scripts/__pycache__/
+scripts/remote_api_test.py
+security_best_practices_report.md

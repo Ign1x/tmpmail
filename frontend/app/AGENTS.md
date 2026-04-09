@@ -40,4 +40,4 @@ cd frontend && npm run build
 ./scripts/smoke.sh
 ```
 
-Manual checks matter here: `/en` should render the unified workspace entry directly, Linux Do auth should round-trip back to `/${locale}/auth/linux-do` and then land on `/${locale}`, legacy admin paths should collapse back to the localized home route, and proxy routes should still reach the backend with forwarded headers intact.
+Manual checks matter here: `/en` should render the unified workspace entry directly, Linux Do auth should round-trip back to `/${locale}/auth/linux-do` and then land on `/${locale}` for existing users while first-time invite-only signups can finish by entering the invite code on the callback page, legacy admin paths should collapse back to the localized home route, and proxy routes should still reach the backend with forwarded headers intact.

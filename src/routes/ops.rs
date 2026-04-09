@@ -12,7 +12,9 @@ use crate::{
     cleanup_worker,
     error::AppResult,
     metrics::MetricsSnapshot,
-    models::{AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice, SiteBrandingSettings},
+    models::{
+        AdminAuditLogsResponse, AdminMetricsResponse, PublicUpdateNotice, SiteBrandingSettings,
+    },
     state::AppState,
 };
 

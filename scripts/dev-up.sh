@@ -112,30 +112,32 @@ msg() {
     en:service_status_hint) printf '%s' "Current status: %s" ;;
     zh-CN:frontend_label) printf '%s' "前端" ;;
     en:frontend_label) printf '%s' "frontend" ;;
-    zh-CN:admin_label) printf '%s' "管理台" ;;
-    en:admin_label) printf '%s' "admin" ;;
+    zh-CN:workspace_label) printf '%s' "工作区" ;;
+    en:workspace_label) printf '%s' "workspace" ;;
+    zh-CN:compat_entry_label) printf '%s' "兼容入口" ;;
+    en:compat_entry_label) printf '%s' "compat" ;;
     zh-CN:api_label) printf '%s' "API" ;;
     en:api_label) printf '%s' "api" ;;
     zh-CN:next_step_header) printf '%s' "下一步：DNS / Cloudflare 配置" ;;
     en:next_step_header) printf '%s' "Next step: DNS / Cloudflare" ;;
     zh-CN:dns_step_1) printf '%s' "1. 先为 %s 创建一条仅 DNS 的 A/AAAA 记录，指向当前服务器公网 IP。" ;;
     en:dns_step_1) printf '%s' "1. Create a DNS-only A/AAAA record for %s that points to this server's public IP." ;;
-    zh-CN:dns_step_2) printf '%s' "2. 打开管理台，添加你要托管的每个域名。" ;;
-    en:dns_step_2) printf '%s' "2. Open the admin console and add each managed domain." ;;
-    zh-CN:dns_step_3) printf '%s' "3. 对每个托管域名，按管理台显示添加以下 DNS 记录：" ;;
-    en:dns_step_3) printf '%s' "3. For each managed domain, add the DNS records shown in the admin UI:" ;;
+    zh-CN:dns_step_2) printf '%s' "2. 打开工作区，添加你要托管的每个域名。" ;;
+    en:dns_step_2) printf '%s' "2. Open the workspace and add each managed domain." ;;
+    zh-CN:dns_step_3) printf '%s' "3. 对每个托管域名，按工作区显示添加以下 DNS 记录：" ;;
+    en:dns_step_3) printf '%s' "3. For each managed domain, add the DNS records shown in the workspace UI:" ;;
     zh-CN:dns_step_3_cname) printf '%s' "   - CNAME mail.<domain> -> %s" ;;
     en:dns_step_3_cname) printf '%s' "   - CNAME mail.<domain> -> %s" ;;
     zh-CN:dns_step_3_mx) printf '%s' "   - MX    <domain> -> %s %s" ;;
     en:dns_step_3_mx) printf '%s' "   - MX    <domain> -> %s %s" ;;
-    zh-CN:dns_step_3_txt) printf '%s' "   - TXT   %s -> <管理台里的 verification token>" ;;
-    en:dns_step_3_txt) printf '%s' "   - TXT   %s -> <verification token from admin UI>" ;;
-    zh-CN:dns_step_4) printf '%s' "4. 可选：在管理台保存带有 Zone:Read 和 DNS:Edit 权限的 Cloudflare API Token，开启自动同步 DNS。" ;;
-    en:dns_step_4) printf '%s' "4. Optional: save a Cloudflare API token with Zone:Read and DNS:Edit to enable automatic DNS sync." ;;
-    zh-CN:proxy_warning_header) printf '%s' "注意：管理台 HTTPS 判断" ;;
-    en:proxy_warning_header) printf '%s' "Note: admin HTTPS detection" ;;
-    zh-CN:proxy_warning_body) printf '%s' "如果你是通过 HTTPS 反向代理访问本站，而管理台登录仍然返回 403，请把 %s 设为 true，然后执行 docker compose up -d --force-recreate api frontend。" ;;
-    en:proxy_warning_body) printf '%s' "If you access this site through an HTTPS reverse proxy and admin login still returns 403, set %s to true, then run docker compose up -d --force-recreate api frontend." ;;
+    zh-CN:dns_step_3_txt) printf '%s' "   - TXT   %s -> <工作区里的 verification token>" ;;
+    en:dns_step_3_txt) printf '%s' "   - TXT   %s -> <verification token from the workspace UI>" ;;
+    zh-CN:dns_step_4) printf '%s' "4. 可选：在工作区保存带有 Zone:Read 和 DNS:Edit 权限的 Cloudflare API Token，开启自动同步 DNS。" ;;
+    en:dns_step_4) printf '%s' "4. Optional: save a Cloudflare API token with Zone:Read and DNS:Edit in the workspace to enable automatic DNS sync." ;;
+    zh-CN:proxy_warning_header) printf '%s' "注意：工作区 HTTPS 判断" ;;
+    en:proxy_warning_header) printf '%s' "Note: workspace HTTPS detection" ;;
+    zh-CN:proxy_warning_body) printf '%s' "如果你是通过 HTTPS 反向代理访问本站，而工作区里的登录或受保护操作仍然返回 403，请把 %s 设为 true，然后执行 docker compose up -d --force-recreate api frontend。" ;;
+    en:proxy_warning_body) printf '%s' "If you access this site through an HTTPS reverse proxy and workspace login or protected actions still return 403, set %s to true, then run docker compose up -d --force-recreate api frontend." ;;
     zh-CN:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST 仍然为空。" ;;
     en:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST is empty." ;;
     zh-CN:mail_exchange_empty_hint) printf '%s' "请先在 %s 中填写一个稳定的公网 MX 主机名，例如 mail.example.com，然后重新执行本命令。" ;;
@@ -207,6 +209,10 @@ detect_python_bin() {
 
   say_err python_required
   return 1
+}
+
+docker_compose() {
+  docker compose --env-file "$ENV_FILE" -f "$ROOT_DIR/compose.yaml" "$@"
 }
 
 if ! command -v docker >/dev/null 2>&1; then
@@ -303,6 +309,51 @@ parse_bool_setting() {
   esac
 }
 
+read_secret_with_mask() {
+  ensure_interactive_prompt
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    local fallback_secret
+
+    read -r -s fallback_secret
+    printf '\n' >&2
+    printf '%s' "$fallback_secret"
+    return 0
+  fi
+
+  (
+    local secret=""
+    local char
+    local old_stty
+
+    old_stty="$(stty -g < /dev/tty)"
+    trap 'stty "$old_stty" < /dev/tty >/dev/null 2>&1' EXIT INT TERM
+
+    stty -echo < /dev/tty
+
+    while IFS= read -r -n 1 char < /dev/tty; do
+      case "$char" in
+        $'\n'|$'\r')
+          break
+          ;;
+        $'\177'|$'\b')
+          if [ -n "$secret" ]; then
+            secret="${secret%?}"
+            printf '\b \b' >&2
+          fi
+          ;;
+        *)
+          secret+="$char"
+          printf '*' >&2
+          ;;
+      esac
+    done
+
+    printf '\n' >&2
+    printf '%s' "$secret"
+  )
+}
+
 prompt_admin_password() {
   local password
   local confirm
@@ -311,8 +362,7 @@ prompt_admin_password() {
 
   while true; do
     printf '%s' "$(msg admin_password_prompt)" >&2
-    read -r -s password
-    printf '\n' >&2
+    password="$(read_secret_with_mask)"
 
     if ! valid_admin_password "$password"; then
       say_err admin_password_short
@@ -320,8 +370,7 @@ prompt_admin_password() {
     fi
 
     printf '%s' "$(msg admin_password_confirm)" >&2
-    read -r -s confirm
-    printf '\n' >&2
+    confirm="$(read_secret_with_mask)"
 
     if [ "$password" != "$confirm" ]; then
       say_err admin_password_mismatch
@@ -386,7 +435,7 @@ verify_smtp_ingress() {
 
   detect_python_bin || return 1
 
-  smtp_port_binding="$(docker compose -f "$ROOT_DIR/compose.yaml" port inbucket 2500 2>/dev/null || true)"
+  smtp_port_binding="$(docker_compose port inbucket 2500 2>/dev/null || true)"
   smtp_port_binding="$(trim_whitespace "$smtp_port_binding")"
   published_port="${smtp_port_binding##*:}"
   local_probe_result="$(
@@ -563,7 +612,7 @@ wait_for_container_ready() {
   if [ -n "$status" ]; then
     sayf_err service_status_hint "$status"
   fi
-  docker compose -f "$ROOT_DIR/compose.yaml" ps "$container_name" >&2 || true
+  docker_compose ps "$container_name" >&2 || true
   return 1
 }
 
@@ -614,11 +663,11 @@ else
   say trust_proxy_saved_false
 fi
 
-docker compose -f "$ROOT_DIR/compose.yaml" up --build -d
-docker compose -f "$ROOT_DIR/compose.yaml" ps
+docker_compose up --build -d
+docker_compose ps
 if ! verify_smtp_ingress; then
   say smtp_check_retry_recreate
-  docker compose -f "$ROOT_DIR/compose.yaml" up -d --force-recreate inbucket
+  docker_compose up -d --force-recreate inbucket
   verify_smtp_ingress
 fi
 verify_mail_exchange_connectivity "$mail_exchange_host"
@@ -692,8 +741,8 @@ if [ "$SETUP_LANG" = "en" ]; then
   workspace_locale_path="/en"
 fi
 
-printf '%-8s %s\n' "$(msg frontend_label):" "http://${public_host}:${frontend_port:-3000}${workspace_locale_path}"
-printf '%-8s %s\n' "$(msg admin_label):" "http://${public_host}:${frontend_port:-3000}${admin_entry_path}"
+printf '%-8s %s\n' "$(msg workspace_label):" "http://${public_host}:${frontend_port:-3000}${workspace_locale_path}"
+printf '%-8s %s\n' "$(msg compat_entry_label):" "http://${public_host}:${frontend_port:-3000}${admin_entry_path}"
 printf '%-8s %s\n' "$(msg api_label):" "http://127.0.0.1:${api_port:-8080}/healthz"
 
 printf '\n== %s ==\n' "$(msg next_step_header)"
