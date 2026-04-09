@@ -20,7 +20,7 @@ GET /healthz
 
 GET /domains
 - Without console credentials: returns active public domains.
-- With a signed-in console user or console API key: returns the caller's managed domains.
+- With a signed-in console user or console API key: returns the caller's own managed domains plus active shared domains from other users.
 - With an administrator session or admin-role API key: returns all managed domains.
 
 POST /domains
@@ -30,6 +30,15 @@ POST /domains
 - Body:
 {
   "domain": "mail.example.com"
+}
+
+PATCH /domains/:id
+- Console user required.
+- Administrators or the owning user can toggle whether the domain is shared with other console users.
+- Shared domains stay usable for mailbox creation by other console users, but do not consume their personal managed-domain quota.
+- Body:
+{
+  "isShared": true
 }
 
 GET /domains/:id/records
@@ -90,7 +99,8 @@ Typical Console Flow
 5. Create a domain with POST /domains.
 6. Read DNS records from GET /domains/:id/records.
 7. Verify with POST /domains/:id/verify.
-8. Once status becomes active, all users can create accounts on that domain.
+8. If needed, enable sharing with PATCH /domains/:id so other console users can use the domain without consuming their own domain quota.
+9. Once status becomes active, shared domains become available for mailbox creation by other console users.
 
 Typical User Flow
 

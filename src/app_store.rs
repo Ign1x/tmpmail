@@ -66,8 +66,11 @@ impl AppStore {
         self.0.list_all_domains().await
     }
 
-    pub async fn list_domains_for_owner(&self, owner_user_id: Uuid) -> AppResult<Vec<Domain>> {
-        self.0.list_domains_for_owner(owner_user_id).await
+    pub async fn list_domains_visible_to_owner(
+        &self,
+        owner_user_id: Uuid,
+    ) -> AppResult<Vec<Domain>> {
+        self.0.list_domains_visible_to_owner(owner_user_id).await
     }
 
     pub async fn count_domains_owned_by(&self, owner_user_id: Uuid) -> AppResult<usize> {
@@ -88,6 +91,14 @@ impl AppStore {
         owner_user_id: Option<Uuid>,
     ) -> AppResult<Domain> {
         self.0.create_domain(domain, owner_user_id).await
+    }
+
+    pub async fn update_domain_sharing(
+        &self,
+        domain_id: Uuid,
+        is_shared: bool,
+    ) -> AppResult<Domain> {
+        self.0.update_domain_sharing(domain_id, is_shared).await
     }
 
     pub async fn domain_dns_records(

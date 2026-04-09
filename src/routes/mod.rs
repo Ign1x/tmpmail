@@ -79,7 +79,10 @@ pub fn api_router() -> Router<AppState> {
             "/domains",
             get(domains::list_domains).post(domains::create_domain),
         )
-        .route("/domains/{id}", delete(domains::delete_domain))
+        .route(
+            "/domains/{id}",
+            patch(domains::update_domain).delete(domains::delete_domain),
+        )
         .route("/domains/{id}/records", get(domains::get_domain_records))
         .route("/domains/{id}/verify", post(domains::verify_domain))
         .route(

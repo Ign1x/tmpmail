@@ -35,6 +35,7 @@ function normalizeManagedDomainResponse(
 ): Domain {
   return {
     ...domain,
+    isShared: Boolean(domain.isShared),
     ownerUserId: domain.ownerUserId ?? undefined,
     verificationToken: domain.verificationToken ?? undefined,
     verificationError: domain.verificationError ?? undefined,
@@ -292,10 +293,23 @@ export interface LinuxDoAuthorizeResponse {
 }
 
 export interface LinuxDoCompleteRequest {
-  code: string
+  code?: string
   redirectUri: string
   inviteCode?: string
+  pendingToken?: string
 }
+
+export type LinuxDoCompleteResponse =
+  | {
+      status: "authenticated"
+      session: AdminSessionInfo
+      sessionToken?: string
+    }
+  | {
+      status: "inviteCodeRequired"
+      pendingToken: string
+      message?: string
+    }
 
 export interface AdminAuditLogsResponse {
   entries: string[];
@@ -1315,7 +1329,7 @@ export async function sendConsoleRegisterOtp(
 export async function completeLinuxDoLogin(
   payload: LinuxDoCompleteRequest,
   providerId = DEFAULT_PROVIDER_ID,
-): Promise<AdminSessionResponse> {
+): Promise<LinuxDoCompleteResponse> {
   const headers = {
     ...createBaseHeaders(providerId),
     "Content-Type": "application/json",
@@ -1778,6 +1792,27 @@ export async function verifyManagedDomain(
 
   const verifiedDomain = await res.json();
   return normalizeManagedDomainResponse(verifiedDomain, providerId)
+}
+
+export async function updateManagedDomainSharing(
+  domainId: string,
+  isShared: boolean,
+  providerId = DEFAULT_PROVIDER_ID,
+): Promise<Domain> {
+  const headers = createHeadersWithAdminSession(
+    { "Content-Type": "application/json" },
+    providerId,
+  );
+  const res = await fetch(buildProxyUrl(`/domains/${domainId}`), {
+    method: "PATCH",
+    headers,
+    body: JSON.stringify({ isShared }),
+  });
+
+  await ensureAdminSessionResponse(res);
+
+  const updatedDomain = await res.json();
+  return normalizeManagedDomainResponse(updatedDomain, providerId)
 }
 
 export async function deleteManagedDomain(

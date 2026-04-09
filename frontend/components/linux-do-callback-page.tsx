@@ -1,11 +1,13 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { Button } from "@heroui/button"
 import { Spinner } from "@heroui/spinner"
 import { AlertCircle, ChevronRight } from "lucide-react"
 import { useTranslations } from "next-intl"
 
+import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
+import { Input } from "@/components/tm-form-fields"
 import { useBranding } from "@/contexts/branding-context"
 import { setStoredAdminSession } from "@/lib/admin-session"
 import { completeLinuxDoLogin } from "@/lib/api"
@@ -14,6 +16,7 @@ import { replaceBrandNameText } from "@/lib/site-branding"
 
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
 const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
+const LINUX_DO_PENDING_TOKEN_STORAGE_KEY = "tmpmail-linux-do-pending-token"
 
 interface LinuxDoCallbackPageProps {
   callbackPath: string
@@ -32,6 +35,14 @@ function getLinuxDoErrorDescription(error: string, fallback: string): string {
   }
 }
 
+function getErrorMessage(error: unknown, fallback: string): string {
+  if (error instanceof Error && error.message.trim()) {
+    return error.message
+  }
+
+  return fallback
+}
+
 export default function LinuxDoCallbackPage({
   callbackPath,
   code,
@@ -41,8 +52,98 @@ export default function LinuxDoCallbackPage({
 }: LinuxDoCallbackPageProps) {
   const t = useTranslations("admin")
   const { brandName } = useBranding()
-  const [failure, setFailure] = useState<string | null>(null)
+  const [fatalFailure, setFatalFailure] = useState<string | null>(null)
+  const [inviteCode, setInviteCode] = useState("")
+  const [invitePromptMessage, setInvitePromptMessage] = useState<string | null>(null)
+  const [pendingToken, setPendingToken] = useState<string | null>(null)
+  const [isSubmittingInviteCode, setIsSubmittingInviteCode] = useState(false)
   const hasStartedRef = useRef(false)
+
+  const clearLinuxDoSessionStorage = useCallback(() => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+    sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
+    sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
+  }, [])
+
+  const translateInviteMessage = useCallback((message?: string | null): string => {
+    switch ((message || "").trim()) {
+      case "invite code is invalid":
+        return t("linuxDoInviteCodeInvalid")
+      case "invite code is disabled":
+        return t("linuxDoInviteCodeDisabled")
+      case "invite code has been exhausted":
+        return t("linuxDoInviteCodeExhausted")
+      case "invite code is required":
+      case "":
+        return t("linuxDoInviteRequiredDescription")
+      default:
+        return message?.trim() || t("linuxDoInviteRequiredDescription")
+    }
+  }, [t])
+
+  const handleInviteCodeChange = (value: string) => {
+    setInviteCode(value)
+    setInvitePromptMessage(null)
+
+    if (typeof window === "undefined") {
+      return
+    }
+
+    if (value.trim()) {
+      sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, value.trim())
+      return
+    }
+
+    sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
+  }
+
+  const redirectToHome = useCallback(() => {
+    clearLinuxDoSessionStorage()
+    window.location.replace(homePath)
+  }, [clearLinuxDoSessionStorage, homePath])
+
+  const finishAuthenticated = useCallback(() => {
+    setStoredAdminSession()
+    clearLinuxDoSessionStorage()
+    window.location.replace(homePath)
+  }, [clearLinuxDoSessionStorage, homePath])
+
+  const submitCompletion = useCallback(async (payload: {
+    code?: string
+    inviteCode?: string
+    pendingToken?: string
+  }) => {
+    if (typeof window === "undefined") {
+      return
+    }
+
+    const redirectUri = new URL(callbackPath, window.location.origin).toString()
+    const response = await completeLinuxDoLogin(
+      {
+        code: payload.code,
+        redirectUri,
+        inviteCode: payload.inviteCode,
+        pendingToken: payload.pendingToken,
+      },
+      DEFAULT_PROVIDER_ID,
+    )
+
+    if (response.status === "authenticated") {
+      finishAuthenticated()
+      return
+    }
+
+    if (payload.inviteCode?.trim()) {
+      sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, payload.inviteCode.trim())
+    }
+    sessionStorage.setItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY, response.pendingToken)
+    setPendingToken(response.pendingToken)
+    setInvitePromptMessage(translateInviteMessage(response.message))
+  }, [callbackPath, finishAuthenticated, translateInviteMessage])
 
   useEffect(() => {
     if (hasStartedRef.current) {
@@ -58,10 +159,19 @@ export default function LinuxDoCallbackPage({
       const storedState = sessionStorage.getItem(LINUX_DO_STATE_STORAGE_KEY)?.trim() || ""
       const storedInviteCode =
         sessionStorage.getItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)?.trim() || ""
-      sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+      const storedPendingToken =
+        sessionStorage.getItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)?.trim() || ""
+      setInviteCode(storedInviteCode)
 
       if (error) {
         throw new Error(getLinuxDoErrorDescription(error, t("linuxDoAccessDenied")))
+      }
+
+      if (storedPendingToken) {
+        setPendingToken(storedPendingToken)
+        setInvitePromptMessage(t("linuxDoInviteRequiredDescription"))
+        sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+        return
       }
 
       if (!code?.trim()) {
@@ -72,30 +182,52 @@ export default function LinuxDoCallbackPage({
         throw new Error(t("linuxDoStateMismatch"))
       }
 
-      const redirectUri = new URL(callbackPath, window.location.origin).toString()
-      await completeLinuxDoLogin(
-        {
-          code,
-          redirectUri,
-          inviteCode: storedInviteCode || undefined,
-        },
-        DEFAULT_PROVIDER_ID,
-      )
-
-      setStoredAdminSession()
       sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
-      window.location.replace(homePath)
+      sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
+      await submitCompletion({
+        code,
+        inviteCode: storedInviteCode || undefined,
+      })
     }
 
     void completeAuth().catch((caughtError: unknown) => {
-      if (caughtError instanceof Error && caughtError.message.trim()) {
-        setFailure(caughtError.message)
-        return
-      }
-
-      setFailure(replaceBrandNameText(t("linuxDoCallbackFailedDescription"), brandName))
+      setFatalFailure(
+        getErrorMessage(
+          caughtError,
+          replaceBrandNameText(t("linuxDoCallbackFailedDescription"), brandName),
+        ),
+      )
     })
-  }, [brandName, callbackPath, code, error, homePath, state, t])
+  }, [brandName, code, error, state, submitCompletion, t])
+
+  const handleInviteCodeSubmit = async () => {
+    if (!pendingToken) {
+      return
+    }
+
+    const normalizedInviteCode = inviteCode.trim()
+    if (!normalizedInviteCode) {
+      setInvitePromptMessage(t("registerInviteCodeRequired"))
+      return
+    }
+
+    setIsSubmittingInviteCode(true)
+    try {
+      await submitCompletion({
+        inviteCode: normalizedInviteCode,
+        pendingToken,
+      })
+    } catch (caughtError: unknown) {
+      setFatalFailure(
+        getErrorMessage(
+          caughtError,
+          replaceBrandNameText(t("linuxDoCallbackFailedDescription"), brandName),
+        ),
+      )
+    } finally {
+      setIsSubmittingInviteCode(false)
+    }
+  }
 
   return (
     <div className="tm-page-backdrop relative flex min-h-screen items-center justify-center overflow-hidden px-4 py-8 text-slate-900 dark:text-slate-100">
@@ -105,7 +237,7 @@ export default function LinuxDoCallbackPage({
         <div className="tm-section-label">{t("linuxDoSubmit")}</div>
         <h1 className="mt-2 text-2xl font-semibold text-slate-950 dark:text-white">{brandName}</h1>
 
-        {failure ? (
+        {fatalFailure ? (
           <div className="mt-5 space-y-4">
             <div className="rounded-[1.4rem] border border-rose-200 bg-rose-50/90 p-4 dark:border-rose-900/50 dark:bg-rose-950/30">
               <div className="flex items-start gap-3">
@@ -116,7 +248,9 @@ export default function LinuxDoCallbackPage({
                   <p className="text-sm font-semibold text-rose-900 dark:text-rose-100">
                     {t("linuxDoCallbackFailed")}
                   </p>
-                  <p className="mt-1 text-sm leading-7 text-rose-700 dark:text-rose-200">{failure}</p>
+                  <p className="mt-1 text-sm leading-7 text-rose-700 dark:text-rose-200">
+                    {fatalFailure}
+                  </p>
                 </div>
               </div>
             </div>
@@ -124,8 +258,54 @@ export default function LinuxDoCallbackPage({
             <Button
               color="primary"
               className="h-11 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
-              onPress={() => window.location.replace(homePath)}
+              onPress={redirectToHome}
               endContent={<ChevronRight size={16} />}
+            >
+              {replaceBrandNameText(t("backToTmpMail"), brandName)}
+            </Button>
+          </div>
+        ) : pendingToken ? (
+          <div className="mt-5 space-y-4">
+            <div className="rounded-[1.4rem] border border-amber-200 bg-amber-50/90 p-4 dark:border-amber-900/50 dark:bg-amber-950/30">
+              <div className="flex items-start gap-3">
+                <div className="mt-0.5 flex h-9 w-9 items-center justify-center rounded-2xl bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-200">
+                  <AlertCircle size={18} />
+                </div>
+                <div>
+                  <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">
+                    {t("linuxDoInviteRequiredTitle")}
+                  </p>
+                  <p className="mt-1 text-sm leading-7 text-amber-700 dark:text-amber-200">
+                    {invitePromptMessage || t("linuxDoInviteRequiredDescription")}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <Input
+              label={t("registerInviteCodeLabel")}
+              value={inviteCode}
+              onValueChange={handleInviteCodeChange}
+              variant="bordered"
+              autoComplete="one-time-code"
+              classNames={TM_INPUT_CLASSNAMES}
+            />
+
+            <Button
+              color="primary"
+              className="h-11 w-full rounded-full bg-sky-600 font-semibold text-white shadow-lg shadow-sky-500/20 transition-all duration-200 hover:bg-sky-700 hover:shadow-sky-500/30 active:scale-[0.98]"
+              onPress={() => void handleInviteCodeSubmit()}
+              isLoading={isSubmittingInviteCode}
+              endContent={!isSubmittingInviteCode ? <ChevronRight size={16} /> : undefined}
+            >
+              {t("linuxDoInviteRequiredSubmit")}
+            </Button>
+
+            <Button
+              variant="bordered"
+              className="h-11 w-full rounded-full"
+              onPress={redirectToHome}
+              isDisabled={isSubmittingInviteCode}
             >
               {replaceBrandNameText(t("backToTmpMail"), brandName)}
             </Button>

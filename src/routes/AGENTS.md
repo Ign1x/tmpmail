@@ -18,7 +18,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 | Health/readiness | `health.rs` | Public liveness and backend-aware readiness |
 | Ops/public notice | `ops.rs` | Public `/metrics`, `/site/branding`, public update notice, admin metrics/audit/cleanup |
 | Admin console | `admin.rs` | Bootstrap, login, session, recovery, Linux Do auth, users, settings, access keys, invite codes |
-| Managed domains | `domains.rs` | Public listing plus console-scoped create/verify/delete |
+| Managed domains | `domains.rs` | Public listing plus console-scoped create/verify/delete/share-state updates |
 | Accounts | `accounts.rs` | Console-owned mailbox listing/create/token issuance plus legacy mailbox token login/self delete |
 | Messages | `messages.rs` | List/get/patch/delete plus raw/attachment download |
 | Events | `events.rs` | Account-scoped SSE stream |
@@ -28,13 +28,13 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - `admin/linux-do/authorize` and `admin/linux-do/complete` are public-facing registration helpers, but still require secure admin transport and the Linux Do registration feature to be enabled.
 - Linux Do redirect URIs must either match the configured callback allowlist exactly or stay same-origin with the current admin request; keep `state` validation strict.
 - `admin/setup`, `admin/login`, and `admin/recover` require secure admin transport.
-- `admin/register`, `admin/register/otp`, `admin/linux-do/authorize`, and first-time `admin/linux-do/complete` must honor invite-code requirements when public member signup is configured as invite-only.
+- `admin/register`, `admin/register/otp`, and first-time `admin/linux-do/complete` must honor invite-code requirements when public member signup is configured as invite-only. `admin/linux-do/authorize` should stay invite-agnostic so existing Linux Do users can complete the OAuth round trip before new-user invite gating kicks in.
 - `admin/login`, `admin/recover`, and public `POST /token` also enforce fixed-window brute-force throttling.
 - `admin/register/otp` and `accounts/otp` enforce IP-scoped OTP send throttling; OTP verification also expires codes after too many wrong attempts.
 - Session-only console endpoints must reject stale JWTs after password or recovery changes; do not treat console session TTL as the only revocation mechanism.
 - Admin session, user, settings, metrics, audit-log, and cleanup flows use console credentials and admin guards where required.
-- `GET /domains` is public when unauthenticated; console auth scopes results by owner/admin.
-- Domain mutations require console access.
+- `GET /domains` is public when unauthenticated; console auth returns all managed domains for admins, and for regular users it returns both domains they own plus active shared domains from other users.
+- Domain mutations require console access; `PATCH /domains/{id}` toggles the owner/admin-managed sharing state exposed to other console users.
 - `GET /accounts`, console-auth `POST /accounts`, `POST /accounts/{id}/token`, and console-auth `DELETE /accounts/{id}` use console session and mailbox ownership checks.
 - Public `POST /accounts`, `/token`, `/accounts/me`, mailbox-token `DELETE /accounts/{id}`, and `messages/*` remain available for legacy mailbox-token flows.
 - `/events` uses mailbox bearer tokens, rejects `accountId` mismatches, and enforces the config-driven `TMPMAIL_SSE_CONNECTION_LIMIT`.

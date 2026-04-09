@@ -12,6 +12,7 @@ use crate::{
     error::AppResult,
     models::{
         CloudflareDnsSyncResponse, CreateDomainRequest, Domain, DomainDnsRecord, HydraCollection,
+        UpdateDomainRequest,
     },
     state::AppState,
 };
@@ -24,7 +25,7 @@ pub async fn list_domains(
         if user.is_admin() {
             state.store.list_all_domains().await?
         } else {
-            state.store.list_domains_for_owner(user.id).await?
+            state.store.list_domains_visible_to_owner(user.id).await?
         }
     } else {
         let registration_enabled = {
@@ -76,6 +77,27 @@ pub async fn create_domain(
         .await?;
 
     Ok((StatusCode::CREATED, Json(domain)))
+}
+
+pub async fn update_domain(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(payload): Json<UpdateDomainRequest>,
+) -> AppResult<Json<Domain>> {
+    let user = admin_state::require_console_access(&headers, &state).await?;
+    let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
+    ensure_domain_access(&state, user, domain_id).await?;
+
+    let is_shared = payload
+        .is_shared
+        .ok_or_else(|| ApiError::validation("domain sharing state is required"))?;
+    let domain = state
+        .store
+        .update_domain_sharing(domain_id, is_shared)
+        .await?;
+
+    Ok(Json(domain))
 }
 
 pub async fn get_domain_records(

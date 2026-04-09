@@ -18,12 +18,10 @@ use crate::{
     error::{ApiError, AppResult},
     models::{
         AdminAccessKey, AdminEmailOtpSettings, AdminInviteCode, AdminRegistrationSettings,
-        AdminSmtpSettings, AdminSystemSettings, AdminUserLimitsSettings,
-        ConsoleCloudflareSettings, ConsoleUser, ConsoleUserRole, LinuxDoAuthSettings,
-        LocalizedUpdateNoticeContent, PublicNoticeTone, PublicUpdateNotice,
-        PublicUpdateNoticeSection, SmtpSecurity,
-        SiteBrandingSettings,
-        default_smtp_port_for_security,
+        AdminSmtpSettings, AdminSystemSettings, AdminUserLimitsSettings, ConsoleCloudflareSettings,
+        ConsoleUser, ConsoleUserRole, LinuxDoAuthSettings, LocalizedUpdateNoticeContent,
+        PublicNoticeTone, PublicUpdateNotice, PublicUpdateNoticeSection, SiteBrandingSettings,
+        SmtpSecurity, default_smtp_port_for_security,
     },
     state::AppState,
 };
@@ -766,8 +764,7 @@ impl AdminStateStore {
         let now = Utc::now();
         if self.is_console_invite_code_required() {
             self.consume_invite_code_without_saving(
-                invite_code
-                    .ok_or_else(|| ApiError::validation("invite code is required"))?,
+                invite_code.ok_or_else(|| ApiError::validation("invite code is required"))?,
                 now,
             )?;
         }
@@ -848,7 +845,8 @@ impl AdminStateStore {
             .invite_codes
             .iter()
             .position(|candidate| {
-                auth::verify_password(&normalized_invite_code, &candidate.code_hash).unwrap_or(false)
+                auth::verify_password(&normalized_invite_code, &candidate.code_hash)
+                    .unwrap_or(false)
             })
             .ok_or_else(|| ApiError::validation("invite code is invalid"))
     }
@@ -953,8 +951,7 @@ impl AdminStateStore {
             self.allocate_linux_do_username(trimmed_linux_do_username, &normalized_user_id)?;
         if self.is_console_invite_code_required() {
             self.consume_invite_code_without_saving(
-                invite_code
-                    .ok_or_else(|| ApiError::validation("invite code is required"))?,
+                invite_code.ok_or_else(|| ApiError::validation("invite code is required"))?,
                 now,
             )?;
         }
@@ -968,7 +965,8 @@ impl AdminStateStore {
         );
         user.last_login_at = Some(now);
         user.linux_do_user_id = Some(normalized_user_id);
-        user.linux_do_username = normalize_optional_copy(Some(trimmed_linux_do_username.to_owned()));
+        user.linux_do_username =
+            normalize_optional_copy(Some(trimmed_linux_do_username.to_owned()));
         user.linux_do_trust_level = Some(trust_level);
         let authenticated = user.to_authenticated();
         self.persisted.users.push(user);
@@ -1996,8 +1994,8 @@ fn normalize_optional_logo_url(value: Option<&str>) -> AppResult<Option<String>>
         return Ok(Some(value.to_owned()));
     }
 
-    let url =
-        Url::parse(value).map_err(|_| ApiError::validation("branding logo url must be a valid URL"))?;
+    let url = Url::parse(value)
+        .map_err(|_| ApiError::validation("branding logo url must be a valid URL"))?;
     if !matches!(url.scheme(), "http" | "https") {
         return Err(ApiError::validation(
             "branding logo url must use http, https, /path, or data:image",
@@ -2467,7 +2465,9 @@ impl PersistedInviteCode {
             masked_code: self.code_hint.clone(),
             max_uses: self.max_uses,
             uses_count: self.uses_count,
-            remaining_uses: self.max_uses.map(|max_uses| max_uses.saturating_sub(self.uses_count)),
+            remaining_uses: self
+                .max_uses
+                .map(|max_uses| max_uses.saturating_sub(self.uses_count)),
             is_disabled: self.is_disabled,
             created_at: self.created_at,
             updated_at: self.updated_at,
@@ -2565,7 +2565,9 @@ mod tests {
     };
     use crate::{
         config::Config,
-        models::{AdminRegistrationSettings, AdminSmtpSettings, SiteBrandingSettings, SmtpSecurity},
+        models::{
+            AdminRegistrationSettings, AdminSmtpSettings, SiteBrandingSettings, SmtpSecurity,
+        },
         test_support::{TestDatabase, attach_test_database},
     };
 

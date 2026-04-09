@@ -55,9 +55,7 @@ pub async fn create_account(
             .into_iter()
             .find(|item| item.domain == domain);
         if let Some(domain_record) = matching_domain
-            && domain_record.owner_user_id.as_deref() != Some(&user.id.to_string())
-            && domain_record.owner_user_id.is_some()
-            && !user.is_admin()
+            && !can_console_user_use_domain(&domain_record, &user)
         {
             return Err(ApiError::forbidden(
                 "you do not have access to this mailbox domain",
@@ -193,6 +191,14 @@ fn generate_hidden_mailbox_password() -> String {
         .iter()
         .map(|byte| CHARSET[usize::from(*byte) % CHARSET.len()] as char)
         .collect()
+}
+
+fn can_console_user_use_domain(
+    domain: &crate::models::Domain,
+    user: &admin_state::AuthenticatedConsoleUser,
+) -> bool {
+    let user_id = user.id.to_string();
+    user.is_admin() || domain.owner_user_id.as_deref() == Some(user_id.as_str()) || domain.is_shared
 }
 
 pub async fn issue_token(

@@ -25,6 +25,7 @@ pub struct Domain {
     pub domain: String,
     pub is_verified: bool,
     pub status: String,
+    pub is_shared: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -437,8 +438,6 @@ pub struct AdminCreateAccessKeyRequest {
 pub struct LinuxDoAuthorizeRequest {
     pub redirect_uri: String,
     pub state: String,
-    #[serde(default)]
-    pub invite_code: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -450,10 +449,27 @@ pub struct LinuxDoAuthorizeResponse {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinuxDoCompleteRequest {
-    pub code: String,
+    #[serde(default)]
+    pub code: Option<String>,
     pub redirect_uri: String,
     #[serde(default)]
     pub invite_code: Option<String>,
+    #[serde(default)]
+    pub pending_token: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum LinuxDoCompleteResponse {
+    Authenticated {
+        session_token: String,
+        session: AdminSessionInfo,
+    },
+    InviteCodeRequired {
+        pending_token: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        message: Option<String>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -602,6 +618,12 @@ pub struct UpdateMessageRequest {
 #[derive(Debug, Deserialize)]
 pub struct CreateDomainRequest {
     pub domain: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateDomainRequest {
+    pub is_shared: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]

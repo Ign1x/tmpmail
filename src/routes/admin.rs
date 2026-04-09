@@ -26,8 +26,8 @@ use crate::{
         AdminSystemSettings, AdminUpdateInviteCodeRequest, AdminUpdateSystemSettingsRequest,
         AdminUpdateUserRequest, CloudflareTokenValidationResponse, ConsoleCloudflareSettings,
         ConsoleRegisterRequest, ConsoleUser, ConsoleUserRole, LinuxDoAuthorizeRequest,
-        LinuxDoAuthorizeResponse, LinuxDoCompleteRequest, SendEmailOtpRequest,
-        SendEmailOtpResponse, TestConsoleCloudflareTokenRequest,
+        LinuxDoAuthorizeResponse, LinuxDoCompleteRequest, LinuxDoCompleteResponse,
+        SendEmailOtpRequest, SendEmailOtpResponse, TestConsoleCloudflareTokenRequest,
         UpdateConsoleCloudflareSettingsRequest,
     },
     otp::normalize_email_key,
@@ -73,6 +73,12 @@ impl LinuxDoUserInfoResponse {
                     .map(ToOwned::to_owned)
             })
     }
+}
+
+struct LinuxDoResolvedIdentity {
+    subject: String,
+    preferred_username: String,
+    trust_level: u8,
 }
 
 pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatusResponse>> {
@@ -130,15 +136,6 @@ pub async fn linux_do_authorize(
             "linux.do registration is unavailable while email otp is enabled",
         ));
     }
-    if registration_settings.console_invite_code_required {
-        let invite_code = payload
-            .invite_code
-            .as_deref()
-            .ok_or_else(|| ApiError::validation("invite code is required"))?;
-        let admin_state = state.admin_state.read().await;
-        admin_state.validate_invite_code(invite_code)?;
-    }
-
     let linux_do = registration_settings.linux_do;
     if !linux_do.enabled {
         return Err(ApiError::forbidden("linux.do registration is disabled"));
@@ -411,34 +408,117 @@ pub async fn linux_do_complete(
         return Err(ApiError::forbidden("linux.do registration is disabled"));
     }
 
+    let identity = if let Some(pending_token) = payload
+        .pending_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let claims =
+            auth::decode_linux_do_pending_registration_token(pending_token, &state.config)?;
+        LinuxDoResolvedIdentity {
+            subject: claims.sub,
+            preferred_username: claims.username,
+            trust_level: claims.trust_level,
+        }
+    } else {
+        complete_linux_do_identity_from_code(&state, &headers, &payload, &linux_do).await?
+    };
+
+    let authenticated = {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state.authenticate_linux_do(
+            &identity.subject,
+            &identity.preferred_username,
+            identity.trust_level,
+            payload.invite_code.as_deref(),
+        )
+    };
+    let authenticated = match authenticated {
+        Ok(authenticated) => authenticated,
+        Err(error) if is_linux_do_invite_code_error(&error) => {
+            let pending_token = auth::issue_linux_do_pending_registration_token(
+                &identity.subject,
+                &identity.preferred_username,
+                identity.trust_level,
+                &state.config,
+            )?;
+            return Ok((
+                sensitive_headers(),
+                Json(LinuxDoCompleteResponse::InviteCodeRequired {
+                    pending_token,
+                    message: Some(error.to_string()),
+                }),
+            ));
+        }
+        Err(error) => return Err(error),
+    };
+    let session = load_session_info(&state, &authenticated.id.to_string()).await?;
+    let session_token = issue_session_token(&state, &session.user).await?;
+
+    state
+        .store
+        .append_audit_log(
+            "console.login.linux_do",
+            "console-user",
+            authenticated.id.to_string(),
+            None,
+            format!(
+                "linux_do_user_id={} linux_do_username={} trust_level={trust_level}",
+                identity.subject,
+                identity.preferred_username,
+                trust_level = identity.trust_level
+            ),
+        )
+        .await?;
+
+    Ok((
+        sensitive_headers(),
+        Json(LinuxDoCompleteResponse::Authenticated {
+            session_token,
+            session,
+        }),
+    ))
+}
+
+async fn complete_linux_do_identity_from_code(
+    state: &AppState,
+    headers: &HeaderMap,
+    payload: &LinuxDoCompleteRequest,
+    linux_do: &crate::models::LinuxDoAuthSettings,
+) -> AppResult<LinuxDoResolvedIdentity> {
     let client_id = linux_do
         .client_id
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
     let client_secret = linux_do
         .client_secret
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
     let token_url = linux_do
         .token_url
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
     let userinfo_url = linux_do
         .userinfo_url
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::forbidden("linux.do auth is not configured"))?;
     let redirect_uri = normalize_linux_do_redirect_uri(
         &payload.redirect_uri,
-        &headers,
+        headers,
         linux_do.callback_url.as_deref(),
         state.config.trust_proxy_headers,
     )?;
-    let code = payload.code.trim();
-    if code.is_empty() {
-        return Err(ApiError::validation(
-            "linux.do authorization code is required",
-        ));
-    }
+    let code = payload
+        .code
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError::validation("linux.do authorization code is required"))?;
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(
@@ -448,12 +528,12 @@ pub async fn linux_do_complete(
         .map_err(|error| ApiError::internal(format!("failed to build linux.do client: {error}")))?;
 
     let token_response = client
-        .post(&token_url)
+        .post(token_url)
         .form(&[
             ("grant_type", "authorization_code"),
             ("code", code),
-            ("client_id", client_id.as_str()),
-            ("client_secret", client_secret.as_str()),
+            ("client_id", client_id),
+            ("client_secret", client_secret),
             ("redirect_uri", redirect_uri.as_str()),
         ])
         .send()
@@ -480,7 +560,7 @@ pub async fn linux_do_complete(
     }
 
     let userinfo_response = client
-        .get(&userinfo_url)
+        .get(userinfo_url)
         .bearer_auth(access_token)
         .send()
         .await
@@ -508,41 +588,26 @@ pub async fn linux_do_complete(
     let preferred_username = userinfo
         .preferred_username()
         .ok_or_else(|| ApiError::forbidden("linux.do username is missing"))?;
-    let trust_level = userinfo.trust_level.unwrap_or(0);
 
-    let authenticated = {
-        let mut admin_state = state.admin_state.write().await;
-        admin_state.authenticate_linux_do(
-            &subject,
-            &preferred_username,
-            trust_level,
-            payload.invite_code.as_deref(),
-        )?
-    };
-    let session = load_session_info(&state, &authenticated.id.to_string()).await?;
-    let session_token = issue_session_token(&state, &session.user).await?;
+    Ok(LinuxDoResolvedIdentity {
+        subject,
+        preferred_username,
+        trust_level: userinfo.trust_level.unwrap_or(0),
+    })
+}
 
-    state
-        .store
-        .append_audit_log(
-            "console.login.linux_do",
-            "console-user",
-            authenticated.id.to_string(),
-            None,
-            format!(
-                "linux_do_user_id={} linux_do_username={} trust_level={trust_level}",
-                subject, preferred_username
-            ),
-        )
-        .await?;
-
-    Ok((
-        sensitive_headers(),
-        Json(AdminSessionResponse {
-            session_token,
-            session,
-        }),
-    ))
+fn is_linux_do_invite_code_error(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Validation(message)
+            if matches!(
+                message.as_str(),
+                "invite code is required"
+                    | "invite code is invalid"
+                    | "invite code is disabled"
+                    | "invite code has been exhausted"
+            )
+    )
 }
 
 pub async fn session(
@@ -1689,6 +1754,130 @@ mod tests {
         assert_eq!(before_count, after_count);
     }
 
+    #[tokio::test]
+    async fn linux_do_authorize_does_not_require_invite_code_upfront() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        configure_linux_do_registration(&state, true).await;
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/admin/linux-do/authorize?redirectUri=http%3A%2F%2Flocalhost%2Fzh%2Fauth%2Flinux-do&state=0123456789abcdef0123456789abcdef")
+                    .header("host", "localhost")
+                    .body(Body::empty())
+                    .expect("build linux.do authorize request"),
+            )
+            .await
+            .expect("linux.do authorize response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert!(body.get("authorizationUrl").is_some());
+    }
+
+    #[tokio::test]
+    async fn linux_do_complete_returns_pending_token_until_new_user_supplies_invite_code() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        configure_linux_do_registration(&state, true).await;
+        let pending_token = auth::issue_linux_do_pending_registration_token(
+            "linuxdo-1001",
+            "fresh-user",
+            1,
+            &state.config,
+        )
+        .expect("issue pending token");
+
+        let initial_response = build_router(state.clone())
+            .oneshot(json_request(
+                "/admin/linux-do/complete",
+                json!({
+                    "redirectUri": "http://localhost/zh/auth/linux-do",
+                    "pendingToken": pending_token,
+                }),
+            ))
+            .await
+            .expect("initial linux.do complete response");
+
+        assert_eq!(initial_response.status(), StatusCode::OK);
+        let initial_body = read_json_body(initial_response).await;
+        assert_eq!(
+            initial_body.get("status").and_then(Value::as_str),
+            Some("inviteCodeRequired")
+        );
+        let followup_token = initial_body
+            .get("pendingToken")
+            .and_then(Value::as_str)
+            .expect("followup pending token")
+            .to_owned();
+
+        let invite_code = create_test_invite_code(&state).await;
+        let completed_response = build_router(state.clone())
+            .oneshot(json_request(
+                "/admin/linux-do/complete",
+                json!({
+                    "redirectUri": "http://localhost/zh/auth/linux-do",
+                    "pendingToken": followup_token,
+                    "inviteCode": invite_code,
+                }),
+            ))
+            .await
+            .expect("completed linux.do response");
+
+        assert_eq!(completed_response.status(), StatusCode::OK);
+        let completed_body = read_json_body(completed_response).await;
+        assert_eq!(
+            completed_body.get("status").and_then(Value::as_str),
+            Some("authenticated")
+        );
+        assert!(completed_body.get("sessionToken").is_some());
+
+        let admin_state = state.admin_state.read().await;
+        assert_eq!(admin_state.users_total(), 2);
+    }
+
+    #[tokio::test]
+    async fn linux_do_complete_allows_existing_user_without_invite_code() {
+        let state = test_state(Config::default()).await;
+        bootstrap_admin(&state, "correct12345").await;
+        configure_linux_do_registration(&state, false).await;
+        {
+            let mut admin_state = state.admin_state.write().await;
+            admin_state
+                .authenticate_linux_do("linuxdo-2002", "existing-user", 2, None)
+                .expect("seed linux.do user");
+        }
+        configure_linux_do_registration(&state, true).await;
+        let pending_token = auth::issue_linux_do_pending_registration_token(
+            "linuxdo-2002",
+            "existing-user",
+            2,
+            &state.config,
+        )
+        .expect("issue existing-user pending token");
+
+        let response = build_router(state)
+            .oneshot(json_request(
+                "/admin/linux-do/complete",
+                json!({
+                    "redirectUri": "http://localhost/zh/auth/linux-do",
+                    "pendingToken": pending_token,
+                }),
+            ))
+            .await
+            .expect("existing-user linux.do complete response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = read_json_body(response).await;
+        assert_eq!(
+            body.get("status").and_then(Value::as_str),
+            Some("authenticated")
+        );
+        assert!(body.get("sessionToken").is_some());
+    }
+
     #[test]
     fn linux_do_redirect_uri_requires_allowlisted_callback_match() {
         let mut headers = HeaderMap::new();
@@ -1797,6 +1986,38 @@ mod tests {
                 None,
             )
             .expect("enable email otp");
+    }
+
+    async fn configure_linux_do_registration(state: &AppState, invite_required: bool) {
+        let mut admin_state = state.admin_state.write().await;
+        let mut registration_settings = admin_state.registration_settings();
+        registration_settings.console_invite_code_required = invite_required;
+        registration_settings.linux_do.enabled = true;
+        registration_settings.linux_do.client_id = Some("linuxdo-client".to_owned());
+        registration_settings.linux_do.client_secret = Some("linuxdo-secret".to_owned());
+        registration_settings.linux_do.callback_url =
+            Some("http://localhost/zh/auth/linux-do".to_owned());
+        admin_state
+            .update_system_settings(
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(registration_settings),
+                None,
+                None,
+            )
+            .expect("configure linux.do registration");
+    }
+
+    async fn create_test_invite_code(state: &AppState) -> String {
+        let mut admin_state = state.admin_state.write().await;
+        admin_state
+            .create_invite_code(Some("linux.do test"), Some(1))
+            .expect("create invite code")
+            .1
     }
 
     async fn saturate_otp_send_limit(state: &AppState, network_id: &str) {

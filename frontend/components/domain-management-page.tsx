@@ -85,6 +85,7 @@ import {
   testConsoleCloudflareToken,
   updateConsoleCloudflareSettings,
   updateAdminInviteCode,
+  updateManagedDomainSharing,
   updateAdminPassword,
   updateAdminSystemSettings,
   updateAdminUser,
@@ -578,6 +579,7 @@ export default function DomainManagementPage({
   const [recordsLoadingById, setRecordsLoadingById] = useState<Record<string, boolean>>({})
   const [expandedDomainIds, setExpandedDomainIds] = useState<Record<string, boolean>>({})
   const [verifyingDomainId, setVerifyingDomainId] = useState<string | null>(null)
+  const [sharingDomainId, setSharingDomainId] = useState<string | null>(null)
   const [deletingDomainId, setDeletingDomainId] = useState<string | null>(null)
   const [adminUsers, setAdminUsers] = useState<ConsoleUser[]>([])
   const [usersLoading, setUsersLoading] = useState(false)
@@ -753,6 +755,50 @@ export default function DomainManagementPage({
     (account) => !account.isDeleted && !account.isDisabled,
   ).length
   const currentUserManagedDomainLimit = currentUser?.domainLimit ?? settingsDraft.userLimits.defaultDomainLimit
+  const ownedManagedDomainsCount = useMemo(() => {
+    if (!currentUser) {
+      return 0
+    }
+
+    if (isAdmin) {
+      return managedDomains.length
+    }
+
+    return managedDomains.filter((domain) => domain.ownerUserId === currentUser.id).length
+  }, [currentUser, isAdmin, managedDomains])
+  const sharedVisibleDomainsCount = useMemo(() => {
+    if (!currentUser || isAdmin) {
+      return 0
+    }
+
+    return managedDomains.filter(
+      (domain) => domain.isShared && domain.ownerUserId !== currentUser.id,
+    ).length
+  }, [currentUser, isAdmin, managedDomains])
+  const managedDomainUsageSummary = useMemo(() => {
+    if (isAdmin) {
+      return undefined
+    }
+
+    if (sharedVisibleDomainsCount > 0) {
+      return ta("managedDomainUsageSummaryWithShared", {
+        owned: ownedManagedDomainsCount,
+        limit: currentUserManagedDomainLimit,
+        shared: sharedVisibleDomainsCount,
+      })
+    }
+
+    return ta("managedDomainUsageSummary", {
+      count: ownedManagedDomainsCount,
+      limit: currentUserManagedDomainLimit,
+    })
+  }, [
+    currentUserManagedDomainLimit,
+    isAdmin,
+    ownedManagedDomainsCount,
+    sharedVisibleDomainsCount,
+    ta,
+  ])
   const publicRegistrationDomainOptions = useMemo(
     () =>
       managedDomains
@@ -2386,7 +2432,7 @@ export default function DomainManagementPage({
     const requestedCount = rawRequestedCount
 
     if (!isAdmin && sessionInfo) {
-      const remainingDomainSlots = Math.max(sessionInfo.user.domainLimit - managedDomains.length, 0)
+      const remainingDomainSlots = Math.max(sessionInfo.user.domainLimit - ownedManagedDomainsCount, 0)
       if (requestedCount > remainingDomainSlots) {
         toast({
           title: ts("domainBatchLimitReached"),
@@ -2588,6 +2634,37 @@ export default function DomainManagementPage({
       })
     } finally {
       setVerifyingDomainId(null)
+    }
+  }
+
+  const handleToggleDomainSharing = async (domain: Domain) => {
+    setSharingDomainId(domain.id)
+    try {
+      const updatedDomain = await updateManagedDomainSharing(
+        domain.id,
+        !domain.isShared,
+        DEFAULT_PROVIDER_ID,
+      )
+      setManagedDomains((current) =>
+        sortManagedDomains(
+          current.map((item) => (item.id === domain.id ? { ...item, ...updatedDomain } : item)),
+        ),
+      )
+      toast({
+        title: updatedDomain.isShared ? ts("domainShareEnabled") : ts("domainShareDisabled"),
+        description: updatedDomain.domain,
+        color: updatedDomain.isShared ? "success" : "warning",
+        variant: "flat",
+      })
+    } catch (error) {
+      toast({
+        title: ts("domainShareUpdateFailed"),
+        description: getErrorDescription(error, ts("domainShareUpdateFailedDesc")),
+        color: "danger",
+        variant: "flat",
+      })
+    } finally {
+      setSharingDomainId(null)
     }
   }
 
@@ -3393,7 +3470,7 @@ export default function DomainManagementPage({
           currentUser={currentUser}
           serviceStatus={serviceStatus}
           mailboxCount={activeMailboxAccountsCount}
-          managedDomainsCount={managedDomains.length}
+          managedDomainsCount={isAdmin ? managedDomains.length : ownedManagedDomainsCount}
           managedDomainsLimit={!isAdmin ? currentUserManagedDomainLimit : undefined}
           activeDomainsCount={activeDomainsCount}
           pendingDomainsCount={pendingDomainsCount}
@@ -3618,7 +3695,14 @@ export default function DomainManagementPage({
                     >
                       {availableMailboxDomains.map((domain) => (
                         <SelectItem key={domain.domain} textValue={domain.domain}>
-                          {domain.domain}
+                          <div className="flex items-center gap-2">
+                            <span>{domain.domain}</span>
+                            {domain.isShared ? (
+                              <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200">
+                                {ts("domainSharedBadge")}
+                              </span>
+                            ) : null}
+                          </div>
                         </SelectItem>
                       ))}
                     </Select>
@@ -3848,10 +3932,7 @@ export default function DomainManagementPage({
                       <MetricCard
                         label={ta("managedDomainCount")}
                         value={String(managedDomains.length)}
-                        detail={ta("managedDomainUsageSummary", {
-                          count: managedDomains.length,
-                          limit: currentUserManagedDomainLimit,
-                        })}
+                        detail={managedDomainUsageSummary}
                         tone="neutral"
                       />
                     </motion.div>
@@ -4964,14 +5045,7 @@ export default function DomainManagementPage({
                     <MetricCard
                       label={ta("managedDomainCount")}
                       value={String(managedDomains.length)}
-                      detail={
-                        !isAdmin
-                          ? ta("managedDomainUsageSummary", {
-                              count: managedDomains.length,
-                              limit: currentUserManagedDomainLimit,
-                            })
-                          : undefined
-                      }
+                      detail={managedDomainUsageSummary}
                       tone="neutral"
                     />
                   </motion.div>
@@ -5027,92 +5101,125 @@ export default function DomainManagementPage({
                   <EmptyState title={ts("noManagedDomains")} />
                 ) : (
                   <div className="space-y-3">
-                    {managedDomains.map((domain) => (
-                      <Panel key={domain.id}>
-                        <div className="p-5">
-                          <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="font-mono text-sm font-medium text-slate-900 dark:text-white">
-                                {domain.domain}
-                              </span>
-                              <StatusBadge
-                                active={domain.isVerified || domain.status === "active"}
-                                activeLabel={ts("domainStatusActive")}
-                                pendingLabel={ts("domainStatusPending")}
-                              />
-                              {isAdmin && domain.ownerUserId && usersById[domain.ownerUserId] && (
-                                <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
-                                  {usersById[domain.ownerUserId].username}
-                                </span>
-                              )}
-                            </div>
-                            <div className="flex flex-wrap gap-1.5">
-                              <IconActionButton
-                                icon={<Globe2 size={13} />}
-                                label={expandedDomainIds[domain.id] ? ts("hideDnsRecords") : ts("showDnsRecords")}
-                                onPress={() => void handleToggleDomainRecords(domain.id)}
-                                isLoading={!!recordsLoadingById[domain.id]}
-                              />
-                              <IconActionButton
-                                icon={<Check size={13} />}
-                                label={domain.isVerified ? ts("recheckDomain") : ts("verifyDomain")}
-                                onPress={() => void handleVerifyDomain(domain.id)}
-                                isLoading={verifyingDomainId === domain.id}
-                              />
-                              {canRunCloudflareSync && (
-                                <IconActionButton
-                                  icon={<Cloud size={13} />}
-                                  label={ta("cloudflareSyncAction")}
-                                  onPress={() => void runCloudflareDomainSync(domain)}
-                                  isLoading={cloudflareSyncingDomainId === domain.id}
-                                />
-                              )}
-                              {domain.verificationToken && (
-                                <IconActionButton
-                                  danger
-                                  icon={<Trash2 size={13} />}
-                                  label={ts("deleteDomain")}
-                                  onPress={() => void handleDeleteDomain(domain)}
-                                  isLoading={deletingDomainId === domain.id}
-                                />
-                              )}
-                            </div>
-                          </div>
+                    {managedDomains.map((domain) => {
+                      const canManageDomain = Boolean(isAdmin || domain.ownerUserId === currentUser?.id)
+                      const isSharedReadonlyDomain = Boolean(domain.isShared && !canManageDomain)
 
-                          {!domain.isVerified && domain.verificationError && (
-                            <div className="mt-2 text-xs text-red-600 dark:text-red-400">
-                              {ts("lastVerificationError")}: {domain.verificationError}
-                            </div>
-                          )}
-
-                          {/* DNS records */}
-                          {expandedDomainIds[domain.id] && recordsByDomainId[domain.id] && (
-                            <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                              {recordsByDomainId[domain.id].map((record) => {
-                                const baseKey = `${domain.id}-${record.kind}-${record.name}`
-                                return (
-                                  <DnsRecordCard
-                                    key={baseKey}
-                                    record={record}
-                                    copyStatePrefix={baseKey}
-                                    copiedTarget={copiedDnsTarget}
-                                    onCopy={(value, suffix) =>
-                                      void handleCopyDnsField(value, `${baseKey}-${suffix}`)
-                                    }
-                                    labels={{
-                                      host: ts("recordHost"),
-                                      value: ts("recordValue"),
-                                      copyRecord: ta("copyRecord"),
-                                    }}
-                                    copiedLabel={tc("copied")}
+                      return (
+                        <Panel key={domain.id}>
+                          <div className="p-5">
+                            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                              <div className="space-y-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="font-mono text-sm font-medium text-slate-900 dark:text-white">
+                                    {domain.domain}
+                                  </span>
+                                  <StatusBadge
+                                    active={domain.isVerified || domain.status === "active"}
+                                    activeLabel={ts("domainStatusActive")}
+                                    pendingLabel={ts("domainStatusPending")}
                                   />
-                                )
-                              })}
+                                  {domain.isShared && (
+                                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-200">
+                                      {ts("domainSharedBadge")}
+                                    </span>
+                                  )}
+                                  {isSharedReadonlyDomain && (
+                                    <span className="rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-950/40 dark:text-sky-200">
+                                      {ts("domainSharedReadonlyBadge")}
+                                    </span>
+                                  )}
+                                  {isAdmin && domain.ownerUserId && usersById[domain.ownerUserId] && (
+                                    <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                                      {usersById[domain.ownerUserId].username}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {isSharedReadonlyDomain && (
+                                  <div className="text-xs text-slate-500 dark:text-slate-400">
+                                    {ts("domainSharedReadonlyDescription")}
+                                  </div>
+                                )}
+                              </div>
+
+                              {canManageDomain && (
+                                <div className="flex flex-wrap gap-1.5">
+                                  <IconActionButton
+                                    icon={<Users2 size={13} />}
+                                    label={domain.isShared ? ts("domainShareDisable") : ts("domainShareEnable")}
+                                    onPress={() => void handleToggleDomainSharing(domain)}
+                                    isLoading={sharingDomainId === domain.id}
+                                  />
+                                  <IconActionButton
+                                    icon={<Globe2 size={13} />}
+                                    label={expandedDomainIds[domain.id] ? ts("hideDnsRecords") : ts("showDnsRecords")}
+                                    onPress={() => void handleToggleDomainRecords(domain.id)}
+                                    isLoading={!!recordsLoadingById[domain.id]}
+                                  />
+                                  <IconActionButton
+                                    icon={<Check size={13} />}
+                                    label={domain.isVerified ? ts("recheckDomain") : ts("verifyDomain")}
+                                    onPress={() => void handleVerifyDomain(domain.id)}
+                                    isLoading={verifyingDomainId === domain.id}
+                                  />
+                                  {canRunCloudflareSync && (
+                                    <IconActionButton
+                                      icon={<Cloud size={13} />}
+                                      label={ta("cloudflareSyncAction")}
+                                      onPress={() => void runCloudflareDomainSync(domain)}
+                                      isLoading={cloudflareSyncingDomainId === domain.id}
+                                    />
+                                  )}
+                                  {domain.verificationToken && (
+                                    <IconActionButton
+                                      danger
+                                      icon={<Trash2 size={13} />}
+                                      label={ts("deleteDomain")}
+                                      onPress={() => void handleDeleteDomain(domain)}
+                                      isLoading={deletingDomainId === domain.id}
+                                    />
+                                  )}
+                                </div>
+                              )}
                             </div>
-                          )}
-                        </div>
-                      </Panel>
-                    ))}
+
+                            {!domain.isVerified && domain.verificationError && canManageDomain && (
+                              <div className="mt-2 text-xs text-red-600 dark:text-red-400">
+                                {ts("lastVerificationError")}: {domain.verificationError}
+                              </div>
+                            )}
+
+                            {canManageDomain &&
+                              expandedDomainIds[domain.id] &&
+                              recordsByDomainId[domain.id] && (
+                                <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                                  {recordsByDomainId[domain.id].map((record) => {
+                                    const baseKey = `${domain.id}-${record.kind}-${record.name}`
+                                    return (
+                                      <DnsRecordCard
+                                        key={baseKey}
+                                        record={record}
+                                        copyStatePrefix={baseKey}
+                                        copiedTarget={copiedDnsTarget}
+                                        onCopy={(value, suffix) =>
+                                          void handleCopyDnsField(value, `${baseKey}-${suffix}`)
+                                        }
+                                        labels={{
+                                          host: ts("recordHost"),
+                                          value: ts("recordValue"),
+                                          copyRecord: ta("copyRecord"),
+                                        }}
+                                        copiedLabel={tc("copied")}
+                                      />
+                                    )
+                                  })}
+                                </div>
+                              )}
+                          </div>
+                        </Panel>
+                      )
+                    })}
                   </div>
                 )}
               </>
@@ -5478,7 +5585,7 @@ export default function DomainManagementPage({
               currentUser={currentUser}
               serviceStatus={serviceStatus}
               mailboxCount={activeMailboxAccountsCount}
-              managedDomainsCount={managedDomains.length}
+              managedDomainsCount={isAdmin ? managedDomains.length : ownedManagedDomainsCount}
               managedDomainsLimit={!isAdmin ? currentUserManagedDomainLimit : undefined}
               activeDomainsCount={activeDomainsCount}
               pendingDomainsCount={pendingDomainsCount}

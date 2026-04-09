@@ -46,6 +46,7 @@ import { replaceBrandNameText } from "@/lib/site-branding"
 const ADMIN_KEY_VISIBLE_MS = 60_000
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
 const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
+const LINUX_DO_PENDING_TOKEN_STORAGE_KEY = "tmpmail-linux-do-pending-token"
 
 type EntryMode = "register" | "login"
 
@@ -409,11 +410,6 @@ export default function AdminEntryPage({
       return
     }
 
-    if (inviteCodeRequired && !registerInviteCode.trim()) {
-      toast({ title: ta("registerInviteCodeRequired"), color: "warning", variant: "flat" })
-      return
-    }
-
     if (typeof window === "undefined") {
       return
     }
@@ -423,7 +419,8 @@ export default function AdminEntryPage({
     try {
       const state = generateLinuxDoState()
       sessionStorage.setItem(LINUX_DO_STATE_STORAGE_KEY, state)
-      if (inviteCodeRequired) {
+      sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
+      if (registerInviteCode.trim()) {
         sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, registerInviteCode.trim())
       } else {
         sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
@@ -432,7 +429,7 @@ export default function AdminEntryPage({
       const response = await getLinuxDoAuthorizationUrl(
         redirectUri,
         state,
-        inviteCodeRequired ? registerInviteCode.trim() : undefined,
+        registerInviteCode.trim() || undefined,
         DEFAULT_PROVIDER_ID,
       )
       window.location.assign(response.authorizationUrl)
@@ -440,6 +437,7 @@ export default function AdminEntryPage({
       try {
         sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
         sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
+        sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
       } catch {}
 
       toast({

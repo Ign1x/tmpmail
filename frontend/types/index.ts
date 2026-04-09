@@ -3,6 +3,7 @@ export interface Domain {
   domain: string
   isVerified?: boolean // 是否已验证（已验证才可用）
   status?: string
+  isShared?: boolean
   ownerUserId?: string
   verificationToken?: string
   verificationError?: string

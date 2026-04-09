@@ -60,6 +60,19 @@ pub struct ConsoleSessionClaims {
     pub exp: usize,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LinuxDoPendingRegistrationClaims {
+    pub sub: String,
+    pub username: String,
+    pub trust_level: u8,
+    pub scope: String,
+    pub iat: usize,
+    pub exp: usize,
+}
+
+const LINUX_DO_PENDING_REGISTRATION_SCOPE: &str = "linux-do-pending-registration";
+const LINUX_DO_PENDING_REGISTRATION_TTL_SECONDS: i64 = 10 * 60;
+
 pub fn validate_password(password: &str, label: &str) -> AppResult<()> {
     if password.trim().is_empty() {
         return Err(ApiError::validation(format!("{label} must not be empty")));
@@ -167,6 +180,56 @@ pub fn decode_console_session_token(
 
     if claims.scope != "console-session" {
         return Err(ApiError::unauthorized("invalid console session"));
+    }
+
+    Ok(claims)
+}
+
+pub fn issue_linux_do_pending_registration_token(
+    linux_do_user_id: &str,
+    linux_do_username: &str,
+    trust_level: u8,
+    config: &Config,
+) -> AppResult<String> {
+    let now = Utc::now();
+    let claims = LinuxDoPendingRegistrationClaims {
+        sub: linux_do_user_id.to_owned(),
+        username: linux_do_username.to_owned(),
+        trust_level,
+        scope: LINUX_DO_PENDING_REGISTRATION_SCOPE.to_owned(),
+        iat: now.timestamp() as usize,
+        exp: (now + Duration::seconds(LINUX_DO_PENDING_REGISTRATION_TTL_SECONDS)).timestamp()
+            as usize,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
+    )
+    .map_err(|error| {
+        ApiError::internal(format!(
+            "failed to encode linux.do pending registration token: {error}"
+        ))
+    })
+}
+
+pub fn decode_linux_do_pending_registration_token(
+    token: &str,
+    config: &Config,
+) -> AppResult<LinuxDoPendingRegistrationClaims> {
+    let claims = decode::<LinuxDoPendingRegistrationClaims>(
+        token,
+        &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| ApiError::unauthorized("invalid or expired linux.do pending registration"))?
+    .claims;
+
+    if claims.scope != LINUX_DO_PENDING_REGISTRATION_SCOPE {
+        return Err(ApiError::unauthorized(
+            "invalid or expired linux.do pending registration",
+        ));
     }
 
     Ok(claims)
@@ -470,8 +533,10 @@ mod tests {
     };
 
     use super::{
-        client_network_id, hash_password, optional_bearer_token, require_secure_admin_transport,
-        validate_password,
+        LINUX_DO_PENDING_REGISTRATION_SCOPE, client_network_id,
+        decode_linux_do_pending_registration_token, hash_password,
+        issue_linux_do_pending_registration_token, optional_bearer_token,
+        require_secure_admin_transport, validate_password,
     };
     use crate::config::Config;
 
@@ -656,5 +721,21 @@ mod tests {
 
         assert!(hash.starts_with("$argon2id$"));
         assert!(hash.contains("m=19456,t=2,p=1"));
+    }
+
+    #[test]
+    fn linux_do_pending_registration_tokens_round_trip() {
+        let config = Config::default();
+        let token =
+            issue_linux_do_pending_registration_token("linuxdo-123", "test-user", 3, &config)
+                .expect("issue pending registration token");
+
+        let claims = decode_linux_do_pending_registration_token(&token, &config)
+            .expect("decode pending registration token");
+
+        assert_eq!(claims.sub, "linuxdo-123");
+        assert_eq!(claims.username, "test-user");
+        assert_eq!(claims.trust_level, 3);
+        assert_eq!(claims.scope, LINUX_DO_PENDING_REGISTRATION_SCOPE);
     }
 }

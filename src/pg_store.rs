@@ -33,6 +33,7 @@ struct DomainRow {
     domain: String,
     is_verified: bool,
     status: String,
+    is_shared: bool,
     #[allow(dead_code)]
     #[allow(dead_code)]
     #[allow(dead_code)]
@@ -180,7 +181,7 @@ impl PgStore {
     pub async fn list_domains(&self) -> AppResult<Vec<Domain>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE is_verified = TRUE AND status = 'active'
             ORDER BY domain
@@ -196,7 +197,7 @@ impl PgStore {
     pub async fn list_all_domains(&self) -> AppResult<Vec<Domain>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             ORDER BY domain
             "#,
@@ -208,12 +209,21 @@ impl PgStore {
         Ok(rows.into_iter().map(DomainRow::to_public).collect())
     }
 
-    pub async fn list_domains_for_owner(&self, owner_user_id: Uuid) -> AppResult<Vec<Domain>> {
+    pub async fn list_domains_visible_to_owner(
+        &self,
+        owner_user_id: Uuid,
+    ) -> AppResult<Vec<Domain>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE owner_user_id = $1
+               OR (
+                    is_shared = TRUE
+                AND is_verified = TRUE
+                AND status = 'active'
+                AND (owner_user_id IS NULL OR owner_user_id <> $1)
+               )
             ORDER BY domain
             "#,
         )
@@ -262,14 +272,15 @@ impl PgStore {
         let row = sqlx::query_as::<_, DomainRow>(
             r#"
             INSERT INTO domains (
-                id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+                id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             )
-            VALUES ($1, $2, FALSE, 'pending_verification', $3, $4, NULL, $5, $5)
-            RETURNING id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            VALUES ($1, $2, FALSE, 'pending_verification', $3, $4, $5, NULL, $6, $6)
+            RETURNING id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             "#,
         )
         .bind(Uuid::new_v4())
         .bind(&normalized_domain)
+        .bind(owner_user_id.is_none())
         .bind(owner_user_id)
         .bind(format!("tmpmail-verify-{}", Uuid::new_v4().simple()))
         .bind(now)
@@ -283,6 +294,38 @@ impl PgStore {
             row.id.to_string(),
             None,
             format!("domain={} status={}", row.domain, row.status),
+        )
+        .await?;
+
+        Ok(row.to_public())
+    }
+
+    pub async fn update_domain_sharing(
+        &self,
+        domain_id: Uuid,
+        is_shared: bool,
+    ) -> AppResult<Domain> {
+        let row = sqlx::query_as::<_, DomainRow>(
+            r#"
+            UPDATE domains
+            SET is_shared = $2, updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
+            "#,
+        )
+        .bind(domain_id)
+        .bind(is_shared)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| ApiError::not_found("domain not found"))?;
+
+        self.append_audit_log(
+            "domain.share.update",
+            "domain",
+            row.id.to_string(),
+            None,
+            format!("domain={} is_shared={}", row.domain, row.is_shared),
         )
         .await?;
 
@@ -1340,13 +1383,14 @@ impl PgStore {
             sqlx::query(
                 r#"
                 INSERT INTO domains (
-                    id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+                    id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
                 )
-                VALUES ($1, $2, TRUE, 'active', NULL, NULL, NULL, $3, $3)
+                VALUES ($1, $2, TRUE, 'active', TRUE, NULL, NULL, NULL, $3, $3)
                 ON CONFLICT (domain) DO UPDATE
                 SET
                     is_verified = TRUE,
                     status = 'active',
+                    is_shared = TRUE,
                     owner_user_id = NULL,
                     verification_token = NULL,
                     verification_error = NULL,
@@ -1367,7 +1411,7 @@ impl PgStore {
     async fn fetch_domain(&self, domain_id: Uuid) -> AppResult<DomainRow> {
         sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE id = $1
             "#,
@@ -1449,6 +1493,7 @@ impl DomainRow {
             domain: self.domain,
             is_verified: self.is_verified,
             status: self.status,
+            is_shared: self.is_shared,
             owner_user_id: self.owner_user_id.map(|value| value.to_string()),
             verification_token: self.verification_token,
             verification_error: self.verification_error,
