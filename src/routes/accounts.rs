@@ -306,15 +306,9 @@ mod tests {
     use super::*;
     use crate::{app::build_router, config::Config, rate_limit::RateLimitPolicy};
 
-    const TEST_PUBLIC_DOMAIN: &str = "mailbox-rate-limit.example.com";
-
     #[tokio::test]
     async fn mailbox_token_rate_limit_returns_too_many_requests() {
-        let state = test_state(Config {
-            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
-            ..Config::default()
-        })
-        .await;
+        let state = test_state(Config::default()).await;
         create_account(
             &state,
             "alice@mailbox-rate-limit.example.com",
@@ -356,11 +350,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_account_otp_rate_limit_returns_too_many_requests() {
-        let state = test_state(Config {
-            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
-            ..Config::default()
-        })
-        .await;
+        let state = test_state(Config::default()).await;
         enable_email_otp(&state).await;
         saturate_otp_send_limit(&state, "198.51.100.52").await;
 

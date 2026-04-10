@@ -1624,22 +1624,16 @@ fn domain_matches_public_registration_rules(
     domain: &str,
 ) -> bool {
     let normalized_domain = normalize_hostname_like(domain);
-    if registration_settings.public_domains.is_empty()
-        && registration_settings.allowed_email_suffixes.is_empty()
-    {
+    if registration_settings.allowed_email_suffixes.is_empty() {
         return true;
     }
 
     registration_settings
-        .public_domains
+        .allowed_email_suffixes
         .iter()
-        .any(|public_domain| normalized_domain == *public_domain)
-        || registration_settings
-            .allowed_email_suffixes
-            .iter()
-            .any(|suffix| {
-                normalized_domain == *suffix || normalized_domain.ends_with(&format!(".{suffix}"))
-            })
+        .any(|suffix| {
+            normalized_domain == *suffix || normalized_domain.ends_with(&format!(".{suffix}"))
+        })
 }
 
 fn default_true() -> bool {
@@ -1654,7 +1648,6 @@ fn default_registration_settings() -> AdminRegistrationSettings {
     AdminRegistrationSettings {
         open_registration_enabled: true,
         console_invite_code_required: false,
-        public_domains: Vec::new(),
         allowed_email_suffixes: Vec::new(),
         email_otp: default_email_otp_settings(),
         linux_do: default_linux_do_auth_settings(),
@@ -1908,13 +1901,6 @@ fn normalize_registration_settings(
     value: AdminRegistrationSettings,
     existing: Option<&AdminRegistrationSettings>,
 ) -> AppResult<AdminRegistrationSettings> {
-    let public_domains = value
-        .public_domains
-        .into_iter()
-        .filter_map(normalize_public_domain_setting)
-        .collect::<AppResult<BTreeSet<_>>>()?
-        .into_iter()
-        .collect::<Vec<_>>();
     let allowed_email_suffixes = value
         .allowed_email_suffixes
         .into_iter()
@@ -1982,7 +1968,6 @@ fn normalize_registration_settings(
     Ok(AdminRegistrationSettings {
         open_registration_enabled: value.open_registration_enabled,
         console_invite_code_required: value.console_invite_code_required,
-        public_domains,
         allowed_email_suffixes,
         email_otp,
         linux_do,
@@ -2262,19 +2247,6 @@ fn normalize_email_suffix_setting(value: String) -> Option<AppResult<String>> {
     Some(
         normalize_optional_hostname_setting(Some(&normalized)).and_then(|value| {
             value.ok_or_else(|| ApiError::validation("registration email suffix cannot be empty"))
-        }),
-    )
-}
-
-fn normalize_public_domain_setting(value: String) -> Option<AppResult<String>> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    Some(
-        normalize_optional_hostname_setting(Some(trimmed)).and_then(|value| {
-            value.ok_or_else(|| ApiError::validation("public domain cannot be empty"))
         }),
     )
 }
@@ -2824,23 +2796,6 @@ mod tests {
         assert!(domain_matches_public_registration_rules(
             &settings,
             "mail.example.com",
-        ));
-    }
-
-    #[test]
-    fn public_registration_rules_match_exact_public_domains() {
-        let settings = AdminRegistrationSettings {
-            public_domains: vec!["mail.example.com".to_owned()],
-            ..default_registration_settings()
-        };
-
-        assert!(domain_matches_public_registration_rules(
-            &settings,
-            "mail.example.com",
-        ));
-        assert!(!domain_matches_public_registration_rules(
-            &settings,
-            "other.example.com",
         ));
     }
 

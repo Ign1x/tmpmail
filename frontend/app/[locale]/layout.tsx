@@ -10,7 +10,11 @@ import { Providers } from "./providers"
 import { MailStatusProvider } from "@/contexts/mail-status-context"
 import { AuthProvider } from "@/contexts/auth-context"
 import { getServerSiteBranding } from "@/lib/site-branding-server"
-import { resolveMetadataBrandLogoUrl } from "@/lib/site-branding"
+import {
+  buildSiteDescription,
+  buildSiteTitle,
+  resolveMetadataBrandLogoUrl,
+} from "@/lib/site-branding"
 
 type AppLocale = (typeof routing.locales)[number]
 
@@ -50,15 +54,9 @@ export async function generateMetadata({
   const branding = await getServerSiteBranding()
   const metadataLogoUrl = resolveMetadataBrandLogoUrl(branding.brandLogoUrl)
 
-  const isZh = locale === "zh"
-
   return {
-    title: isZh
-      ? `Temp Mail-临时邮件-安全、即时、快速- ${branding.brandName}`
-      : `Temp Mail - Secure, Instant, Fast - ${branding.brandName}`,
-    description: isZh
-      ? `使用 ${branding.brandName} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
-      : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${branding.brandName}.`,
+    title: buildSiteTitle(locale, branding.brandName),
+    description: buildSiteDescription(locale, branding.brandName),
     icons: {
       icon: metadataLogoUrl,
       shortcut: metadataLogoUrl,

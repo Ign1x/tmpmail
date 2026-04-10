@@ -1,7 +1,5 @@
 import "server-only"
 
-import { cache } from "react"
-
 import type { SiteBrandingSettings } from "@/lib/api"
 import { DEFAULT_PROVIDER_BASE_URL } from "@/lib/provider-config"
 import { DEFAULT_SITE_BRANDING, resolveSiteBranding } from "@/lib/site-branding"
@@ -14,7 +12,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null
 }
 
-export const getServerSiteBranding = cache(async () => {
+export async function getServerSiteBranding() {
   try {
     const response = await fetch(
       `${getApiBaseUrl().replace(/\/+$/, "")}/site/branding`,
@@ -34,4 +32,4 @@ export const getServerSiteBranding = cache(async () => {
   } catch {
     return DEFAULT_SITE_BRANDING
   }
-})
+}

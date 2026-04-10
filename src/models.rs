@@ -247,8 +247,6 @@ pub struct AdminRegistrationSettings {
     #[serde(default)]
     pub console_invite_code_required: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub public_domains: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_email_suffixes: Vec<String>,
     pub email_otp: AdminEmailOtpSettings,
     pub linux_do: LinuxDoAuthSettings,

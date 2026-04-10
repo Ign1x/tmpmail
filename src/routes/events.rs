@@ -121,13 +121,10 @@ mod tests {
     use super::*;
     use crate::{app::build_router, config::Config};
 
-    const TEST_PUBLIC_DOMAIN: &str = "events.example.com";
-
     #[tokio::test]
     async fn rejects_connections_when_sse_limit_is_reached() {
         let state = test_state(Config {
             sse_connection_limit: 1,
-            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
             ..Config::default()
         })
         .await;
@@ -155,7 +152,6 @@ mod tests {
     async fn dropping_unpolled_sse_response_releases_connection_slot() {
         let state = test_state(Config {
             sse_connection_limit: 1,
-            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
             ..Config::default()
         })
         .await;

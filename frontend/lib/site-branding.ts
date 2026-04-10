@@ -71,6 +71,18 @@ export function resolveMetadataBrandLogoUrl(brandLogoUrl: string): string {
   return brandLogoUrl.startsWith("data:") ? DEFAULT_SITE_BRANDING.brandLogoUrl : brandLogoUrl
 }
 
+export function buildSiteTitle(locale: string, brandName: string): string {
+  return locale === "zh"
+    ? `Temp Mail-临时邮件-安全、即时、快速- ${brandName}`
+    : `Temp Mail - Secure, Instant, Fast - ${brandName}`
+}
+
+export function buildSiteDescription(locale: string, brandName: string): string {
+  return locale === "zh"
+    ? `使用 ${brandName} 保护您的个人邮箱地址免受垃圾邮件、机器人、钓鱼和其他在线滥用。`
+    : `Protect your personal email address from spam, bots, phishing, and other online abuse with ${brandName}.`
+}
+
 export function replaceBrandNameText(text: string, brandName: string): string {
   return text.replaceAll("TmpMail", brandName)
 }

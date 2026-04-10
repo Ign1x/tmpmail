@@ -164,7 +164,6 @@ const DEFAULT_SETTINGS: AdminSystemSettings = {
   registrationSettings: {
     openRegistrationEnabled: true,
     consoleInviteCodeRequired: false,
-    publicDomains: [],
     allowedEmailSuffixes: [],
     emailOtp: {
       enabled: false,
@@ -799,35 +798,6 @@ export default function DomainManagementPage({
     sharedVisibleDomainsCount,
     ta,
   ])
-  const publicRegistrationDomainOptions = useMemo(
-    () =>
-      managedDomains
-        .filter(
-          (domain) =>
-            !domain.ownerUserId && (domain.isVerified || domain.status === "active"),
-        )
-        .map((domain) => domain.domain)
-        .sort((left, right) => left.localeCompare(right)),
-    [managedDomains],
-  )
-  const publicRegistrationDomainOptionSet = useMemo(
-    () => new Set(publicRegistrationDomainOptions),
-    [publicRegistrationDomainOptions],
-  )
-  const selectedPublicRegistrationDomains = useMemo(
-    () =>
-      settingsDraft.registrationSettings.publicDomains.filter((domain) =>
-        publicRegistrationDomainOptionSet.has(domain),
-      ),
-    [publicRegistrationDomainOptionSet, settingsDraft.registrationSettings.publicDomains],
-  )
-  const additionalAllowedEmailSuffixes = useMemo(
-    () =>
-      settingsDraft.registrationSettings.allowedEmailSuffixes.filter(
-        (suffix) => !publicRegistrationDomainOptionSet.has(suffix),
-      ),
-    [publicRegistrationDomainOptionSet, settingsDraft.registrationSettings.allowedEmailSuffixes],
-  )
   const availableMailboxDomains = useMemo(
     () => managedDomains.filter((domain) => domain.isVerified || domain.status === "active"),
     [managedDomains],
@@ -925,7 +895,6 @@ export default function DomainManagementPage({
         ...settings.registrationSettings,
         consoleInviteCodeRequired:
           settings.registrationSettings?.consoleInviteCodeRequired ?? false,
-        publicDomains: settings.registrationSettings?.publicDomains ?? [],
         allowedEmailSuffixes: settings.registrationSettings?.allowedEmailSuffixes ?? [],
         emailOtp: {
           ...DEFAULT_SETTINGS.registrationSettings.emailOtp,
@@ -2915,44 +2884,17 @@ export default function DomainManagementPage({
     await handlePatchUser(user, { domainLimit: parsed })
   }
 
-  const updateRegistrationAvailabilityDraft = useCallback(
-    (nextPublicDomains: string[], nextAllowedSuffixes: string[]) => {
-      setSettingsDraft((current) => ({
-        ...current,
-        registrationSettings: {
-          ...current.registrationSettings,
-          publicDomains: Array.from(
-            new Set(nextPublicDomains.map(normalizeManagedDomainEntry).filter(Boolean)),
-          ).sort((left, right) => left.localeCompare(right)),
-          allowedEmailSuffixes: Array.from(
-            new Set(nextAllowedSuffixes.map(normalizeManagedDomainEntry).filter(Boolean)),
-          ).sort((left, right) => left.localeCompare(right)),
-        },
-      }))
-    },
-    [],
-  )
-
-  const handleTogglePublicRegistrationDomain = useCallback(
-    (domainName: string) => {
-      const selected = new Set(selectedPublicRegistrationDomains)
-      if (selected.has(domainName)) {
-        selected.delete(domainName)
-      } else {
-        selected.add(domainName)
-      }
-
-      updateRegistrationAvailabilityDraft(
-        Array.from(selected),
-        additionalAllowedEmailSuffixes,
-      )
-    },
-    [
-      additionalAllowedEmailSuffixes,
-      selectedPublicRegistrationDomains,
-      updateRegistrationAvailabilityDraft,
-    ],
-  )
+  const updateAllowedEmailSuffixesDraft = useCallback((nextAllowedSuffixes: string[]) => {
+    setSettingsDraft((current) => ({
+      ...current,
+      registrationSettings: {
+        ...current.registrationSettings,
+        allowedEmailSuffixes: Array.from(
+          new Set(nextAllowedSuffixes.map(normalizeManagedDomainEntry).filter(Boolean)),
+        ).sort((left, right) => left.localeCompare(right)),
+      },
+    }))
+  }, [])
 
   const saveSettings = async (payload: AdminUpdateSystemSettingsRequest) => {
     if (!hasAdminSession || !isAdmin) {
@@ -4416,57 +4358,13 @@ export default function DomainManagementPage({
                             )}
                           </div>
 
-                          <div className="space-y-3 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
-                            <div>
-                              <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
-                                {ta("publicDomainsLabel")}
-                              </div>
-                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                                {ta("publicDomainsDescription")}
-                              </p>
-                            </div>
-
-                            {publicRegistrationDomainOptions.length > 0 ? (
-                              <div className="flex flex-wrap gap-2">
-                                {publicRegistrationDomainOptions.map((domainName) => {
-                                  const active = selectedPublicRegistrationDomains.includes(domainName)
-
-                                  return (
-                                    <Button
-                                      key={domainName}
-                                      size="sm"
-                                      variant={active ? "flat" : "bordered"}
-                                      className={`rounded-full px-3 ${
-                                        active
-                                          ? "bg-sky-100 text-sky-900 dark:bg-sky-950/40 dark:text-sky-100"
-                                          : "border-slate-200 bg-white/80 text-slate-600 dark:border-slate-700 dark:bg-slate-900/70 dark:text-slate-300"
-                                      }`}
-                                      onPress={() => handleTogglePublicRegistrationDomain(domainName)}
-                                    >
-                                      {domainName}
-                                    </Button>
-                                  )
-                                })}
-                              </div>
-                            ) : (
-                              <EmptyState
-                                compact
-                                title={ta("publicDomainsEmptyTitle")}
-                                description={ta("publicDomainsEmptyDescription")}
-                              />
-                            )}
-                          </div>
-
                           <Input
                             label={ta("allowedEmailSuffixesLabel")}
                             placeholder={ta("allowedEmailSuffixesPlaceholder")}
                             description={ta("allowedEmailSuffixesDescription")}
-                            value={additionalAllowedEmailSuffixes.join(", ")}
+                            value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
                             onValueChange={(value) =>
-                              updateRegistrationAvailabilityDraft(
-                                selectedPublicRegistrationDomains,
-                                parseSuffixList(value),
-                              )
+                              updateAllowedEmailSuffixesDraft(parseSuffixList(value))
                             }
                             variant="bordered"
                             size="sm"

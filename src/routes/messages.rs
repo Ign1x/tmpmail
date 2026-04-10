@@ -359,8 +359,6 @@ mod tests {
         state::AppState,
     };
 
-    const TEST_PUBLIC_DOMAIN: &str = "configured.example.com";
-
     #[tokio::test]
     async fn raw_download_returns_generated_eml_for_local_messages() {
         let state = test_state(test_config()).await;
@@ -563,7 +561,6 @@ mod tests {
         Config {
             cleanup_interval_seconds: 0,
             domain_verification_poll_interval_seconds: 0,
-            public_domains: vec![TEST_PUBLIC_DOMAIN.to_owned()],
             ..Config::default()
         }
     }

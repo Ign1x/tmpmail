@@ -9,11 +9,13 @@ import {
   useState,
   type ReactNode,
 } from "react"
+import { useLocale } from "next-intl"
 
 import type { SiteBrandingSettings } from "@/lib/api"
 import {
   type ResolvedSiteBranding,
   DEFAULT_SITE_BRANDING,
+  buildSiteTitle,
   resolveSiteBranding,
 } from "@/lib/site-branding"
 
@@ -30,11 +32,16 @@ export function BrandingProvider({
   children: ReactNode
   initialBranding?: ResolvedSiteBranding
 }) {
+  const locale = useLocale()
   const [branding, setBrandingState] = useState<ResolvedSiteBranding>(initialBranding)
 
   useEffect(() => {
     setBrandingState(initialBranding)
   }, [initialBranding])
+
+  useEffect(() => {
+    document.title = buildSiteTitle(locale, branding.brandName)
+  }, [branding.brandName, locale])
 
   const setBranding = useCallback((nextBranding?: SiteBrandingSettings | null) => {
     setBrandingState(resolveSiteBranding(nextBranding))

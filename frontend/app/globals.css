@@ -16,6 +16,7 @@ body {
 
 html {
   scroll-behavior: smooth;
+  font-size: 17px;
 }
 
 body {
@@ -129,6 +130,7 @@ a:focus-visible,
 @media (max-width: 768px) {
   /* 防止移动端缩放 */
   html {
+    font-size: 16.5px;
     -webkit-text-size-adjust: 100%;
     -ms-text-size-adjust: 100%;
   }
@@ -145,7 +147,7 @@ a:focus-visible,
 
   /* 优化输入框 */
   input, textarea {
-    font-size: 16px; /* 防止iOS缩放 */
+    font-size: 1rem; /* 保持不小于 16px，避免 iOS 聚焦缩放 */
   }
 }
 
