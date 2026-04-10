@@ -9,8 +9,8 @@ import { useTranslations } from "next-intl"
 import { TM_INPUT_CLASSNAMES } from "@/components/heroui-field-styles"
 import { Input } from "@/components/tm-form-fields"
 import { useBranding } from "@/contexts/branding-context"
-import { setStoredAdminSession } from "@/lib/admin-session"
-import { completeLinuxDoLogin } from "@/lib/api"
+import { setStoredAdminSession, storePendingAdminSession } from "@/lib/admin-session"
+import { completeLinuxDoLogin, type AdminSessionInfo } from "@/lib/api"
 import { DEFAULT_PROVIDER_ID } from "@/lib/provider-config"
 import { replaceBrandNameText } from "@/lib/site-branding"
 
@@ -138,8 +138,9 @@ export default function LinuxDoCallbackPage({
     window.location.replace(homePath)
   }, [clearLinuxDoSessionStorage, homePath])
 
-  const finishAuthenticated = useCallback(() => {
+  const finishAuthenticated = useCallback((session: AdminSessionInfo) => {
     const returnPath = resolveLinuxDoReturnPath(homePath)
+    storePendingAdminSession(session)
     setStoredAdminSession()
     clearLinuxDoSessionStorage()
     window.location.replace(returnPath)
@@ -166,15 +167,20 @@ export default function LinuxDoCallbackPage({
     )
 
     if (response.status === "authenticated") {
-      finishAuthenticated()
+      finishAuthenticated(response.session)
       return
     }
 
+    const nextPendingToken = response.pendingToken.trim()
     if (payload.inviteCode?.trim()) {
       sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, payload.inviteCode.trim())
     }
-    sessionStorage.setItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY, response.pendingToken)
-    setPendingToken(response.pendingToken)
+    sessionStorage.setItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY, nextPendingToken)
+    if (!payload.pendingToken && !payload.inviteCode?.trim()) {
+      window.location.replace(callbackPath)
+      return
+    }
+    setPendingToken(nextPendingToken)
     setInvitePromptMessage(translateInviteMessage(response.message))
   }, [callbackPath, finishAuthenticated, translateInviteMessage])
 
