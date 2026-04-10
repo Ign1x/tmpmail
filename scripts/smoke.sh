@@ -43,14 +43,45 @@ FRONTEND_BASE_URL="${FRONTEND_BASE_URL:-http://127.0.0.1:${frontend_port:-3000}}
 SMOKE_SKIP_FRONTEND="${SMOKE_SKIP_FRONTEND:-0}"
 SMOKE_ADDRESS="${smoke_address:-}"
 SMOKE_PASSWORD="${smoke_password:-123456}"
+SMOKE_ACCOUNT_GENERATED=0
+SMOKE_GENERATED_ACCOUNT_ID=""
+SMOKE_GENERATED_TOKEN=""
+
+cleanup_generated_account() {
+  if [ "$SMOKE_ACCOUNT_GENERATED" != "1" ]; then
+    return
+  fi
+
+  if [ -z "$SMOKE_GENERATED_ACCOUNT_ID" ] || [ -z "$SMOKE_GENERATED_TOKEN" ]; then
+    return
+  fi
+
+  curl -sS -o /dev/null -X DELETE \
+    "$API_BASE_URL/accounts/$SMOKE_GENERATED_ACCOUNT_ID" \
+    -H "Authorization: Bearer $SMOKE_GENERATED_TOKEN" || true
+}
+
+trap cleanup_generated_account EXIT
 
 if [ -z "$SMOKE_ADDRESS" ]; then
-  echo "SMOKE_ADDRESS is required. Set TMPMAIL_SMOKE_ADDRESS to an active real mailbox address."
-  exit 1
+  public_domains="$(curl -fsS "$API_BASE_URL/domains")"
+  public_domain="$(
+    printf '%s' "$public_domains" | jq -r '."hydra:member"[0].domain // empty'
+  )"
+
+  if [ -z "$public_domain" ]; then
+    echo "SMOKE_ADDRESS is required because /domains returned no public domains."
+    echo "Set TMPMAIL_SMOKE_ADDRESS to an active mailbox address, or expose at least one public managed domain."
+    exit 1
+  fi
+
+  SMOKE_ADDRESS="smoke-$(date +%s)@$public_domain"
+  SMOKE_ACCOUNT_GENERATED=1
 fi
 
 echo "API_BASE_URL=$API_BASE_URL"
 echo "FRONTEND_BASE_URL=$FRONTEND_BASE_URL"
+echo "SMOKE_ADDRESS=$SMOKE_ADDRESS"
 
 health="$(curl -fsS "$API_BASE_URL/healthz")"
 ready="$(curl -fsS "$API_BASE_URL/readyz")"
@@ -65,11 +96,20 @@ rm -f "$account_payload"
 
 if [ "$account_status" = "201" ]; then
   :
+elif [ "$SMOKE_ACCOUNT_GENERATED" = "1" ]; then
+  echo "generated account create failed: $account"
+  exit 1
 elif [ "$account_status" = "422" ] && printf '%s' "$account" | grep -Eq 'Email address already exists|already exists|already used'; then
   account="{\"status\":\"existing\",\"address\":\"$SMOKE_ADDRESS\"}"
 else
   echo "account create failed: $account"
   exit 1
+fi
+
+if [ "$SMOKE_ACCOUNT_GENERATED" = "1" ]; then
+  SMOKE_GENERATED_ACCOUNT_ID="$(
+    printf '%s' "$account" | jq -r '.id // empty'
+  )"
 fi
 
 token="$(
@@ -78,6 +118,10 @@ token="$(
     -d "{\"address\":\"$SMOKE_ADDRESS\",\"password\":\"$SMOKE_PASSWORD\"}" \
     | jq -r '.token'
 )"
+
+if [ "$SMOKE_ACCOUNT_GENERATED" = "1" ]; then
+  SMOKE_GENERATED_TOKEN="$token"
+fi
 
 me="$(curl -fsS "$API_BASE_URL/me" -H "Authorization: Bearer $token")"
 messages="$(curl -fsS "$API_BASE_URL/messages?page=1" -H "Authorization: Bearer $token")"
