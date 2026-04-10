@@ -52,6 +52,7 @@ export interface AdminStatus {
   openRegistrationEnabled: boolean;
   consoleInviteCodeRequired: boolean;
   linuxDoEnabled: boolean;
+  linuxDoCallbackUrl?: string;
   emailOtpEnabled: boolean;
 }
 

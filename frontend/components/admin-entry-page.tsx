@@ -44,9 +44,12 @@ import { replaceBrowserPath } from "@/lib/admin-entry"
 import { replaceBrandNameText } from "@/lib/site-branding"
 
 const ADMIN_KEY_VISIBLE_MS = 60_000
+const LINUX_DO_DEFAULT_CALLBACK_PATH = "/auth/linux-do"
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
 const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
 const LINUX_DO_PENDING_TOKEN_STORAGE_KEY = "tmpmail-linux-do-pending-token"
+const LINUX_DO_REDIRECT_URI_STORAGE_KEY = "tmpmail-linux-do-redirect-uri"
+const LINUX_DO_RETURN_PATH_STORAGE_KEY = "tmpmail-linux-do-return-path"
 
 type EntryMode = "register" | "login"
 
@@ -420,12 +423,16 @@ export default function AdminEntryPage({
       const state = generateLinuxDoState()
       sessionStorage.setItem(LINUX_DO_STATE_STORAGE_KEY, state)
       sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
+      sessionStorage.setItem(LINUX_DO_RETURN_PATH_STORAGE_KEY, consolePath)
       if (registerInviteCode.trim()) {
         sessionStorage.setItem(LINUX_DO_INVITE_CODE_STORAGE_KEY, registerInviteCode.trim())
       } else {
         sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
       }
-      const redirectUri = new URL(`${consolePath}/auth/linux-do`, window.location.origin).toString()
+      const redirectUri =
+        status?.linuxDoCallbackUrl?.trim() ||
+        new URL(LINUX_DO_DEFAULT_CALLBACK_PATH, window.location.origin).toString()
+      sessionStorage.setItem(LINUX_DO_REDIRECT_URI_STORAGE_KEY, redirectUri)
       const response = await getLinuxDoAuthorizationUrl(
         redirectUri,
         state,
@@ -438,6 +445,8 @@ export default function AdminEntryPage({
         sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
         sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
         sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
+        sessionStorage.removeItem(LINUX_DO_REDIRECT_URI_STORAGE_KEY)
+        sessionStorage.removeItem(LINUX_DO_RETURN_PATH_STORAGE_KEY)
       } catch {}
 
       toast({

@@ -136,6 +136,8 @@ pub struct AdminStatusResponse {
     pub open_registration_enabled: bool,
     pub console_invite_code_required: bool,
     pub linux_do_enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub linux_do_callback_url: Option<String>,
     pub email_otp_enabled: bool,
 }
 

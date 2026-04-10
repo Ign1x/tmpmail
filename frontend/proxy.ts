@@ -47,6 +47,9 @@ function redirectToPath(request: NextRequest, locale: string, targetPath: string
 
 export default function proxy(request: NextRequest) {
   const pathname = normalizePathname(request.nextUrl.pathname)
+  if (pathname === "/auth/linux-do") {
+    return NextResponse.next()
+  }
   const localizedAdminLocale = routing.locales.find((locale) => pathname === `/${locale}/admin`)
   const localizedAdminConsoleLocale = routing.locales.find(
     (locale) => pathname === `/${locale}/admin/console`,

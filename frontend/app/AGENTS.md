@@ -11,6 +11,7 @@ This directory owns localized page routes and Next server route handlers. Keep p
 - `[locale]/layout.tsx` — locale validation, metadata, `NextIntlClientProvider`, `AuthProvider`, `MailStatusProvider`
 - `[locale]/page.tsx` — canonical unified workspace route; renders the TmpMail unified sign-in/setup entry when logged out and the workspace when a console session is present
 - `[locale]/auth/linux-do/page.tsx` — localized Linux Do OAuth callback wrapper; keep it thin and push callback logic into `components/`
+- `auth/linux-do/route.ts` — locale-free Linux Do OAuth callback compatibility entry; redirect into the localized callback route while preserving query params
 - `[locale]/admin/page.tsx` — legacy compatibility redirect to the localized home route
 - `[locale]/admin/console/page.tsx` — legacy compatibility redirect to the localized home route
 - `api/mail/route.ts` — REST-style backend proxy
@@ -21,7 +22,7 @@ This directory owns localized page routes and Next server route handlers. Keep p
 - Use `generateStaticParams`, `setRequestLocale`, and shared `routing.locales`; do not invent ad hoc locale plumbing.
 - Keep leaf pages thin; move heavy UI/workflow logic into `components/` and shared helpers into `lib/`.
 - Treat `/${locale}` as the canonical workspace URL. `/admin`, `/admin/console`, and configurable admin-entry aliases are compatibility redirects only.
-- Keep Linux Do callback handling on a localized route under `/${locale}/auth/*` so the browser always returns to the same unified workspace shell.
+- Keep Linux Do callback handling on a localized route under `/${locale}/auth/*`; the locale-free `/auth/linux-do` entry exists only as an OAuth compatibility redirect into that localized route.
 - Root and legacy compatibility route wrappers should stay redirect/session focused; shared unified console UI lives outside `app/`.
 - `/domains` is a compatibility redirect surface, not a second domain-management UI.
 

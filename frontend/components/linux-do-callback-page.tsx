@@ -17,6 +17,8 @@ import { replaceBrandNameText } from "@/lib/site-branding"
 const LINUX_DO_STATE_STORAGE_KEY = "tmpmail-linux-do-oauth-state"
 const LINUX_DO_INVITE_CODE_STORAGE_KEY = "tmpmail-linux-do-invite-code"
 const LINUX_DO_PENDING_TOKEN_STORAGE_KEY = "tmpmail-linux-do-pending-token"
+const LINUX_DO_REDIRECT_URI_STORAGE_KEY = "tmpmail-linux-do-redirect-uri"
+const LINUX_DO_RETURN_PATH_STORAGE_KEY = "tmpmail-linux-do-return-path"
 
 interface LinuxDoCallbackPageProps {
   callbackPath: string
@@ -43,6 +45,34 @@ function getErrorMessage(error: unknown, fallback: string): string {
   return fallback
 }
 
+function resolveLinuxDoReturnPath(fallback: string): string {
+  if (typeof window === "undefined") {
+    return fallback
+  }
+
+  const value = sessionStorage.getItem(LINUX_DO_RETURN_PATH_STORAGE_KEY)?.trim() || ""
+  if (!value || !value.startsWith("/") || value.startsWith("//") || /\s/.test(value)) {
+    return fallback
+  }
+
+  return value
+}
+
+function resolveLinuxDoRedirectUri(callbackPath: string): string {
+  if (typeof window === "undefined") {
+    return callbackPath
+  }
+
+  const stored = sessionStorage.getItem(LINUX_DO_REDIRECT_URI_STORAGE_KEY)?.trim() || ""
+  if (stored) {
+    try {
+      return new URL(stored).toString()
+    } catch {}
+  }
+
+  return new URL(callbackPath, window.location.origin).toString()
+}
+
 export default function LinuxDoCallbackPage({
   callbackPath,
   code,
@@ -67,6 +97,8 @@ export default function LinuxDoCallbackPage({
     sessionStorage.removeItem(LINUX_DO_STATE_STORAGE_KEY)
     sessionStorage.removeItem(LINUX_DO_INVITE_CODE_STORAGE_KEY)
     sessionStorage.removeItem(LINUX_DO_PENDING_TOKEN_STORAGE_KEY)
+    sessionStorage.removeItem(LINUX_DO_REDIRECT_URI_STORAGE_KEY)
+    sessionStorage.removeItem(LINUX_DO_RETURN_PATH_STORAGE_KEY)
   }, [])
 
   const translateInviteMessage = useCallback((message?: string | null): string => {
@@ -107,9 +139,10 @@ export default function LinuxDoCallbackPage({
   }, [clearLinuxDoSessionStorage, homePath])
 
   const finishAuthenticated = useCallback(() => {
+    const returnPath = resolveLinuxDoReturnPath(homePath)
     setStoredAdminSession()
     clearLinuxDoSessionStorage()
-    window.location.replace(homePath)
+    window.location.replace(returnPath)
   }, [clearLinuxDoSessionStorage, homePath])
 
   const submitCompletion = useCallback(async (payload: {
@@ -121,7 +154,7 @@ export default function LinuxDoCallbackPage({
       return
     }
 
-    const redirectUri = new URL(callbackPath, window.location.origin).toString()
+    const redirectUri = resolveLinuxDoRedirectUri(callbackPath)
     const response = await completeLinuxDoLogin(
       {
         code: payload.code,

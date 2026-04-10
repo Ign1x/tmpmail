@@ -93,6 +93,10 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatus
             .map(|value| !value.trim().is_empty())
             .unwrap_or(false)
         && registration_settings.linux_do.client_secret_configured;
+    let linux_do_callback_url = registration_settings
+        .linux_do
+        .callback_url
+        .filter(|value| !value.trim().is_empty());
 
     Ok(Json(AdminStatusResponse {
         is_bootstrap_required: admin_state.is_bootstrap_required(),
@@ -108,6 +112,7 @@ pub async fn status(State(state): State<AppState>) -> AppResult<Json<AdminStatus
         open_registration_enabled: registration_settings.open_registration_enabled,
         console_invite_code_required: registration_settings.console_invite_code_required,
         linux_do_enabled,
+        linux_do_callback_url,
         email_otp_enabled: registration_settings.email_otp.enabled,
     }))
 }

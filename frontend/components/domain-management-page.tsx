@@ -3223,10 +3223,12 @@ export default function DomainManagementPage({
     () => normalizeCloudflareSettings(cloudflareSettings),
     [cloudflareSettings],
   )
-  const linuxDoCallbackPath = `${entryPath}/auth/linux-do`
-  const linuxDoCallbackUrl = browserOrigin
-    ? new URL(linuxDoCallbackPath, browserOrigin).toString()
-    : linuxDoCallbackPath
+  const linuxDoCallbackPath = "/auth/linux-do"
+  const linuxDoCallbackUrl =
+    settingsDraft.registrationSettings.linuxDo.callbackUrl?.trim() ||
+    (browserOrigin
+      ? new URL(linuxDoCallbackPath, browserOrigin).toString()
+      : linuxDoCallbackPath)
   const linuxDoReferenceItems = useMemo(
     () => [
       {
