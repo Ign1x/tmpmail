@@ -35,6 +35,7 @@ This directory is the HTTP edge. Keep handlers thin; storage, domain, auth, and 
 - Admin session, user, settings, metrics, audit-log, and cleanup flows use console credentials and admin guards where required.
 - `GET /domains` is public when unauthenticated; console auth returns all managed domains for admins, and for regular users it returns both domains they own plus active shared domains from other users.
 - Domain mutations require console access; `PATCH /domains/{id}` toggles the owner/admin-managed sharing state exposed to other console users.
+- `DELETE /domains/{id}` should stay idempotent: missing managed domains collapse to `204 No Content`, while real authorization failures still return `403`.
 - `GET /accounts`, console-auth `POST /accounts`, `POST /accounts/{id}/token`, and console-auth `DELETE /accounts/{id}` use console session and mailbox ownership checks.
 - Public `POST /accounts`, `/token`, `/accounts/me`, mailbox-token `DELETE /accounts/{id}`, and `messages/*` remain available for legacy mailbox-token flows.
 - `/events` uses mailbox bearer tokens, rejects `accountId` mismatches, and enforces the config-driven `TMPMAIL_SSE_CONNECTION_LIMIT`.

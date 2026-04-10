@@ -140,9 +140,18 @@ pub async fn delete_domain(
 ) -> AppResult<StatusCode> {
     let user = admin_state::require_console_access(&headers, &state).await?;
     let domain_id = Uuid::parse_str(&id).map_err(|_| ApiError::validation("invalid domain id"))?;
-    ensure_domain_access(&state, user.clone(), domain_id).await?;
+    if let Err(error) = ensure_domain_access(&state, user.clone(), domain_id).await {
+        if matches!(error, ApiError::NotFound(_)) {
+            return Ok(StatusCode::NO_CONTENT);
+        }
+        return Err(error);
+    }
     let config = state.effective_runtime_config().await;
-    let owner_user_id = state.store.domain_owner_user_id(domain_id).await?;
+    let owner_user_id = match state.store.domain_owner_user_id(domain_id).await {
+        Ok(owner_user_id) => owner_user_id,
+        Err(ApiError::NotFound(_)) => return Ok(StatusCode::NO_CONTENT),
+        Err(error) => return Err(error),
+    };
     let cloudflare_user_id = owner_user_id.unwrap_or(user.id);
     let maybe_api_token = {
         let admin_state = state.admin_state.read().await;
@@ -160,8 +169,16 @@ pub async fn delete_domain(
         }
     };
     let maybe_cleanup_report = if let Some(api_token) = maybe_api_token {
-        let (domain_name, _) = state.store.domain_verification_context(domain_id).await?;
-        let records = state.store.domain_dns_records(domain_id, &config).await?;
+        let (domain_name, _) = match state.store.domain_verification_context(domain_id).await {
+            Ok(context) => context,
+            Err(ApiError::NotFound(_)) => return Ok(StatusCode::NO_CONTENT),
+            Err(error) => return Err(error),
+        };
+        let records = match state.store.domain_dns_records(domain_id, &config).await {
+            Ok(records) => records,
+            Err(ApiError::NotFound(_)) => return Ok(StatusCode::NO_CONTENT),
+            Err(error) => return Err(error),
+        };
         Some(
             cloudflare::delete_domain_records(
                 &api_token,
@@ -176,7 +193,11 @@ pub async fn delete_domain(
     } else {
         None
     };
-    state.store.delete_domain(domain_id).await?;
+    match state.store.delete_domain(domain_id).await {
+        Ok(()) => {}
+        Err(ApiError::NotFound(_)) => return Ok(StatusCode::NO_CONTENT),
+        Err(error) => return Err(error),
+    }
     if let Some(report) = maybe_cleanup_report {
         state
             .store
@@ -326,6 +347,29 @@ mod tests {
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = response_body_json(response).await;
         assert_eq!(body.get("isShared").and_then(Value::as_bool), Some(false));
+    }
+
+    #[tokio::test]
+    async fn deleting_missing_domain_is_idempotent() {
+        let state = test_state(Config::default()).await;
+        let admin = bootstrap_admin(&state, "correct12345").await;
+        let session_token = issue_session_token(&state, &admin).await;
+        let missing_domain_id = Uuid::new_v4();
+
+        let response = build_router(state)
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/domains/{missing_domain_id}"))
+                    .header("host", "localhost")
+                    .header("authorization", format!("Bearer {session_token}"))
+                    .body(Body::empty())
+                    .expect("build delete request"),
+            )
+            .await
+            .expect("delete domain response");
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
     }
 
     async fn test_state(config: Config) -> AppState {
