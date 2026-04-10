@@ -506,7 +506,7 @@ impl PgStore {
     pub async fn pending_domain_checks(&self) -> AppResult<Vec<PendingDomainCheck>> {
         let rows = sqlx::query_as::<_, DomainRow>(
             r#"
-            SELECT id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            SELECT id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             FROM domains
             WHERE is_verified = FALSE
               AND status = 'pending_verification'
