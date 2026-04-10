@@ -6,7 +6,7 @@
 - `frontend/lib/AGENTS.md` overrides helper/API/session/config rules.
 
 ## Overview
-This directory holds the live Next.js frontend. Treat `frontend/` as authoritative and `DuckMail/` as historical baseline only.
+This directory holds the live Next.js frontend. Treat `frontend/` as authoritative.
 
 ## Entry points
 - `app/[locale]/layout.tsx` — locale validation plus provider stack
@@ -38,5 +38,5 @@ cd frontend && npm run build
 
 ## Avoid
 - Putting business logic into `components/ui/*`
-- Editing `DuckMail/` instead of `frontend/`
+- Splitting active frontend code across multiple parallel app trees
 - Treating `messages/*.json` size as frontend architecture

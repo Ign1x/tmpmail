@@ -79,7 +79,7 @@ TmpMail is a Rust Axum API plus a Next.js App Router frontend. Persistence is Po
 - When config surfaces change, mention `.env.example`, `compose.yaml`, `README.md`, and `migrations/` updates explicitly.
 
 ## Anti-patterns
-- Do not edit `DuckMail/` as if it were live code. The active frontend is `frontend/`.
+- Do not add or revive a second frontend tree outside `frontend/`. The active frontend is `frontend/`.
 - Do not commit `.env`, `data/`, or legacy generated `inbucket.compose.yml` / `inbucket.env` / `inbucket-data/` artifacts.
 - Do not assume `cargo run` reads `.env`; the Rust binary reads process env directly.
 - Do not assume `cargo run` or tests read `.env`; export `TMPMAIL_DATABASE_URL` explicitly outside Docker unless you are inside the bundled compose path, and remember that compose-specific `*_FILE` secret wiring does not exist in plain host runs.
