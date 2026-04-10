@@ -72,6 +72,10 @@ export function resolveMetadataBrandLogoUrl(brandLogoUrl: string): string {
 }
 
 export function buildSiteTitle(locale: string, brandName: string): string {
+  if (brandName.trim() !== DEFAULT_SITE_BRANDING.brandName) {
+    return brandName
+  }
+
   return locale === "zh"
     ? `Temp Mail-临时邮件-安全、即时、快速- ${brandName}`
     : `Temp Mail - Secure, Instant, Fast - ${brandName}`
