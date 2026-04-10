@@ -73,13 +73,28 @@ function buildResponseHeaders(response: Response): Headers {
   return headers;
 }
 
+function firstHeaderToken(value: string | null): string {
+  return value?.split(",")[0]?.trim() || ""
+}
+
 function resolveForwardedProto(request: NextRequest): string {
+  const forwardedProto = firstHeaderToken(request.headers.get("x-forwarded-proto")).toLowerCase()
+  if (forwardedProto === "https") {
+    return "https"
+  }
+  if (forwardedProto === "http") {
+    return "http"
+  }
+
   const protocol = request.nextUrl.protocol.replace(":", "").trim().toLowerCase()
   return protocol === "https" ? "https" : "http"
 }
 
 function resolveForwardedHost(request: NextRequest): string {
-  const host = request.nextUrl.host.trim()
+  const host =
+    firstHeaderToken(request.headers.get("x-forwarded-host")) ||
+    firstHeaderToken(request.headers.get("host")) ||
+    request.nextUrl.host.trim()
   if (!host || /\s|,|\//.test(host)) {
     return ""
   }
