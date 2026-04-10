@@ -350,7 +350,11 @@ mod tests {
 
     #[tokio::test]
     async fn send_account_otp_rate_limit_returns_too_many_requests() {
-        let state = test_state(Config::default()).await;
+        let state = test_state(Config {
+            trust_proxy_headers: true,
+            ..Config::default()
+        })
+        .await;
         enable_email_otp(&state).await;
         saturate_otp_send_limit(&state, "198.51.100.52").await;
 
@@ -379,6 +383,11 @@ mod tests {
     }
 
     async fn create_account(state: &AppState, address: &str, password: &str) {
+        let domain = address
+            .rsplit_once('@')
+            .map(|(_, domain)| domain)
+            .expect("account address domain");
+        crate::test_support::create_active_test_domain(state, domain).await;
         state
             .store
             .create_account(address, password, None)

@@ -570,6 +570,11 @@ mod tests {
     }
 
     async fn create_account_and_token(state: &AppState, address: &str) -> (Uuid, String, String) {
+        let domain = address
+            .rsplit_once('@')
+            .map(|(_, domain)| domain)
+            .expect("account address domain");
+        crate::test_support::create_active_test_domain(state, domain).await;
         let account = state
             .store
             .create_account(address, "secret1234", None)

@@ -1621,7 +1621,11 @@ mod tests {
 
     #[tokio::test]
     async fn send_register_otp_rate_limit_returns_too_many_requests() {
-        let state = test_state(Config::default()).await;
+        let state = test_state(Config {
+            trust_proxy_headers: true,
+            ..Config::default()
+        })
+        .await;
         bootstrap_admin(&state, "correct12345").await;
         enable_email_otp(&state).await;
         saturate_otp_send_limit(&state, "198.51.100.90").await;

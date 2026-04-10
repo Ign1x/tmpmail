@@ -91,6 +91,20 @@ pub(crate) async fn build_test_state(config: Config, label: &str) -> AppState {
         .with_test_database(database)
 }
 
+pub(crate) async fn create_active_test_domain(state: &AppState, domain: &str) {
+    let created = state
+        .store
+        .create_domain(domain, None)
+        .await
+        .expect("create test domain");
+    let domain_id = Uuid::parse_str(&created.id).expect("test domain uuid");
+    state
+        .store
+        .update_domain_verification_status(domain_id, true, None)
+        .await
+        .expect("activate test domain");
+}
+
 fn test_database_base_url() -> String {
     env::var("TMPMAIL_TEST_DATABASE_URL")
         .ok()

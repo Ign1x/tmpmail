@@ -470,7 +470,7 @@ impl PgStore {
                 verification_error = $4,
                 updated_at = $5
             WHERE id = $1
-            RETURNING id, domain, is_verified, status, owner_user_id, verification_token, verification_error, created_at, updated_at
+            RETURNING id, domain, is_verified, status, is_shared, owner_user_id, verification_token, verification_error, created_at, updated_at
             "#,
         )
         .bind(domain_id)

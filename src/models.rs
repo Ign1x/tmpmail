@@ -462,10 +462,12 @@ pub struct LinuxDoCompleteRequest {
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum LinuxDoCompleteResponse {
     Authenticated {
+        #[serde(rename = "sessionToken")]
         session_token: String,
         session: AdminSessionInfo,
     },
     InviteCodeRequired {
+        #[serde(rename = "pendingToken")]
         pending_token: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         message: Option<String>,
