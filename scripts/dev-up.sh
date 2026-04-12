@@ -138,6 +138,18 @@ msg() {
     en:proxy_warning_header) printf '%s' "Note: workspace HTTPS detection" ;;
     zh-CN:proxy_warning_body) printf '%s' "如果你是通过 HTTPS 反向代理访问本站，而工作区里的登录或受保护操作仍然返回 403，请把 %s 设为 true，然后执行 docker compose up -d --force-recreate api frontend。" ;;
     en:proxy_warning_body) printf '%s' "If you access this site through an HTTPS reverse proxy and workspace login or protected actions still return 403, set %s to true, then run docker compose up -d --force-recreate api frontend." ;;
+    zh-CN:cleanup_prompt) printf '%s' "是否顺手清理 Docker 构建垃圾和缓存？[y/N]: " ;;
+    en:cleanup_prompt) printf '%s' "Clean Docker build junk and cache now? [y/N]: " ;;
+    zh-CN:cleanup_invalid) printf '%s' "请输入 y 或 n" ;;
+    en:cleanup_invalid) printf '%s' "enter y or n" ;;
+    zh-CN:cleanup_running) printf '%s' "正在清理 Docker 构建缓存和悬空镜像..." ;;
+    en:cleanup_running) printf '%s' "Cleaning Docker build cache and dangling images..." ;;
+    zh-CN:cleanup_done) printf '%s' "Docker 构建垃圾和缓存已清理完成。" ;;
+    en:cleanup_done) printf '%s' "Docker build junk and cache cleanup finished." ;;
+    zh-CN:cleanup_failed) printf '%s' "Docker 构建垃圾和缓存清理失败，但当前服务已经启动完成。" ;;
+    en:cleanup_failed) printf '%s' "Docker build junk/cache cleanup failed, but the services are already up." ;;
+    zh-CN:cleanup_skipped) printf '%s' "已跳过 Docker 构建垃圾和缓存清理。" ;;
+    en:cleanup_skipped) printf '%s' "Skipped Docker build junk and cache cleanup." ;;
     zh-CN:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST 仍然为空。" ;;
     en:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST is empty." ;;
     zh-CN:mail_exchange_empty_hint) printf '%s' "请先在 %s 中填写一个稳定的公网 MX 主机名，例如 mail.example.com，然后重新执行本命令。" ;;
@@ -166,6 +178,14 @@ sayf_err() {
   local key="$1"
   shift
   printf "$(msg "$key")\n" "$@" >&2
+}
+
+say_tty() {
+  printf '%s\n' "$(msg "$1")" > /dev/tty
+}
+
+say_tty_err() {
+  printf '%s\n' "$(msg "$1")" > /dev/tty
 }
 
 choose_language() {
@@ -616,6 +636,51 @@ wait_for_container_ready() {
   return 1
 }
 
+prompt_cleanup_after_startup() {
+  local choice
+
+  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
+    return 1
+  fi
+
+  while true; do
+    printf '%s' "$(msg cleanup_prompt)" > /dev/tty
+    read -r choice < /dev/tty || return 1
+    choice="$(trim_whitespace "$choice")"
+
+    case "${choice,,}" in
+      y|yes)
+        return 0
+        ;;
+      ""|n|no)
+        say_tty cleanup_skipped
+        return 1
+        ;;
+      *)
+        say_tty_err cleanup_invalid
+        ;;
+    esac
+  done
+}
+
+cleanup_startup_junk() {
+  local cleanup_ok="true"
+
+  say cleanup_running
+  if ! docker builder prune -f; then
+    cleanup_ok="false"
+  fi
+  if ! docker image prune -f; then
+    cleanup_ok="false"
+  fi
+
+  if [ "$cleanup_ok" = "true" ]; then
+    say cleanup_done
+  else
+    say_err cleanup_failed
+  fi
+}
+
 admin_password="${TMPMAIL_ADMIN_PASSWORD:-}"
 if [ -z "$admin_password" ]; then
   admin_password="$(env_read TMPMAIL_ADMIN_PASSWORD "$ENV_FILE" 2>/dev/null || true)"
@@ -762,4 +827,8 @@ fi
 if [ "$admin_require_secure_transport" != "false" ] && [ "$trust_proxy_headers" = "false" ]; then
   printf '\n== %s ==\n' "$(msg proxy_warning_header)"
   sayf proxy_warning_body "TMPMAIL_TRUST_PROXY_HEADERS"
+fi
+
+if prompt_cleanup_after_startup; then
+  cleanup_startup_junk
 fi
