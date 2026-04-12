@@ -330,48 +330,23 @@ parse_bool_setting() {
 }
 
 read_secret_with_mask() {
+  local secret=""
+
   ensure_interactive_prompt
 
-  if [ ! -r /dev/tty ] || [ ! -w /dev/tty ]; then
-    local fallback_secret
-
-    read -r -s fallback_secret
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    if ! IFS= read -r -s secret < /dev/tty; then
+      return 130
+    fi
+    printf '\n' > /dev/tty
+  else
+    if ! IFS= read -r -s secret; then
+      return 130
+    fi
     printf '\n' >&2
-    printf '%s' "$fallback_secret"
-    return 0
   fi
 
-  (
-    local secret=""
-    local char
-    local old_stty
-
-    old_stty="$(stty -g < /dev/tty)"
-    trap 'stty "$old_stty" < /dev/tty >/dev/null 2>&1' EXIT INT TERM
-
-    stty -echo < /dev/tty
-
-    while IFS= read -r -n 1 char < /dev/tty; do
-      case "$char" in
-        $'\n'|$'\r')
-          break
-          ;;
-        $'\177'|$'\b')
-          if [ -n "$secret" ]; then
-            secret="${secret%?}"
-            printf '\b \b' >&2
-          fi
-          ;;
-        *)
-          secret+="$char"
-          printf '*' >&2
-          ;;
-      esac
-    done
-
-    printf '\n' >&2
-    printf '%s' "$secret"
-  )
+  printf '%s' "$secret"
 }
 
 prompt_admin_password() {
