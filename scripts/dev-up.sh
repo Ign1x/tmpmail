@@ -138,18 +138,18 @@ msg() {
     en:proxy_warning_header) printf '%s' "Note: workspace HTTPS detection" ;;
     zh-CN:proxy_warning_body) printf '%s' "如果你是通过 HTTPS 反向代理访问本站，而工作区里的登录或受保护操作仍然返回 403，请把 %s 设为 true，然后执行 docker compose up -d --force-recreate api frontend。" ;;
     en:proxy_warning_body) printf '%s' "If you access this site through an HTTPS reverse proxy and workspace login or protected actions still return 403, set %s to true, then run docker compose up -d --force-recreate api frontend." ;;
-    zh-CN:cleanup_prompt) printf '%s' "是否顺手清理 Docker 构建垃圾和缓存？[y/N]: " ;;
-    en:cleanup_prompt) printf '%s' "Clean Docker build junk and cache now? [y/N]: " ;;
+    zh-CN:cleanup_prompt) printf '%s' "是否顺手清理 TmpMail 产生的 Docker 垃圾镜像？[y/N]: " ;;
+    en:cleanup_prompt) printf '%s' "Clean TmpMail Docker junk images now? [y/N]: " ;;
     zh-CN:cleanup_invalid) printf '%s' "请输入 y 或 n" ;;
     en:cleanup_invalid) printf '%s' "enter y or n" ;;
-    zh-CN:cleanup_running) printf '%s' "正在清理 Docker 构建缓存和悬空镜像..." ;;
-    en:cleanup_running) printf '%s' "Cleaning Docker build cache and dangling images..." ;;
-    zh-CN:cleanup_done) printf '%s' "Docker 构建垃圾和缓存已清理完成。" ;;
-    en:cleanup_done) printf '%s' "Docker build junk and cache cleanup finished." ;;
-    zh-CN:cleanup_failed) printf '%s' "Docker 构建垃圾和缓存清理失败，但当前服务已经启动完成。" ;;
-    en:cleanup_failed) printf '%s' "Docker build junk/cache cleanup failed, but the services are already up." ;;
-    zh-CN:cleanup_skipped) printf '%s' "已跳过 Docker 构建垃圾和缓存清理。" ;;
-    en:cleanup_skipped) printf '%s' "Skipped Docker build junk and cache cleanup." ;;
+    zh-CN:cleanup_running) printf '%s' "正在清理 TmpMail 产生的悬空镜像..." ;;
+    en:cleanup_running) printf '%s' "Cleaning TmpMail dangling images..." ;;
+    zh-CN:cleanup_done) printf '%s' "TmpMail 的 Docker 垃圾镜像已清理完成。" ;;
+    en:cleanup_done) printf '%s' "TmpMail Docker junk images cleanup finished." ;;
+    zh-CN:cleanup_failed) printf '%s' "TmpMail 的 Docker 垃圾镜像清理失败，但当前服务已经启动完成。" ;;
+    en:cleanup_failed) printf '%s' "TmpMail Docker junk image cleanup failed, but the services are already up." ;;
+    zh-CN:cleanup_skipped) printf '%s' "已跳过 TmpMail 的 Docker 垃圾镜像清理。" ;;
+    en:cleanup_skipped) printf '%s' "Skipped TmpMail Docker junk image cleanup." ;;
     zh-CN:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST 仍然为空。" ;;
     en:mail_exchange_empty) printf '%s' "TMPMAIL_MAIL_EXCHANGE_HOST is empty." ;;
     zh-CN:mail_exchange_empty_hint) printf '%s' "请先在 %s 中填写一个稳定的公网 MX 主机名，例如 mail.example.com，然后重新执行本命令。" ;;
@@ -665,12 +665,12 @@ prompt_cleanup_after_startup() {
 
 cleanup_startup_junk() {
   local cleanup_ok="true"
+  local compose_project_name
 
   say cleanup_running
-  if ! docker builder prune -f; then
-    cleanup_ok="false"
-  fi
-  if ! docker image prune -f; then
+  compose_project_name="${COMPOSE_PROJECT_NAME:-$(basename "$ROOT_DIR")}"
+
+  if ! docker image prune -f --filter "label=com.docker.compose.project=${compose_project_name}"; then
     cleanup_ok="false"
   fi
 
