@@ -3673,10 +3673,7 @@ export default function DomainManagementPage({
                 </Panel>
 
                 {mailboxAccounts.length === 0 ? (
-                  <EmptyState
-                    title={ta("mailboxEmptyTitle")}
-                    description={ta("mailboxEmptyDescription")}
-                  />
+                  <EmptyState title={ta("mailboxEmptyTitle")} />
                 ) : (
                   <div className="grid gap-6 xl:grid-cols-[19rem_minmax(0,1fr)]">
                     <Panel className="h-fit">
@@ -3767,10 +3764,7 @@ export default function DomainManagementPage({
                           )
                         ) : (
                           <div className="p-5">
-                            <EmptyState
-                              title={ta("mailboxMessagesEmptyTitle")}
-                              description={ta("mailboxMessagesEmptyDescription")}
-                            />
+                            <EmptyState title={ta("mailboxMessagesEmptyTitle")} />
                           </div>
                         )}
                       </div>
@@ -3953,9 +3947,6 @@ export default function DomainManagementPage({
                             size="sm"
                             classNames={TM_INPUT_CLASSNAMES}
                           />
-                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                            {ta("cloudflareTokenHint")}
-                          </p>
                         </div>
 
                         <div className="flex items-center justify-between gap-4 rounded-2xl border border-slate-200/70 bg-white/55 p-4 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35">
@@ -4016,9 +4007,6 @@ export default function DomainManagementPage({
                             <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                               {settingsDraft.systemEnabled ? ta("systemEnabledOn") : ta("systemEnabledOff")}
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                              {ta("systemEnabledDescription")}
-                            </p>
                           </div>
 
                           <label className={`inline-flex items-center ${isUpdatingSystemEnabled ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}>
@@ -4073,9 +4061,6 @@ export default function DomainManagementPage({
                           size="sm"
                           classNames={TM_INPUT_CLASSNAMES}
                         />
-                        <p className="text-sm leading-6 text-slate-500 dark:text-slate-400">
-                          {ta("brandingLogoUrlDescription")}
-                        </p>
                       </div>
 
                       <div className="rounded-[1.6rem] border border-slate-200/80 bg-slate-50/85 p-4 shadow-sm dark:border-slate-800 dark:bg-slate-950/60">
@@ -4092,9 +4077,6 @@ export default function DomainManagementPage({
                             <div className="truncate text-base font-semibold text-slate-950 dark:text-white">
                               {draftBranding.brandName}
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                              {ta("brandingPreviewDescription")}
-                            </p>
                           </div>
                         </div>
                       </div>
@@ -4153,9 +4135,6 @@ export default function DomainManagementPage({
                               <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                                 {settingsDraft.registrationSettings.openRegistrationEnabled ? ta("openRegistrationOn") : ta("openRegistrationOff")}
                               </div>
-                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                                {ta("openRegistrationDescription")}
-                              </p>
                             </div>
 
                             <label className="inline-flex cursor-pointer items-center">
@@ -4184,9 +4163,6 @@ export default function DomainManagementPage({
                                   ? ta("inviteCodeRequiredOn")
                                   : ta("inviteCodeRequiredOff")}
                               </div>
-                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                                {ta("inviteCodeRequiredDescription")}
-                              </p>
                             </div>
 
                             <label className="inline-flex cursor-pointer items-center">
@@ -4214,9 +4190,6 @@ export default function DomainManagementPage({
                                 <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                                   {ta("inviteCodePanelTitle")}
                                 </div>
-                                <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                                  {ta("inviteCodePanelDescription")}
-                                </p>
                               </div>
                               <Button
                                 size="sm"
@@ -4269,9 +4242,6 @@ export default function DomainManagementPage({
                                     <div className="text-sm font-medium text-emerald-900 dark:text-emerald-100">
                                       {ta("inviteCodeLatestTitle", { name: pendingInviteCode.code.name })}
                                     </div>
-                                    <p className="mt-1 text-xs leading-6 text-emerald-700 dark:text-emerald-200">
-                                      {ta("inviteCodeLatestDescription")}
-                                    </p>
                                     <div className="mt-3 break-all rounded-2xl bg-white/80 px-3 py-2 font-mono text-sm text-emerald-900 shadow-sm dark:bg-slate-950/60 dark:text-emerald-100">
                                       {pendingInviteCode.inviteCode}
                                     </div>
@@ -4292,11 +4262,7 @@ export default function DomainManagementPage({
                             )}
 
                             {adminInviteCodes.length === 0 ? (
-                              <EmptyState
-                                compact
-                                title={ta("inviteCodeEmptyTitle")}
-                                description={ta("inviteCodeEmptyDescription")}
-                              />
+                              <EmptyState compact title={ta("inviteCodeEmptyTitle")} />
                             ) : (
                               <div className="space-y-3">
                                 {adminInviteCodes.map((code) => (
@@ -4363,7 +4329,6 @@ export default function DomainManagementPage({
                           <Input
                             label={ta("allowedEmailSuffixesLabel")}
                             placeholder={ta("allowedEmailSuffixesPlaceholder")}
-                            description={ta("allowedEmailSuffixesDescription")}
                             value={settingsDraft.registrationSettings.allowedEmailSuffixes.join(", ")}
                             onValueChange={(value) =>
                               updateAllowedEmailSuffixesDraft(parseSuffixList(value))
@@ -4383,9 +4348,6 @@ export default function DomainManagementPage({
                               <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                                 {settingsDraft.registrationSettings.emailOtp.enabled ? ta("emailOtpEnabledOn") : ta("emailOtpEnabledOff")}
                               </div>
-                              <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                                {ta("emailOtpDescription")}
-                              </p>
                             </div>
 
                             <label className="inline-flex cursor-pointer items-center">
@@ -4422,10 +4384,6 @@ export default function DomainManagementPage({
 
                           {settingsDraft.registrationSettings.emailOtp.enabled && (
                             <>
-                              <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
-                                {ta("emailOtpAutoTemplateHint")}
-                              </div>
-
                               <div className="grid gap-4 md:grid-cols-2">
                                 <Input
                                   label={ta("emailOtpTtlLabel")}
@@ -4534,14 +4492,7 @@ export default function DomainManagementPage({
                                 ? ta("smtpConfiguredOn")
                                 : ta("smtpConfiguredOff")}
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                              {ta("smtpSettingsDescription")}
-                            </p>
                           </div>
-                        </div>
-
-                        <div className="rounded-2xl border border-slate-200/70 bg-white/55 p-4 text-sm leading-6 text-slate-600 backdrop-blur-sm dark:border-slate-800/70 dark:bg-slate-900/35 dark:text-slate-300">
-                          {ta("smtpSettingsHint")}
                         </div>
 
                         <div className="grid gap-4 md:grid-cols-2">
@@ -4636,35 +4587,28 @@ export default function DomainManagementPage({
                             size="sm"
                             classNames={TM_INPUT_CLASSNAMES}
                           />
-                          <div className="space-y-1.5">
-                            <Input
-                              label={ta("smtpPasswordLabel")}
-                              type="password"
-                              placeholder={
-                                settingsDraft.smtp.passwordConfigured
-                                  ? ta("smtpPasswordPlaceholderConfigured")
-                                  : ta("smtpPasswordPlaceholder")
-                              }
-                              value={settingsDraft.smtp.password || ""}
-                              onValueChange={(value) =>
-                                setSettingsDraft((current) => ({
-                                  ...current,
-                                  smtp: {
-                                    ...current.smtp,
-                                    password: value || undefined,
-                                  },
-                                }))
-                              }
-                              variant="bordered"
-                              size="sm"
-                              classNames={TM_INPUT_CLASSNAMES}
-                            />
-                            <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                              {settingsDraft.smtp.passwordConfigured
-                                ? ta("smtpPasswordConfiguredHint")
-                                : ta("smtpPasswordHint")}
-                            </p>
-                          </div>
+                          <Input
+                            label={ta("smtpPasswordLabel")}
+                            type="password"
+                            placeholder={
+                              settingsDraft.smtp.passwordConfigured
+                                ? ta("smtpPasswordPlaceholderConfigured")
+                                : ta("smtpPasswordPlaceholder")
+                            }
+                            value={settingsDraft.smtp.password || ""}
+                            onValueChange={(value) =>
+                              setSettingsDraft((current) => ({
+                                ...current,
+                                smtp: {
+                                  ...current.smtp,
+                                  password: value || undefined,
+                                },
+                              }))
+                            }
+                            variant="bordered"
+                            size="sm"
+                            classNames={TM_INPUT_CLASSNAMES}
+                          />
                           <Input
                             label={ta("smtpFromAddressLabel")}
                             placeholder="no-reply@example.com"
@@ -4700,14 +4644,6 @@ export default function DomainManagementPage({
                             classNames={TM_INPUT_CLASSNAMES}
                           />
                         </div>
-
-                        <p className="px-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
-                          {settingsDraft.smtp.security === "starttls"
-                            ? ta("smtpSecurityStarttlsHint")
-                            : settingsDraft.smtp.security === "tls"
-                              ? ta("smtpSecurityTlsHint")
-                              : ta("smtpSecurityPlainHint")}
-                        </p>
                       </div>
                     </Panel>
                   </div>
@@ -4781,9 +4717,6 @@ export default function DomainManagementPage({
                           <div className="text-sm font-medium text-slate-800 dark:text-slate-100">
                             {settingsDraft.registrationSettings.linuxDo.enabled ? ta("linuxDoEnabledOn") : ta("linuxDoEnabledOff")}
                           </div>
-                          <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                            {ta("linuxDoDescription")}
-                          </p>
                         </div>
 
                         <label className="inline-flex cursor-pointer items-center">
@@ -4814,9 +4747,6 @@ export default function DomainManagementPage({
                             <div className="text-sm font-medium text-slate-900 dark:text-white">
                               {ta("linuxDoQuickstartTitle")}
                             </div>
-                            <p className="mt-1 text-sm leading-6 text-slate-600 dark:text-slate-300">
-                              {ta("linuxDoQuickstartDescription")}
-                            </p>
                           </div>
                           <a
                             href={LINUX_DO_CONNECT_PORTAL_URL}
@@ -4833,9 +4763,6 @@ export default function DomainManagementPage({
                         <div className="text-sm font-medium text-slate-900 dark:text-white">
                           {ta("linuxDoReferenceTitle")}
                         </div>
-                        <p className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">
-                          {ta("linuxDoReferenceDescription")}
-                        </p>
                         <div className="mt-3 grid gap-3 md:grid-cols-2">
                           {linuxDoReferenceItems.map((item) => (
                             <div
@@ -4851,68 +4778,53 @@ export default function DomainManagementPage({
                             </div>
                           ))}
                         </div>
-                        <p className="mt-3 text-xs leading-6 text-slate-500 dark:text-slate-400">
-                          {ta("linuxDoCallbackUrlHint")}
-                        </p>
                       </div>
 
                       <div className="grid gap-4 md:grid-cols-2">
-                        <div className="space-y-1.5">
-                          <Input
-                            label={ta("linuxDoClientIdLabel")}
-                            value={settingsDraft.registrationSettings.linuxDo.clientId || ""}
-                            onValueChange={(value) =>
-                              setSettingsDraft((current) => ({
-                                ...current,
-                                registrationSettings: {
-                                  ...current.registrationSettings,
-                                  linuxDo: {
-                                    ...current.registrationSettings.linuxDo,
-                                    clientId: value || undefined,
-                                  },
+                        <Input
+                          label={ta("linuxDoClientIdLabel")}
+                          value={settingsDraft.registrationSettings.linuxDo.clientId || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              registrationSettings: {
+                                ...current.registrationSettings,
+                                linuxDo: {
+                                  ...current.registrationSettings.linuxDo,
+                                  clientId: value || undefined,
                                 },
-                              }))
-                            }
-                            variant="bordered"
-                            size="sm"
-                            classNames={TM_INPUT_CLASSNAMES}
-                          />
-                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                            {ta("linuxDoClientIdHint")}
-                          </p>
-                        </div>
-                        <div className="space-y-1.5">
-                          <Input
-                            label={ta("linuxDoClientSecretLabel")}
-                            type="password"
-                            placeholder={
-                              settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
-                                ? ta("linuxDoClientSecretPlaceholderConfigured")
-                                : ta("linuxDoClientSecretPlaceholder")
-                            }
-                            value={settingsDraft.registrationSettings.linuxDo.clientSecret || ""}
-                            onValueChange={(value) =>
-                              setSettingsDraft((current) => ({
-                                ...current,
-                                registrationSettings: {
-                                  ...current.registrationSettings,
-                                  linuxDo: {
-                                    ...current.registrationSettings.linuxDo,
-                                    clientSecret: value || undefined,
-                                  },
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
+                        <Input
+                          label={ta("linuxDoClientSecretLabel")}
+                          type="password"
+                          placeholder={
+                            settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
+                              ? ta("linuxDoClientSecretPlaceholderConfigured")
+                              : ta("linuxDoClientSecretPlaceholder")
+                          }
+                          value={settingsDraft.registrationSettings.linuxDo.clientSecret || ""}
+                          onValueChange={(value) =>
+                            setSettingsDraft((current) => ({
+                              ...current,
+                              registrationSettings: {
+                                ...current.registrationSettings,
+                                linuxDo: {
+                                  ...current.registrationSettings.linuxDo,
+                                  clientSecret: value || undefined,
                                 },
-                              }))
-                            }
-                            variant="bordered"
-                            size="sm"
-                            classNames={TM_INPUT_CLASSNAMES}
-                          />
-                          <p className="px-1 text-xs text-slate-500 dark:text-slate-400">
-                            {settingsDraft.registrationSettings.linuxDo.clientSecretConfigured
-                              ? ta("linuxDoClientSecretConfiguredHint")
-                              : ta("linuxDoClientSecretHint")}
-                          </p>
-                        </div>
+                              },
+                            }))
+                          }
+                          variant="bordered"
+                          size="sm"
+                          classNames={TM_INPUT_CLASSNAMES}
+                        />
                       </div>
                     </div>
                   </Panel>
@@ -4990,9 +4902,6 @@ export default function DomainManagementPage({
                         </Button>
                       </div>
                     </div>
-                    <p className="px-1 text-xs leading-5 text-slate-500 dark:text-slate-400">
-                      {ts("domainInputDescription")}
-                    </p>
                   </div>
                 </Panel>
 
@@ -5036,11 +4945,6 @@ export default function DomainManagementPage({
                                   )}
                                 </div>
 
-                                {isSharedReadonlyDomain && (
-                                  <div className="text-xs text-slate-500 dark:text-slate-400">
-                                    {ts("domainSharedReadonlyDescription")}
-                                  </div>
-                                )}
                               </div>
 
                               {canManageDomain && (
@@ -5183,10 +5087,7 @@ export default function DomainManagementPage({
 
                 {/* User list */}
                 {adminUsers.length === 0 ? (
-                  <EmptyState
-                    title={ta("userEmptyTitle")}
-                    description={ta("userEmptyDescription")}
-                  />
+                  <EmptyState title={ta("userEmptyTitle")} />
                 ) : (
                   <Panel>
                     <div className="divide-y divide-slate-100/80 dark:divide-slate-800/60">
@@ -5308,9 +5209,6 @@ export default function DomainManagementPage({
                               count: adminAccessKeys.length,
                               limit: settingsDraft.userLimits.apiKeyLimit,
                             })}
-                          </div>
-                          <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                            {ta("apiKeyVisibilityHint")}
                           </div>
                         </div>
 
@@ -5534,9 +5432,6 @@ export default function DomainManagementPage({
             <h2 className="text-center text-xl font-semibold text-slate-950 dark:text-white">
               {ts("domainBatchTitle")}
             </h2>
-            <p className="mt-2 text-center text-sm leading-6 text-slate-500 dark:text-slate-400">
-              {ts("domainBatchDialogDescription")}
-            </p>
           </ModalHeader>
 
           <ModalBody className="space-y-4 bg-slate-50/65 px-6 py-5 dark:bg-transparent">
@@ -5544,7 +5439,6 @@ export default function DomainManagementPage({
               <Select
                 label={ts("domainBatchRootLabel")}
                 placeholder={ts("domainBatchRootPlaceholder")}
-                description={ts("domainBatchRootDescription")}
                 selectedKeys={batchDomainRootInput ? [batchDomainRootInput] : []}
                 onSelectionChange={(keys) => {
                   const [value] = Array.from(keys).map(String)
@@ -5574,16 +5468,6 @@ export default function DomainManagementPage({
                               ? ts("cloudflareZoneApiOutdated")
                               : ts("domainBatchNoSecondLevelDomain")}
                     </div>
-                    <p className="mt-1 text-sm leading-6 text-slate-500 dark:text-slate-400">
-                      {cloudflareZonesLoading
-                        ? ts("cloudflareZoneLoadingDesc")
-                        : cloudflareZoneLoadError ||
-                          (!canBatchCreateManagedDomains
-                            ? ts("domainBatchRequiresCloudflareDesc")
-                            : cloudflareZonesRequireApiUpdate
-                              ? ts("cloudflareZoneApiOutdatedDesc")
-                              : ts("domainBatchNoSecondLevelDomainDesc"))}
-                    </p>
                   </div>
 
                   {canBatchCreateManagedDomains ? (
@@ -5608,7 +5492,6 @@ export default function DomainManagementPage({
               <Input
                 label={ts("domainBatchPrefixLabel")}
                 placeholder={ts("domainBatchPrefixPlaceholder")}
-                description={ts("domainBatchPrefixDescription")}
                 value={batchDomainPrefixInput}
                 onValueChange={setBatchDomainPrefixInput}
                 variant="bordered"
@@ -5623,10 +5506,6 @@ export default function DomainManagementPage({
                 onValueChange={setBatchDomainRandomLengthInput}
                 min={MIN_BATCH_DOMAIN_RANDOM_LENGTH}
                 max={MAX_BATCH_DOMAIN_RANDOM_LENGTH}
-                description={ts("domainBatchRandomLengthDescription", {
-                  min: MIN_BATCH_DOMAIN_RANDOM_LENGTH,
-                  max: MAX_BATCH_DOMAIN_RANDOM_LENGTH,
-                })}
                 variant="bordered"
                 size="sm"
                 classNames={TM_INPUT_CLASSNAMES}
@@ -5641,20 +5520,11 @@ export default function DomainManagementPage({
               onValueChange={setBatchDomainCountInput}
               min={1}
               max={MAX_BATCH_MANAGED_DOMAINS}
-              description={ts("domainBatchCountDescription", {
-                count: MAX_BATCH_MANAGED_DOMAINS,
-              })}
               variant="bordered"
               size="sm"
               classNames={TM_INPUT_CLASSNAMES}
               isDisabled={isCreatingDomainBatch}
             />
-
-            {!canBatchCreateManagedDomains ? (
-              <p className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm leading-6 text-amber-700 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
-                {ts("domainBatchRequiresCloudflareDesc")}
-              </p>
-            ) : null}
 
             {batchDomainProgress ? (
               <div className="rounded-[1.5rem] border border-emerald-200/80 bg-emerald-50/80 p-4 dark:border-emerald-900/40 dark:bg-emerald-950/20">

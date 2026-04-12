@@ -205,9 +205,6 @@ export default function LoginModal({ isOpen, onClose, accountAddress }: LoginMod
                   <div>
                     <div className="tm-section-label">{t("previewLabel")}</div>
                     <div className="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">{previewAddress}</div>
-                    <p className="mt-2 text-sm leading-7 text-slate-500 dark:text-slate-400">
-                      {loginMode === "split" ? t("splitModeHint") : t("fullModeHint")}
-                    </p>
                   </div>
                   <div className="inline-flex rounded-full border border-slate-200 bg-slate-100/90 p-1 dark:border-slate-800 dark:bg-slate-900/70">
                     <button

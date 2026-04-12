@@ -332,9 +332,6 @@ export default function AccountModal({ isOpen, onClose }: AccountModalProps) {
                     <div className="mt-2 text-lg font-semibold text-slate-900 dark:text-slate-100">
                       {previewAddress || t("autoModeLabel")}
                     </div>
-                    <p className="mt-2 text-sm leading-7 text-slate-500 dark:text-slate-400">
-                      {isAutoGenerateMode ? t("autoModeHint") : t("manualModeHint")}
-                    </p>
                   </div>
                   <div className="tm-chip-strong">
                     <Sparkles size={13} />
@@ -421,7 +418,6 @@ export default function AccountModal({ isOpen, onClose }: AccountModalProps) {
                           : t("otpSend")}
                       </Button>
                     </div>
-                    <p className="text-xs text-slate-500 dark:text-slate-400">{t("otpHint")}</p>
                   </div>
                 )}
               </div>

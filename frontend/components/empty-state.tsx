@@ -66,17 +66,14 @@ export default function EmptyState({
     {
       number: "01",
       title: t("stepCreateTitle"),
-      description: t("stepCreateDescription"),
     },
     {
       number: "02",
       title: t("stepReceiveTitle"),
-      description: t("stepReceiveDescription"),
     },
     {
       number: "03",
       title: t("stepResetTitle"),
-      description: t("stepResetDescription"),
     },
   ]
 
@@ -199,10 +196,6 @@ export default function EmptyState({
                   {t("domainSetupHint")}
                 </p>
               )}
-
-              <p className="mt-5 max-w-2xl text-sm leading-7 text-slate-500 dark:text-slate-400">
-                {t("ctaHint")}
-              </p>
             </div>
 
             <div className="min-w-0 space-y-4">
@@ -225,9 +218,6 @@ export default function EmptyState({
                       <p className="text-xs font-semibold uppercase tracking-[0.16em] text-slate-400 dark:text-slate-500">
                         {t("flowTitle")}
                       </p>
-                      <p className="mt-2 text-sm leading-7 text-slate-600 dark:text-slate-300">
-                        {t("flowDescription")}
-                      </p>
                     </div>
                   </div>
 
@@ -245,9 +235,6 @@ export default function EmptyState({
                             <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                               {step.title}
                             </h4>
-                            <p className="mt-1 text-sm leading-7 text-slate-600 dark:text-slate-300">
-                              {step.description}
-                            </p>
                           </div>
                         </div>
                       </div>

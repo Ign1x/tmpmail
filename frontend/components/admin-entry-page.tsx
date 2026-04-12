@@ -769,9 +769,6 @@ export default function AdminEntryPage({
                     <h1 className="mt-3 text-5xl font-semibold tracking-[-0.06em] text-slate-950 dark:text-white sm:text-6xl lg:text-7xl">
                       {brandName}
                     </h1>
-                    <p className="mt-4 max-w-xl text-sm leading-7 text-slate-600 dark:text-slate-300 sm:text-[15px]">
-                      {replaceBrandNameText(ta("entryHeroDescription"), brandName)}
-                    </p>
                   </div>
 
                   <div className="hidden shrink-0 lg:block">
@@ -782,15 +779,9 @@ export default function AdminEntryPage({
                 </div>
 
                 <div className="rounded-[2rem] border border-white/75 bg-white/72 p-5 shadow-sm backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/50">
-                  <div className="text-[11px] font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">
-                    {ta("entryPanelLabel")}
-                  </div>
-                  <div className="mt-3 text-xl font-semibold tracking-[-0.03em] text-slate-950 dark:text-white sm:text-2xl">
+                  <div className="text-xl font-semibold tracking-[-0.03em] text-slate-950 dark:text-white sm:text-2xl">
                     {ta("entryPanelTitle")}
                   </div>
-                  <p className="mt-3 max-w-2xl text-sm leading-7 text-slate-600 dark:text-slate-300">
-                    {ta("entryPanelDescription")}
-                  </p>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-3">
@@ -853,7 +844,6 @@ export default function AdminEntryPage({
                 <ShieldAlert size={16} className="mt-0.5 shrink-0" />
                 <div className="min-w-0">
                   <div className="font-semibold">{ta("insecureContextTitle")}</div>
-                  <p className="mt-1 leading-6 opacity-90">{ta("insecureContextDescription")}</p>
                 </div>
               </div>
             )}
@@ -984,7 +974,6 @@ export default function AdminEntryPage({
                                   : ta("registerOtpSend")}
                               </Button>
                             </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400">{ta("registerOtpHint")}</p>
                           </div>
                         )}
                         <Input
@@ -1042,7 +1031,7 @@ export default function AdminEntryPage({
 
                   <div className="flex flex-wrap items-center gap-2">
                     {canUseLinuxDo && (
-                      <div className="space-y-1">
+                      <div>
                         <Button
                           variant="flat"
                           className="h-10 rounded-full border border-emerald-200 bg-emerald-50 px-4 font-medium text-emerald-700 transition-all duration-200 hover:bg-emerald-100 dark:border-emerald-900/60 dark:bg-emerald-950/30 dark:text-emerald-200 dark:hover:bg-emerald-950/50"
@@ -1053,11 +1042,6 @@ export default function AdminEntryPage({
                         >
                           {ta("linuxDoSubmit")}
                         </Button>
-                        {inviteCodeRequired && (
-                          <p className="text-xs text-slate-500 dark:text-slate-400">
-                            {ta("linuxDoInviteCodeHint")}
-                          </p>
-                        )}
                       </div>
                     )}
 

@@ -28,10 +28,9 @@ const INITIAL_INBOX_LOAD_GUARD_MS = 10_000
 function LoadingSkeleton({ isMobile }: { isMobile: boolean }) {
   return (
     <div className={`h-full w-full overflow-y-auto ${isMobile ? "p-2" : "p-4"}`}>
-      <div className="rounded-[1.8rem] border border-white/70 bg-white/82 p-4 shadow-[0_20px_60px_rgba(15,23,42,0.06)] backdrop-blur dark:border-slate-800/80 dark:bg-slate-950/70 dark:shadow-none">
-        <div className="h-5 w-28 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
-        <div className="mt-3 flex items-center justify-between gap-3">
-          <div className="h-8 w-24 animate-pulse rounded-2xl bg-slate-200/80 dark:bg-slate-800/80" />
+      <div className="border-b border-slate-200/80 px-1 pb-4 dark:border-slate-800/80">
+        <div className="flex items-center justify-between gap-3">
+          <div className="h-7 w-24 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
           <div className="h-8 w-20 animate-pulse rounded-full bg-slate-200/80 dark:bg-slate-800/80" />
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
@@ -263,7 +262,7 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
 
   const renderHeader = () => (
     <div className={`sticky ${isMobile ? "top-0 -mx-2 px-2" : "top-0 -mx-4 px-4"} z-10 mb-4 bg-gradient-to-b from-slate-50/95 via-slate-50/90 to-transparent pb-4 pt-1 backdrop-blur-sm dark:from-slate-950/95 dark:via-slate-950/85`}>
-      <div className="tm-glass-panel-strong rounded-[1.75rem] p-3.5 sm:p-4">
+      <div className="border-b border-slate-200/80 px-1 pb-3 dark:border-slate-800/80">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
@@ -289,7 +288,7 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
           </Button>
         </div>
 
-        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+        <div className="mt-3 flex flex-wrap items-center gap-2.5 text-xs text-slate-500 dark:text-slate-400">
           {relativeLastCheck && (
             <span className="tm-chip">
               <Clock3 size={12} />
@@ -335,7 +334,6 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
               <AlertCircle className="h-6 w-6" />
             </div>
             <p className="text-sm font-semibold text-amber-900 dark:text-amber-100">{error}</p>
-            <p className="mt-2 text-sm leading-6 text-amber-800 dark:text-amber-200">{t("errorHelp")}</p>
             <Button
               className="mt-5 rounded-full"
               color="warning"
@@ -361,7 +359,6 @@ export default function MessageList({ onSelectMessage, refreshKey }: MessageList
             <Inbox className="h-10 w-10" />
           </div>
           <h3 className="text-xl font-semibold text-slate-800 dark:text-slate-200">{t("emptyTitle")}</h3>
-          <p className="mt-2 max-w-md text-sm leading-7 text-slate-500 dark:text-slate-400">{t("emptyDesc")}</p>
           <Button
             className="mt-5 rounded-full"
             variant="flat"

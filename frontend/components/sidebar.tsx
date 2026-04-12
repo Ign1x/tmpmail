@@ -81,7 +81,6 @@ function SidebarContent({
           </div>
           <div className="min-w-0">
             <div className="truncate text-base font-semibold text-slate-900 dark:text-white">{brandName}</div>
-            <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{t("workspaceSubtitle")}</div>
           </div>
         </div>
 
@@ -91,9 +90,11 @@ function SidebarContent({
               <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
                 {isAuthenticated && currentAccount ? t("signedInState") : t("guestModeTitle")}
               </div>
-              <p className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">
-                {isAuthenticated && currentAccount ? currentAccount.address : t("guestModeDesc")}
-              </p>
+              {isAuthenticated && currentAccount ? (
+                <p className="mt-1 text-xs leading-6 text-slate-500 dark:text-slate-400">
+                  {currentAccount.address}
+                </p>
+              ) : null}
             </div>
             <div className="rounded-full border border-slate-200 bg-white/80 px-2.5 py-1 text-[11px] font-semibold text-slate-600 shadow-sm dark:border-slate-700 dark:bg-slate-950/80 dark:text-slate-300">
               {t("accountCount", { count: accounts.length })}
