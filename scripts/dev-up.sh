@@ -122,22 +122,10 @@ msg() {
     en:compat_entry_label) printf '%s' "compat" ;;
     zh-CN:api_label) printf '%s' "API" ;;
     en:api_label) printf '%s' "api" ;;
-    zh-CN:next_step_header) printf '%s' "下一步：DNS / Cloudflare 配置" ;;
-    en:next_step_header) printf '%s' "Next step: DNS / Cloudflare" ;;
-    zh-CN:dns_step_1) printf '%s' "1. 先为 %s 创建一条仅 DNS 的 A/AAAA 记录，指向当前服务器公网 IP。" ;;
-    en:dns_step_1) printf '%s' "1. Create a DNS-only A/AAAA record for %s that points to this server's public IP." ;;
-    zh-CN:dns_step_2) printf '%s' "2. 打开工作区，添加你要托管的每个域名。" ;;
-    en:dns_step_2) printf '%s' "2. Open the workspace and add each managed domain." ;;
-    zh-CN:dns_step_3) printf '%s' "3. 对每个托管域名，按工作区显示添加以下 DNS 记录：" ;;
-    en:dns_step_3) printf '%s' "3. For each managed domain, add the DNS records shown in the workspace UI:" ;;
-    zh-CN:dns_step_3_cname) printf '%s' "   - CNAME mail.<domain> -> %s" ;;
-    en:dns_step_3_cname) printf '%s' "   - CNAME mail.<domain> -> %s" ;;
-    zh-CN:dns_step_3_mx) printf '%s' "   - MX    <domain> -> %s %s" ;;
-    en:dns_step_3_mx) printf '%s' "   - MX    <domain> -> %s %s" ;;
-    zh-CN:dns_step_3_txt) printf '%s' "   - TXT   %s -> <工作区里的 verification token>" ;;
-    en:dns_step_3_txt) printf '%s' "   - TXT   %s -> <verification token from the workspace UI>" ;;
-    zh-CN:dns_step_4) printf '%s' "4. 可选：在工作区保存带有 Zone:Read 和 DNS:Edit 权限的 Cloudflare API Token，开启自动同步 DNS。" ;;
-    en:dns_step_4) printf '%s' "4. Optional: save a Cloudflare API token with Zone:Read and DNS:Edit in the workspace to enable automatic DNS sync." ;;
+    zh-CN:next_step_header) printf '%s' "下一步：先配收件主机 DNS" ;;
+    en:next_step_header) printf '%s' "Next step: configure the mail-host DNS" ;;
+    zh-CN:dns_step_1) printf '%s' "先去 DNS 服务商后台为 %s 新增记录：类型填 A，记录值填当前服务器公网 IPv4；如果你的面板支持 IPv6，再额外加一条 AAAA。主机/名称通常填完整主机名，或只填主机前缀；务必保持仅 DNS，不要开代理。" ;;
+    en:dns_step_1) printf '%s' "Create a DNS-only record for %s in your DNS provider: use type A and set the value to this server's public IPv4. If you also use IPv6, add an AAAA record too. Depending on your DNS panel, enter either the full host or just the host label, and keep it unproxied." ;;
     zh-CN:proxy_warning_header) printf '%s' "注意：工作区 HTTPS 判断" ;;
     en:proxy_warning_header) printf '%s' "Note: workspace HTTPS detection" ;;
     zh-CN:proxy_warning_body) printf '%s' "如果你是通过 HTTPS 反向代理访问本站，而工作区里的登录或受保护操作仍然返回 403，请把 %s 设为 true，然后执行 docker compose up -d --force-recreate api frontend。" ;;
@@ -728,8 +716,6 @@ frontend_port="${TMPMAIL_FRONTEND_PORT:-}"
 api_port="${TMPMAIL_PORT:-}"
 public_host="${TMPMAIL_PUBLIC_HOST:-}"
 admin_require_secure_transport="${TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT:-}"
-mail_exchange_priority="${TMPMAIL_MAIL_EXCHANGE_PRIORITY:-}"
-domain_txt_prefix="${TMPMAIL_DOMAIN_TXT_PREFIX:-}"
 admin_entry_path="${TMPMAIL_ADMIN_ENTRY_PATH:-}"
 
 if [ -z "$frontend_port" ]; then
@@ -748,14 +734,6 @@ if [ -z "$admin_require_secure_transport" ]; then
   admin_require_secure_transport="$(env_read TMPMAIL_ADMIN_REQUIRE_SECURE_TRANSPORT "$ENV_FILE" 2>/dev/null || true)"
 fi
 
-if [ -z "$mail_exchange_priority" ]; then
-  mail_exchange_priority="$(env_read TMPMAIL_MAIL_EXCHANGE_PRIORITY "$ENV_FILE" 2>/dev/null || true)"
-fi
-
-if [ -z "$domain_txt_prefix" ]; then
-  domain_txt_prefix="$(env_read TMPMAIL_DOMAIN_TXT_PREFIX "$ENV_FILE" 2>/dev/null || true)"
-fi
-
 if [ -z "$admin_entry_path" ]; then
   admin_entry_path="$(env_read TMPMAIL_ADMIN_ENTRY_PATH "$ENV_FILE" 2>/dev/null || true)"
 fi
@@ -768,10 +746,6 @@ if [ -z "$public_host" ]; then
   public_host="127.0.0.1"
 fi
 
-if [ -z "$mail_exchange_priority" ]; then
-  mail_exchange_priority="10"
-fi
-
 if [ -z "$admin_entry_path" ]; then
   admin_entry_path="/admin"
 fi
@@ -779,11 +753,6 @@ fi
 admin_require_secure_transport="$(parse_bool_setting "$admin_require_secure_transport")"
 if [ -z "$admin_require_secure_transport" ]; then
   admin_require_secure_transport="true"
-fi
-
-txt_record_name="<domain>"
-if [ -n "$domain_txt_prefix" ] && [ "$domain_txt_prefix" != "@" ]; then
-  txt_record_name="${domain_txt_prefix}.<domain>"
 fi
 
 workspace_locale_path="/zh"
@@ -798,12 +767,6 @@ printf '%-8s %s\n' "$(msg api_label):" "http://127.0.0.1:${api_port:-8080}/healt
 printf '\n== %s ==\n' "$(msg next_step_header)"
 if [ -n "$mail_exchange_host" ]; then
   sayf dns_step_1 "$mail_exchange_host"
-  say dns_step_2
-  say dns_step_3
-  sayf dns_step_3_cname "$mail_exchange_host"
-  sayf dns_step_3_mx "$mail_exchange_priority" "$mail_exchange_host"
-  sayf dns_step_3_txt "$txt_record_name"
-  say dns_step_4
 else
   say mail_exchange_empty
   sayf mail_exchange_empty_hint "$ENV_FILE"
