@@ -88,6 +88,10 @@ msg() {
     en:mx_check_ok) printf '%s' "Mail-host SMTP probe passed: %s" ;;
     zh-CN:mx_check_header) printf '%s' "错误：收件主机当前无法建立 SMTP 连接" ;;
     en:mx_check_header) printf '%s' "Error: the configured mail host is not accepting SMTP connections" ;;
+    zh-CN:mx_check_pending_header) printf '%s' "提示：收件主机 DNS 还没准备好" ;;
+    en:mx_check_pending_header) printf '%s' "Note: the configured mail host DNS is not ready yet" ;;
+    zh-CN:mx_check_pending) printf '%s' "TmpMail 已经启动完成，但 %s 目前还没有解析到可探测的 SMTP 主机；如果你还没按下面步骤配置 DNS，这属于预期现象。" ;;
+    en:mx_check_pending) printf '%s' "TmpMail is up, but %s does not resolve to a probeable SMTP host yet; this is expected if you have not finished the DNS steps below." ;;
     zh-CN:mx_check_failed) printf '%s' "TmpMail 当前不会成功接收公网来信，因为 %s:25 现在无法建立 SMTP 连接。" ;;
     en:mx_check_failed) printf '%s' "TmpMail will not receive public email right now because %s:25 is not accepting SMTP connections." ;;
     zh-CN:mx_check_detected_error) printf '%s' "脚本探测结果：%s" ;;
@@ -543,7 +547,14 @@ verify_mail_exchange_connectivity() {
       sayf mx_check_ok "${probe_result#ok:}"
       return 0
       ;;
-    resolve_failed:*|connect_failed:*)
+    resolve_failed:*)
+      printf '\n== %s ==\n' "$(msg mx_check_pending_header)" >&2
+      sayf_err mx_check_pending "$host"
+      sayf_err mx_check_detected_error "${probe_result#*:}"
+      sayf_err mx_check_dns_hint "$host"
+      return 2
+      ;;
+    connect_failed:*)
       printf '\n== %s ==\n' "$(msg mx_check_header)" >&2
       sayf_err mx_check_failed "$host"
       sayf_err mx_check_detected_error "${probe_result#*:}"
@@ -710,7 +721,6 @@ if ! verify_smtp_ingress; then
   docker_compose up -d --force-recreate inbucket
   verify_smtp_ingress
 fi
-verify_mail_exchange_connectivity "$mail_exchange_host"
 wait_for_container_ready "tmpmail-api" "api_label" 60
 wait_for_container_ready "tmpmail-frontend" "frontend_label" 90
 
@@ -802,6 +812,12 @@ fi
 if [ "$admin_require_secure_transport" != "false" ] && [ "$trust_proxy_headers" = "false" ]; then
   printf '\n== %s ==\n' "$(msg proxy_warning_header)"
   sayf proxy_warning_body "TMPMAIL_TRUST_PROXY_HEADERS"
+fi
+
+mail_exchange_probe_status=0
+verify_mail_exchange_connectivity "$mail_exchange_host" || mail_exchange_probe_status=$?
+if [ "$mail_exchange_probe_status" -eq 1 ]; then
+  exit 1
 fi
 
 if prompt_cleanup_after_startup; then
